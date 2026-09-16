@@ -1,0 +1,41 @@
+{
+  "name": "agent-router",
+  "version": "0.5.0",
+  "license": "MIT",
+  "description": "Five focused agent roles with configurable exact-model routing and local completed-turn diagnostics. Requires Claude Code Mod function hooks enabled.",
+  "author": {
+    "name": "Agent Router maintainers"
+  },
+  "userConfig": {
+    "scout_model": {
+      "type": "string",
+      "title": "Scout model",
+      "description": "Exact model identifier for read-only code discovery and research.",
+      "required": true
+    },
+    "reviewer_model": {
+      "type": "string",
+      "title": "Reviewer model",
+      "description": "Exact model identifier for read-only implementation review.",
+      "required": true
+    },
+    "security_reviewer_model": {
+      "type": "string",
+      "title": "Security reviewer model",
+      "description": "Exact model identifier for read-only security analysis.",
+      "required": true
+    },
+    "task_model": {
+      "type": "string",
+      "title": "Task model",
+      "description": "Exact model identifier for general-purpose delegated work and native Plan requests.",
+      "required": true
+    },
+    "sonic_model": {
+      "type": "string",
+      "title": "Sonic model",
+      "description": "Exact model identifier for fast, narrowly scoped delegated work.",
+      "required": true
+    }
+  }
+}

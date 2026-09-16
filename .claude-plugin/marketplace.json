@@ -1,0 +1,14 @@
+{
+  "name": "agent-router-tools",
+  "description": "Agent Router plugins for Claude Code.",
+  "owner": {
+    "name": "Agent Router maintainers"
+  },
+  "plugins": [
+    {
+      "name": "agent-router",
+      "source": "./agent-router",
+      "description": "Five focused agent roles with configurable exact-model routing and local routing diagnostics."
+    }
+  ]
+}

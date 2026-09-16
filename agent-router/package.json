@@ -1,0 +1,14 @@
+{
+  "name": "claude-code-agent-router",
+  "version": "0.5.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "test:mod": "node tests/run-mod.mjs",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": { "typescript": "5.9.3" }
+}
