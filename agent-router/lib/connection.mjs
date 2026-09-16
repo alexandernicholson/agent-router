@@ -1,3 +1,14 @@
+import { open } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { isExactModelId, isTruthy } from './routing.js';
+
+const PROVIDER_FLAGS = [
+  'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
+  'CLAUDE_CODE_USE_MANTLE', 'CLAUDE_CODE_USE_ANTHROPIC_AWS',
+  'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD', 'CLAUDE_CODE_USE_GATEWAY',
+];
+
 export function normalizeBaseUrl(value) {
   let url;
   try { url = new URL(value); } catch { throw new Error('Model discovery requires a valid ANTHROPIC_BASE_URL.'); }
@@ -33,8 +44,7 @@ function discoveryHeaders(env) {
   return headers;
 }
 
-export async function fetchModels({ env = process.env, baseUrl = env.ANTHROPIC_BASE_URL } = {}) {
-  const base = normalizeBaseUrl(baseUrl);
+async function fetchEndpointModels(env, base) {
   const headers = discoveryHeaders(env);
   const rows = new Map();
   const cursors = new Set();
@@ -76,4 +86,38 @@ export async function fetchModels({ env = process.env, baseUrl = env.ANTHROPIC_B
     cursors.add(after);
   }
   throw new Error('Gateway model catalog exceeded the pagination limit.');
+}
+
+async function readGatewayModels(env, base) {
+  if (!isTruthy(env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY) ||
+      PROVIDER_FLAGS.some(key => isTruthy(env[key])) || new URL(base).hostname === 'api.anthropic.com') return [];
+  const config = env.CLAUDE_CONFIG_DIR || join(env.HOME || env.USERPROFILE || homedir(), '.claude');
+  const file = await open(join(config, 'cache', 'gateway-models.json'), 'r');
+  try {
+    if ((await file.stat()).size > 8 * 1024 * 1024) return [];
+    const cached = JSON.parse(await file.readFile('utf8'));
+    if (normalizeBaseUrl(cached.baseUrl) !== base || !Array.isArray(cached.models)) return [];
+    return cached.models.filter(model => model && isExactModelId(model.id));
+  } finally {
+    await file.close();
+  }
+}
+
+export async function fetchModels({ env = process.env, baseUrl = env.ANTHROPIC_BASE_URL } = {}) {
+  const base = normalizeBaseUrl(baseUrl);
+  const [endpoint, discovery] = await Promise.allSettled([
+    fetchEndpointModels(env, base), readGatewayModels(env, base),
+  ]);
+  // Claude owns this optional cache, including authentication-helper discovery.
+  const cached = discovery.status === 'fulfilled' ? discovery.value : [];
+  if (endpoint.status === 'rejected' && !cached.length) throw endpoint.reason;
+  const models = endpoint.status === 'fulfilled' ? endpoint.value : [];
+  if (!cached.length) return models;
+  const ids = new Set(models.map(model => model.id));
+  for (const model of cached) {
+    if (ids.has(model.id)) continue;
+    ids.add(model.id);
+    models.push(model);
+  }
+  return models;
 }

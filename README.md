@@ -42,8 +42,13 @@ Model discovery reads these standard environment variables:
 | `ANTHROPIC_API_KEY` | Sends the `x-api-key` header when supplied |
 | `ANTHROPIC_AUTH_TOKEN` | Sends a bearer `Authorization` header when supplied |
 | `ANTHROPIC_CUSTOM_HEADERS` | Adds service-specific headers; nonempty values override matching headers case-insensitively |
+| `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` | Includes Claude Code's endpoint-matched gateway discovery cache when enabled |
 
 The discovery client sends `agent-router` as its User-Agent. Services with a specific client-header requirement can provide that header through `ANTHROPIC_CUSTOM_HEADERS`. Endpoints that allow unauthenticated model discovery can use their own authentication policy.
+
+With `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`, Agent Router combines fresh endpoint results with Claude Code's [gateway discovery cache](https://code.claude.com/docs/en/llm-gateway-protocol#model-discovery). This preserves models discovered using Claude's resolved credentials, including `apiKeyHelper`, while retaining non-Claude models from the endpoint. Fresh metadata takes precedence for duplicate IDs. If direct discovery fails, the matching cached models remain available.
+
+Claude Code owns `~/.claude/cache/gateway-models.json`; `CLAUDE_CONFIG_DIR` selects its configuration root. Agent Router reads that cache for the same endpoint and provider mode. Restart Claude Code after enabling gateway discovery so Claude can populate it.
 
 Keep credentials in your local environment or secret-management system.
 
@@ -90,7 +95,7 @@ The plugin exposes OMP-derived agents such as `agent-router:scout`. Its aliases 
 | `security-reviewer` | `agent-router:security-reviewer` |
 | `sonic` | `agent-router:sonic` |
 
-The dispatch guard enforces local named roles and validates their configured models against the endpoint's catalog. Per-role assignments take precedence over the caller's requested model. Keep `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` unset when using differentiated role models.
+The dispatch guard enforces local named roles and validates their configured models against the same discovery catalog used by the picker. Per-role assignments take precedence over the caller's requested model. Keep `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` unset when using differentiated role models.
 
 Each initialized session retains its endpoint and model-policy snapshot. You can update saved role assignments with `/agent-models` while routing continues with that snapshot. Start a new session to apply the updated assignments. A fresh session becomes routing-ready once its five roles are configured.
 

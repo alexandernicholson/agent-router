@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fetchModels, normalizeBaseUrl } from '../lib/connection.mjs';
 
 async function withGateway(handler, run) {
@@ -22,6 +25,14 @@ async function withGateway(handler, run) {
 function catalog(response, payload = { data: [{ id: 'vendor/code-v1' }] }) {
   response.writeHead(200, { 'content-type': 'application/json' });
   response.end(JSON.stringify(payload));
+}
+
+async function discoveryCache(t, baseUrl, models) {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-router-discovery-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  await mkdir(join(directory, 'cache'));
+  await writeFile(join(directory, 'cache', 'gateway-models.json'), JSON.stringify({ baseUrl, fetchedAt: Date.now(), models }));
+  return { CLAUDE_CONFIG_DIR: directory, CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '1' };
 }
 
 test('explicit unauthenticated gateways discover models without credential headers', async () => {
@@ -141,5 +152,55 @@ test('network failures and malformed responses never expose credentials or respo
       assert.doesNotMatch(error.message, /fake-secret-token/);
       return true;
     });
+  });
+});
+
+test('gateway discovery merges native choices with fresh non-Claude endpoint models', async t => {
+  const fresh = [{ id: 'vendor/code-v1' }, { id: 'gateway/claude-review', display_name: 'Fresh review' }];
+  await withGateway((req, res) => catalog(res, { data: fresh }), async baseUrl => {
+    const nativeOnly = { id: 'gateway/claude-research', display_name: 'Gateway research' };
+    const env = await discoveryCache(t, `${baseUrl}/`, [
+      { id: 'gateway/claude-review', display_name: 'Older review' }, nativeOnly, nativeOnly,
+    ]);
+    assert.deepEqual(await fetchModels({ env, baseUrl }), [...fresh, nativeOnly]);
+  });
+});
+
+test('gateway discovery retains native choices when direct discovery is refused', async t => {
+  await withGateway((req, res) => { res.writeHead(403); res.end(); }, async baseUrl => {
+    const models = [{ id: 'gateway/claude-review', display_name: 'Native authenticated choice' }];
+    const env = await discoveryCache(t, baseUrl, models);
+    assert.deepEqual(await fetchModels({ env, baseUrl }), models);
+  });
+});
+
+test('gateway discovery cache is ignored when the flag is disabled', async t => {
+  await withGateway((req, res) => { res.writeHead(403); res.end(); }, async baseUrl => {
+    const env = await discoveryCache(t, baseUrl, [{ id: 'gateway/claude-review' }]);
+    env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = '0';
+    await assert.rejects(fetchModels({ env, baseUrl }), /HTTP 403/);
+  });
+});
+
+test('gateway discovery cache stays bound to its endpoint path', async t => {
+  await withGateway((req, res) => { res.writeHead(403); res.end(); }, async baseUrl => {
+    const env = await discoveryCache(t, `${baseUrl}/first`, [{ id: 'gateway/claude-review' }]);
+    await assert.rejects(fetchModels({ env, baseUrl: `${baseUrl}/second` }), /HTTP 403/);
+  });
+});
+
+test('gateway discovery recovers from a corrupt optional cache through the endpoint', async t => {
+  await withGateway((req, res) => catalog(res), async baseUrl => {
+    const env = await discoveryCache(t, baseUrl, []);
+    await writeFile(join(env.CLAUDE_CONFIG_DIR, 'cache', 'gateway-models.json'), '{');
+    assert.deepEqual(await fetchModels({ env, baseUrl }), [{ id: 'vendor/code-v1' }]);
+  });
+});
+
+test('gateway discovery cache is ignored after selecting a third-party provider', async t => {
+  await withGateway((req, res) => { res.writeHead(403); res.end(); }, async baseUrl => {
+    const env = await discoveryCache(t, baseUrl, [{ id: 'gateway/claude-review' }]);
+    env.CLAUDE_CODE_USE_BEDROCK = '1';
+    await assert.rejects(fetchModels({ env, baseUrl }), /HTTP 403/);
   });
 });
