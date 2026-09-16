@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import { once } from 'node:events';
+import { createServer } from 'node:http';
 import { modelOptions } from './fixtures.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -109,4 +111,28 @@ test('bridge rejects CLI data overrides and oversized multibyte stdin', t => {
   assert.equal(inputResult.status, 1);
   assert.equal(inputResult.stdout, '');
   assert.equal(existsSync(data), false);
+});
+
+test('catalog discovery works before installation and role configuration', async t => {
+  const f = fixture(t);
+  const server = createServer((request, response) => {
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify({ data: [{ id: 'vendor/catalog-choice-v1', display_name: 'Catalog choice' }], has_more: false }));
+  });
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const child = spawn(process.execPath, [bridge], {
+    env: { ...f.env, ANTHROPIC_BASE_URL: `http://127.0.0.1:${server.address().port}` },
+    timeout: 10_000,
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk; });
+  child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
+  child.stdin.end(JSON.stringify({ action: 'catalog' }));
+  const [code] = await once(child, 'close');
+  assert.equal(code, 0, stderr);
+  assert.deepEqual(JSON.parse(stdout).models.map(model => model.id), ['vendor/catalog-choice-v1']);
+  assert.equal(existsSync(join(f.config, 'plugins', 'data')), false);
 });

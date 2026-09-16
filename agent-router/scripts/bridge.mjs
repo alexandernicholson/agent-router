@@ -19,7 +19,7 @@ try {
   }
   input = JSON.parse(raw);
   const env = { ...process.env };
-  if (env.CLAUDE_PLUGIN_DATA === undefined) {
+  if (input?.action !== 'catalog' && env.CLAUDE_PLUGIN_DATA === undefined) {
     // Function-hook process.run does not inject shell-hook variables. Resolve
     // the same documented data directory from Claude's installed plugin ID.
     // Never derive identity from a versioned cache-directory naming convention.

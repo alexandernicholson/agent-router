@@ -11,7 +11,7 @@ export function policyFromOptions(options = {}) {
     throw new Error('Agent Router options must be an object.');
   }
   const missing = ROLES.map(role => `${role.replaceAll('-', '_')}_model`).filter(key => typeof options[key] !== 'string' || !options[key].trim());
-  if (missing.length) throw new Error(`Configure an exact model ID for each role: ${missing.join(', ')}. Use /plugin configure agent-router@agent-router-tools.`);
+  if (missing.length) throw new Error(`Choose a model for each role in /agent-models: ${missing.join(', ')}.`);
   const roles = {};
   for (const role of ROLES) {
     const key = `${role.replaceAll('-', '_')}_model`;

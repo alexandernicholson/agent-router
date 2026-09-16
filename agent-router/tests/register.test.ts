@@ -1,4 +1,4 @@
-import { test, expect, tier } from 'claude-code/testing';
+import { test, expect, mock, tier } from 'claude-code/testing';
 import type { Engine } from 'claude-code/testing';
 import type { On, AgentSpawnInput } from 'claude-code';
 
@@ -19,6 +19,9 @@ function agentInput(input: Partial<AgentSpawnInput>): AgentSpawnInput {
 }
 
 async function start($: Engine, on: On, failBridge = false, agents: Array<{ agentId: string; role: string; effectiveModel: string }> = [], calls: Record<string, unknown>[] = []) {
+  mock.store(on);
+  mock.env(on, {});
+  on('command.register', ($, e) => ({ value: { command: e.name } }));
   on('session.id', () => ({ value: 'session' }));
   on('session.start', ($, e) => ({ cwd: e.cwd }));
   on('ui.status', () => ({ value: undefined }));

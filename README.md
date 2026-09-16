@@ -4,7 +4,7 @@ Agent Router is a Claude Code Mod that assigns an exact model to each subagent r
 
 ## Capabilities
 
-- Configure separate models for scouting, code review, security review, delegated tasks, and mechanical work.
+- Choose separate models for scouting, code review, security review, delegated tasks, and mechanical work through a searchable endpoint catalog.
 - Route built-in `Explore` and `general-purpose` calls to OMP-derived roles, and select the task model for Claude's built-in `Plan` agent.
 - Apply model assignments at `agent.spawn` and maintain them through child `turn.step` requests.
 - Pin endpoint and model configuration for each session.
@@ -16,7 +16,7 @@ Agent Router is a Claude Code Mod that assigns an exact model to each subagent r
 - **Claude Code with function hooks enabled.** Agent Router is verified with Claude Code **2.1.272**. Function hooks are an early-access API; keep your Claude version and generated type declarations aligned when updating the Mod.
 - **Node.js 22 or newer**, available on `PATH`.
 - An explicitly configured **Anthropic-compatible endpoint** that supports inference and model discovery through `GET /v1/models`.
-- An exact model ID for each of the five roles.
+- Five role assignments, selected from your endpoint's catalog with `/agent-models`.
 
 Remote endpoints use HTTPS. Local endpoints can use HTTP on loopback addresses, including `localhost`, `127.0.0.1`, and `::1`.
 
@@ -54,10 +54,16 @@ Inside Claude Code:
 ```text
 /plugin marketplace add alexandernicholson/agent-router
 /plugin install agent-router@agent-router-tools
-/plugin configure agent-router@agent-router-tools
+/agent-models
 ```
 
-The configuration dialog collects the model IDs used by each role. Choose IDs advertised by your endpoint's `/v1/models` response, then start a fresh Claude session.
+Run `/agent-models` to open the model picker. Select a role, search by model name, ID, or description, then select a catalog entry. Each selection saves through Claude Code's standard configuration system and advances to the next unassigned role.
+
+The picker shows exact IDs and the context and output limits advertised by your endpoint. Search filters the loaded catalog locally; **Refresh catalog** fetches its latest entries. Select a model for all five roles to initialize routing.
+
+Use **Tab** and **Shift+Tab** to move between controls; **Enter** saves the focused model.
+
+Use a terminal at least **110 columns** wide. During interactive setup, Claude Code can also show the picker automatically at **144 columns** or wider; narrower terminals display the setup command.
 
 ## Configure roles
 
@@ -69,7 +75,7 @@ The configuration dialog collects the model IDs used by each role. Choose IDs ad
 | `task` | `task_model` | General-purpose delegated work |
 | `sonic` | `sonic_model` | Mechanical updates and data collection |
 
-Use full model IDs so the assignment identifies the intended model precisely. The same model can serve several roles. Model IDs may include provider prefixes, local paths, and Unicode names.
+The picker saves the exact model ID advertised by your endpoint. The same model can serve several roles. Model IDs may include provider prefixes, local paths, and Unicode names. For direct ID entry, use `/plugin configure agent-router@agent-router-tools`. Administrator-managed settings remain under their existing policy.
 
 The scout and security-reviewer roles use read-only inspection tools. Reviewer uses inspection tools, read-only diff/history commands through Bash, and scouting delegation where available. Task and sonic receive the ordinary editing, command, research, and delegation tools. Claude Code's permissions, organization-managed policies, and delegation depth govern execution.
 
@@ -86,7 +92,7 @@ The plugin exposes OMP-derived agents such as `agent-router:scout`. Its aliases 
 
 The dispatch guard enforces local named roles and validates their configured models against the endpoint's catalog. Per-role assignments take precedence over the caller's requested model. Keep `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` unset when using differentiated role models.
 
-Each session retains its endpoint and model-policy snapshot. After changing role configuration, start a new session to apply it.
+Each initialized session retains its endpoint and model-policy snapshot. You can update saved role assignments with `/agent-models` while routing continues with that snapshot. Start a new session to apply the updated assignments. A fresh session becomes routing-ready once its five roles are configured.
 
 ## Inspect routing
 
@@ -136,7 +142,7 @@ npm run typecheck
 ```
 
 - `npm test` exercises policy validation, endpoint discovery, storage, and the bridge scripts.
-- `npm run test:mod` exercises native function-hook behavior in Claude Code using an isolated copy with explicit test fixtures.
+- `npm run test:mod` exercises native routing and model-picker interactions in Claude Code using an isolated copy with explicit test fixtures.
 - `npm run typecheck` checks the Mod against the bundled API declarations.
 
 Set `CLAUDE_BINARY` to select a particular Claude executable for native tests:

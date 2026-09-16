@@ -1,6 +1,12 @@
 // Pure policy logic shared by the sandboxed Mod and its Node bridge.
 export const ROLES = ['scout', 'reviewer', 'security-reviewer', 'task', 'sonic'];
 
+export function isExactModelId(value) {
+  return typeof value === 'string' && value.length > 0 && value === value.trim() &&
+    !/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(value) &&
+    !['inherit', 'sonnet', 'opus', 'haiku', 'fable'].includes(value.toLowerCase());
+}
+
 export function validatePolicy(value) {
   if (!value || value.version !== 1 || !value.roles || typeof value.roles !== 'object') {
     throw new Error('Routing policy must have version 1 and a roles object.');
@@ -15,9 +21,7 @@ export function validatePolicy(value) {
   for (const role of ROLES) {
     const entry = value.roles[role];
     if (!entry || Object.keys(entry).some(key => !['model', 'aliases'].includes(key)) ||
-        typeof entry.model !== 'string' || !entry.model || entry.model !== entry.model.trim() ||
-        /[\u0000-\u001f\u007f-\u009f]/.test(entry.model) ||
-        ['inherit', 'sonnet', 'opus', 'haiku', 'fable'].includes(entry.model)) {
+        !isExactModelId(entry.model)) {
       throw new Error(`Role ${role} requires an exact model ID, not a family alias.`);
     }
     if (!Array.isArray(entry.aliases) || entry.aliases.some(alias =>

@@ -48,14 +48,47 @@ test('register options select exact models and completed spawns restore their as
   assert.equal(status.routes[0].resolutionMismatch, false);
 });
 
-test('policy and gateway changes cannot reroute or reboot a pinned session', async t => {
+test('saved and cleared options preserve pinned routing and report pending configuration', async t => {
+  const { request, root } = await fixture(t);
+  for (const options of [{ ...modelOptions, scout_model: 'provider/changed-model' }, {}, { ...modelOptions, scout_model: '' }]) {
+    const snapshot = await request('bootstrap', { options }, undefined, async () => assert.fail('must use pinned catalog'));
+    assert.equal(snapshot.pendingConfiguration, true);
+    assert.equal(snapshot.policy.roles.scout.model, modelOptions.scout_model);
+    await request('route', { ...route(), options });
+    await request('result', { options, tool_use_id: 'call-one', result: { agentId: 'child' } });
+    await request('observe', { options, agent_id: 'child', turn_id: 'turn-one', usage: { inputTokens: 7 } });
+    assert.equal((await routingStatus(root)).routes[0].effectiveModel, modelOptions.scout_model);
+  }
+  assert.equal((await request('bootstrap')).pendingConfiguration, false);
+});
+
+test('gateway and override changes remain guarded for pinned sessions', async t => {
   const { request, env, root } = await fixture(t);
   for (const action of ['bootstrap', 'route']) {
-    await assert.rejects(request(action, { ...route(), options: { ...modelOptions, scout_model: 'provider/changed-model' } }), /changed/);
-    await assert.rejects(request(action, route(), { ...env, ANTHROPIC_BASE_URL: 'https://other.example' }), /changed/);
+    await assert.rejects(request(action, { ...route(), options: {} }, { ...env, ANTHROPIC_BASE_URL: 'https://other.example' }), /changed/);
+    await assert.rejects(request(action, route(), { ...env, CLAUDE_CODE_SUBAGENT_MODEL_FORCE: 'sonnet' }), /conflicts/);
   }
-  await assert.rejects(request('route', route(), { ...env, CLAUDE_CODE_SUBAGENT_MODEL_FORCE: 'sonnet' }), /conflicts/);
   assert.deepEqual((await routingStatus(root)).routes, []);
+});
+
+test('initial incomplete setup denies routing and can become ready in the same session', async t => {
+  const { request, root } = await fixture(t);
+  await assert.rejects(request('bootstrap', { session_id: 'setup', options: {} }), /scout_model/);
+  await assert.rejects(request('route', { ...route(), session_id: 'setup', options: {} }), /not ready/);
+  assert.equal(await readRecord(recordPath(root, 'sessions', 'setup')), null);
+  const ready = await request('bootstrap', { session_id: 'setup' });
+  assert.equal(ready.active, true);
+  assert.equal(ready.pendingConfiguration, false);
+  await request('route', { ...route(), session_id: 'setup' });
+});
+
+test('catalog discovery works before setup without persisting a session', async t => {
+  const { env, root } = await fixture(t);
+  const result = await handleRequest({ action: 'catalog' }, env, async () => [{ id: 'provider/model', display_name: 'Model' }]);
+  assert.deepEqual(result, { endpoint: env.ANTHROPIC_BASE_URL, models: [{ id: 'provider/model', name: 'Model', description: '' }] });
+  assert.equal(await readRecord(recordPath(root, 'sessions', 'setup')), null);
+  await assert.rejects(handleRequest({ action: 'catalog' }, { ...env, ANTHROPIC_BASE_URL: '' }, async () => assert.fail('must not discover')), /ANTHROPIC_BASE_URL/);
+  await assert.rejects(handleRequest({ action: 'catalog' }, env, async () => [{ id: 'sonnet' }]), /exact model IDs/);
 });
 
 test('unavailable or incomplete catalogs leave sessions unroutable', async t => {
@@ -217,9 +250,13 @@ test('sessions without an explicit endpoint stay inactive and never query a gate
   const { request, env, root } = await fixture(t);
   for (const [session_id, ANTHROPIC_BASE_URL] of [['unset', undefined], ['empty', '']]) {
     const environment = { ...env, ANTHROPIC_BASE_URL };
-    const snapshot = await request('bootstrap', { session_id }, environment, async () => assert.fail('must not discover'));
+    const snapshot = await request('bootstrap', { session_id, options: {} }, environment, async () => assert.fail('must not discover'));
     assert.equal(snapshot.active, false);
     assert.equal(snapshot.gateway, null);
+    assert.equal(snapshot.policy, null);
+    assert.equal(snapshot.digest, null);
+    assert.equal(snapshot.pendingConfiguration, false);
+    assert.equal((await request('bootstrap', { session_id, options: {} }, environment)).active, false);
     await assert.rejects(request('route', { ...route(), session_id }, environment));
     assert.deepEqual((await routingStatus(root, session_id)).routes, []);
   }

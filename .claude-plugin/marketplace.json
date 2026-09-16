@@ -8,7 +8,7 @@
     {
       "name": "agent-router",
       "source": "./agent-router",
-      "description": "Five focused agent roles with configurable exact-model routing and local routing diagnostics."
+      "description": "Choose models for five agent roles from a searchable endpoint catalog, with exact-model routing and local diagnostics."
     }
   ]
 }

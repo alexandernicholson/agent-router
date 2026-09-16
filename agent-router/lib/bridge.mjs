@@ -1,6 +1,7 @@
 import { policyFromOptions, policyDigest } from './policy.mjs';
 import { routeAgent, isTruthy, ROLES, sameModel } from './routing.js';
 import { fetchModels, normalizeBaseUrl } from './connection.mjs';
+import { normalizeCatalog } from './catalog.js';
 import { stateDirectory, recordPath, readRecord, writeRecord, agentAssignments, idKey, USAGE_KEYS } from './state.mjs';
 
 
@@ -13,17 +14,18 @@ function assertOverrides(env) {
 async function bootstrap(input, env, discover) {
   const root = stateDirectory(env);
   const file = recordPath(root, 'sessions', input.session_id);
-  const policy = policyFromOptions(input.options);
-  const digest = policyDigest(policy);
+  // Gateway and session identity are pinned before considering newly saved options.
   const baseUrl = env.ANTHROPIC_BASE_URL ? normalizeBaseUrl(env.ANTHROPIC_BASE_URL) : null;
   if (baseUrl) assertOverrides(env);
   const previous = await readRecord(file);
   if (previous) {
-    if (previous.digest !== digest || previous.gateway !== baseUrl) {
-      throw new Error('Agent Router configuration changed during this session. Start a new Claude session to apply it.');
+    if (previous.gateway !== baseUrl) {
+      throw new Error('Agent Router endpoint changed during this session. Start a new Claude session to apply it.');
     }
-    return { ...previous, agents: await agentAssignments(root, input.session_id) };
+    return { ...previous, pendingConfiguration: pendingConfiguration(previous, input.options), agents: await agentAssignments(root, input.session_id) };
   }
+  const policy = baseUrl ? policyFromOptions(input.options) : null;
+  const digest = policy ? policyDigest(policy) : null;
   const ids = baseUrl ? (await discover({ baseUrl, env })).map(model => model.id) : [];
   if (baseUrl) for (const role of ROLES) {
     if (!ids.includes(policy.roles[role].model)) {
@@ -37,7 +39,21 @@ async function bootstrap(input, env, discover) {
   await writeRecord(file, snapshot, true);
   const pinned = await readRecord(file);
   if (pinned.digest !== digest || pinned.gateway !== baseUrl) throw new Error('Conflicting concurrent Agent Router bootstrap.');
-  return { ...pinned, agents: await agentAssignments(root, input.session_id) };
+  return { ...pinned, pendingConfiguration: false, agents: await agentAssignments(root, input.session_id) };
+}
+
+function pendingConfiguration(snapshot, options) {
+  if (!snapshot.active) return false;
+  try { return snapshot.digest !== policyDigest(policyFromOptions(options)); }
+  catch { return true; }
+}
+
+async function catalog(env, discover) {
+  if (!env.ANTHROPIC_BASE_URL) {
+    throw new Error('Set ANTHROPIC_BASE_URL to your Anthropic-compatible endpoint, then refresh the model picker.');
+  }
+  const endpoint = normalizeBaseUrl(env.ANTHROPIC_BASE_URL);
+  return { endpoint, models: normalizeCatalog(await discover({ baseUrl: endpoint, env })) };
 }
 
 async function snapshotFor(input, env) {
@@ -45,8 +61,8 @@ async function snapshotFor(input, env) {
   if (!snapshot) throw new Error('Agent Router is not ready. Check plugin configuration and restart Claude.');
   if (snapshot.active) assertOverrides(env);
   const baseUrl = env.ANTHROPIC_BASE_URL ? normalizeBaseUrl(env.ANTHROPIC_BASE_URL) : null;
-  if (snapshot.gateway !== baseUrl || snapshot.digest !== policyDigest(policyFromOptions(input.options))) {
-    throw new Error('Agent Router configuration changed; start a new Claude session to apply it.');
+  if (snapshot.gateway !== baseUrl) {
+    throw new Error('Agent Router endpoint changed; start a new Claude session to apply it.');
   }
   return snapshot;
 }
@@ -111,7 +127,8 @@ async function observe(input, env) {
 
 export async function handleRequest(input, env = process.env, discover = fetchModels) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Expected a bridge JSON object.');
-  if (!['bootstrap', 'route', 'result', 'observe'].includes(input.action)) throw new Error('Unknown Agent Router bridge action.');
+  if (!['bootstrap', 'catalog', 'route', 'result', 'observe'].includes(input.action)) throw new Error('Unknown Agent Router bridge action.');
+  if (input.action === 'catalog') return catalog(env, discover);
   if (input.action === 'bootstrap') return bootstrap(input, env, discover);
   const snapshot = await snapshotFor(input, env);
   if (input.action === 'route') return recordRoute(input, env, snapshot);

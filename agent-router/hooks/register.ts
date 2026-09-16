@@ -1,11 +1,14 @@
 import type { On, PluginOptions } from 'claude-code';
 import { routeAgent, validatePolicy, sameModel } from '../lib/routing.js';
+import { createModelPicker, type ModelPickerHost } from './model-picker';
 
 type Policy = { version: number; roles: Record<string, { model: string; aliases: string[] }> };
-type Snapshot = { active: boolean; policy: Policy; sessionId: string; gateway: string | null; digest: string };
+type Snapshot = { active: true; policy: Policy; pendingConfiguration?: boolean } | { active: false; policy: null };
 type Bridge = (request: Record<string, unknown>) => Promise<any>;
 
 export function register(on: On, options: PluginOptions = {}) {
+  const picker = createModelPicker(options);
+  let pickerHost: ModelPickerHost | undefined;
   let snapshot: Snapshot | undefined;
   let ready: Promise<void> | undefined;
   let bridge: Bridge | undefined;
@@ -38,22 +41,44 @@ export function register(on: On, options: PluginOptions = {}) {
         return JSON.parse(result.stdout);
       };
       const loaded = await bridge({ action: 'bootstrap' });
-      validatePolicy(loaded.policy);
       if (typeof loaded.active !== 'boolean') throw new Error('Invalid Agent Router bootstrap response.');
+      if (loaded.active) validatePolicy(loaded.policy);
       snapshot = loaded;
       agents.clear();
       for (const saved of loaded.agents || []) {
-        if (typeof saved.agentId === 'string' && loaded.policy.roles[saved.role]?.model === saved.effectiveModel) {
+        if (loaded.active && typeof saved.agentId === 'string' && loaded.policy.roles[saved.role]?.model === saved.effectiveModel) {
           agents.set(saved.agentId, saved.effectiveModel);
         }
       }
       failure = '';
-      $.ui.status(loaded.active ? 'Agent Router: agent.spawn routing active' : undefined);
+      $.ui.status(loaded.active ? (loaded.pendingConfiguration ? 'Agent Router active; saved models apply to your next session' : 'Agent Router: agent.spawn routing active') : undefined);
     })().catch(error => {
       failure = error instanceof Error ? error.message : 'Agent Router initialization failed.';
-      $.ui.status('Agent Router unavailable: inspect plugin configuration');
+      $.ui.status('Choose role models with /agent-models');
     });
     await ready;
+    pickerHost = {
+      plugin: { name: $.plugin.name, root: $.plugin.root },
+      ui: {
+        invalidate: event => $.ui.invalidate(event),
+        open: input => $.ui.open(input),
+        close: input => $.ui.close(input),
+        log: text => $.ui.log(text),
+        resolve: input => $.ui.resolve(input),
+      },
+      store: {
+        get: key => $.store.get(key),
+        set: (key, value) => $.store.set(key, value),
+        delete: key => $.store.delete(key),
+      },
+      config: { list: () => $.config.list(), set: input => $.config.set(input) },
+      process: { run: (argv, settings) => $.process.run(argv, settings) },
+      command: { register: input => $.command.register(input) },
+      session: { id: () => $.session.id() },
+      endpoint: () => $.env.get('ANTHROPIC_BASE_URL'),
+    };
+    try { await picker.initialize(pickerHost, e); }
+    catch (error) { $.ui.log(`Agent Router models: ${error instanceof Error ? error.message : 'Open /agent-models to retry.'}`); }
     return next(e);
   });
 
@@ -109,4 +134,13 @@ export function register(on: On, options: PluginOptions = {}) {
     }
     return next(e);
   });
+
+  on('command.run', { command: 'agent-models' }, ($, e) => pickerHost
+    ? picker.commandRun(pickerHost, e) : { text: 'Run /agent-models after session setup completes.' });
+  on('ui.close', { id: 'agent-models' }, async ($, e, next) => {
+    if (pickerHost) await picker.uiClose(pickerHost, e);
+    return next(e);
+  });
+  on('ui.render', { component: 'Pane' }, ($, e, next) =>
+    (pickerHost && picker.uiRender(pickerHost, e)) || next(e));
 }

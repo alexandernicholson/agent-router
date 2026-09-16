@@ -5,11 +5,14 @@
     "moduleResolution": "Bundler",
     "lib": ["ES2023"],
     "types": [],
+    "jsx": "react",
+    "jsxFactory": "h",
+    "jsxFragmentFactory": "Fragment",
     "allowJs": true,
     "checkJs": false,
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["types/*.d.ts", "hooks/*.ts", "tests/*.ts", "lib/routing.js"]
+  "include": ["types/*.d.ts", "hooks/*.ts", "hooks/*.tsx", "tests/*.ts", "lib/routing.js", "lib/catalog.js"]
 }
