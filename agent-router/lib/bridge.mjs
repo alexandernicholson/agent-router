@@ -2,7 +2,7 @@ import { policyFromOptions, policyDigest } from './policy.mjs';
 import { routeAgent, isTruthy, ROLES, sameModel } from './routing.js';
 import { fetchModels, normalizeBaseUrl } from './connection.mjs';
 import { normalizeCatalog } from './catalog.js';
-import { stateDirectory, recordPath, readRecord, writeRecord, agentAssignments, idKey, USAGE_KEYS } from './state.mjs';
+import { stateDirectory, recordPath, readRecord, writeRecord, agentAssignments, sessionStats, idKey, USAGE_KEYS } from './state.mjs';
 
 
 function assertOverrides(env) {
@@ -127,8 +127,9 @@ async function observe(input, env) {
 
 export async function handleRequest(input, env = process.env, discover = fetchModels) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Expected a bridge JSON object.');
-  if (!['bootstrap', 'catalog', 'route', 'result', 'observe'].includes(input.action)) throw new Error('Unknown Agent Router bridge action.');
+  if (!['bootstrap', 'catalog', 'route', 'result', 'observe', 'stats'].includes(input.action)) throw new Error('Unknown Agent Router bridge action.');
   if (input.action === 'catalog') return catalog(env, discover);
+  if (input.action === 'stats') return sessionStats(stateDirectory(env), input.session_id);
   if (input.action === 'bootstrap') return bootstrap(input, env, discover);
   const snapshot = await snapshotFor(input, env);
   if (input.action === 'route') return recordRoute(input, env, snapshot);

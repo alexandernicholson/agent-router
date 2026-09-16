@@ -5,6 +5,11 @@ import { sameModel } from './routing.js';
 
 export const USAGE_KEYS = ['input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens'];
 const OBSERVATION_SCOPE = 'last response per completed turn';
+const STATS_USAGE_KEYS = [
+  ['input_tokens', 'inputTokens'],
+  ['output_tokens', 'outputTokens'],
+  ['cache_read_input_tokens', 'cacheReadTokens'],
+];
 
 export function stateDirectory(env = process.env) {
   if (typeof env.CLAUDE_PLUGIN_DATA !== 'string' || !env.CLAUDE_PLUGIN_DATA.trim()) {
@@ -65,6 +70,42 @@ async function listRecords(root, kind, sessionId) {
 
 export async function agentAssignments(root, sessionId) {
   return listRecords(root, 'agents', sessionId);
+}
+
+export async function sessionStats(root, sessionId) {
+  idKey(sessionId);
+  const [routes, observations] = await Promise.all([
+    listRecords(root, 'routes', sessionId),
+    listRecords(root, 'observations', sessionId),
+  ]);
+  const stats = { routed: 0, overrides: 0, mismatches: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 };
+  const decisions = new Set();
+  for (const route of routes) {
+    if (route.sessionId !== sessionId || typeof route.toolUseId !== 'string' || !route.toolUseId ||
+        decisions.has(route.toolUseId)) continue;
+    decisions.add(route.toolUseId);
+    stats.routed++;
+    if (typeof route.requestedModel === 'string' && !sameModel(route.requestedModel, route.effectiveModel)) stats.overrides++;
+    if (route.resolvedModel && !sameModel(route.effectiveModel, route.resolvedModel)) stats.mismatches++;
+  }
+  const turns = new Map();
+  for (const observation of observations) {
+    if (observation.sessionId !== sessionId || typeof observation.agentId !== 'string' || !observation.agentId ||
+        typeof observation.turnId !== 'string' || !observation.turnId ||
+        !Array.isArray(observation.responseModels) || !observation.usage || typeof observation.usage !== 'object') continue;
+    let agentTurns = turns.get(observation.agentId);
+    if (!agentTurns) {
+      agentTurns = new Set();
+      turns.set(observation.agentId, agentTurns);
+    }
+    if (agentTurns.has(observation.turnId)) continue;
+    agentTurns.add(observation.turnId);
+    for (const [usageKey, statsKey] of STATS_USAGE_KEYS) {
+      const value = observation.usage[usageKey];
+      if (Number.isSafeInteger(value) && value >= 0) stats[statsKey] += value;
+    }
+  }
+  return stats;
 }
 
 export async function routingStatus(stateDir = stateDirectory(), sessionId) {

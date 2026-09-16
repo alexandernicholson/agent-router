@@ -1,8 +1,8 @@
 {
   "name": "agent-router",
-  "version": "0.6.2",
+  "version": "0.7.0",
   "license": "MIT",
-  "description": "Choose subagent models from your endpoint's searchable catalog with /agent-models, and inspect completed-turn routing diagnostics. Requires Claude Code Mod function hooks enabled.",
+  "description": "Choose subagent models with /agent-models and click the prompt panel to inspect activity, token usage, and routing. Requires Claude Code Mod function hooks enabled.",
   "author": {
     "name": "Agent Router maintainers"
   },

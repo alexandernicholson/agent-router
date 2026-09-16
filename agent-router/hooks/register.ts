@@ -1,6 +1,7 @@
-import type { On, PluginOptions } from 'claude-code';
+import type { On, PluginOptions, Timer } from 'claude-code';
 import { routeAgent, validatePolicy, sameModel } from '../lib/routing.js';
 import { createModelPicker, type ModelPickerHost } from './model-picker';
+import { createStatsPanel } from './stats-panel';
 
 type Policy = { version: number; roles: Record<string, { model: string; aliases: string[] }> };
 type Snapshot = { active: true; policy: Policy; pendingConfiguration?: boolean } | { active: false; policy: null };
@@ -8,6 +9,8 @@ type Bridge = (request: Record<string, unknown>) => Promise<any>;
 
 export function register(on: On, options: PluginOptions = {}) {
   const picker = createModelPicker(options);
+  const statsPanel = createStatsPanel();
+  let activityTimer: Timer | undefined;
   let pickerHost: ModelPickerHost | undefined;
   let snapshot: Snapshot | undefined;
   let ready: Promise<void> | undefined;
@@ -29,6 +32,7 @@ export function register(on: On, options: PluginOptions = {}) {
   }).catch(($, e, next) => next.called ? next(e) : { deny: 'Agent Router guard failed before tool dispatch.' });
 
   on('session.start', async ($, e, next) => {
+    activityTimer?.cancel();
     ready = (async () => {
       snapshot = undefined;
       const root = $.plugin.root;
@@ -80,6 +84,18 @@ export function register(on: On, options: PluginOptions = {}) {
     };
     try { await picker.initialize(pickerHost, e); }
     catch (error) { $.ui.log(`Agent Router models: ${error instanceof Error ? error.message : 'Open /agent-models to retry.'}`); }
+    if (!failure && snapshot?.active && e.isInteractive && e.surface === 'terminal') {
+      await statsPanel.initialize({
+        stats: () => bridge!({ action: 'stats' }),
+        agents: () => $.agent.list(),
+        managed: agent => agents.has(agent.id),
+        store: pickerHost.store,
+        redraw: () => $.ui.invalidate('ui.render'),
+      }, await $.session.id());
+      activityTimer = $.clock.every(1000, () => {
+        statsPanel.refreshActivity().catch(() => $.ui.log('Agent Router: activity statistics are unavailable.'));
+      });
+    }
     return next(e);
   });
 
@@ -98,6 +114,7 @@ export function register(on: On, options: PluginOptions = {}) {
     } catch (error) {
       return { deny: error instanceof Error ? error.message : 'Agent Router could not resolve this role.' };
     }
+    await statsPanel.refreshStats();
     const result = await next({ ...e, subagentType: selected.type, model: selected.model });
     if (result.agentId) agents.set(result.agentId, selected.model);
     try {
@@ -107,6 +124,8 @@ export function register(on: On, options: PluginOptions = {}) {
     } catch {
       $.ui.log('Agent Router: agent started, but its resolution record could not be saved.');
     }
+    await statsPanel.refreshStats();
+    await statsPanel.refreshActivity();
     return result;
   }).catch(($, e, next) => next.called ? next(e) : { deny: 'Agent Router failed before dispatch; no unconfigured model will be started.' });
 
@@ -129,6 +148,7 @@ export function register(on: On, options: PluginOptions = {}) {
     if (snapshot?.active && bridge && e.agentId && agents.has(e.agentId)) {
       try {
         await bridge({ action: 'observe', agent_id: e.agentId, turn_id: e.turnId, reason: e.reason, usage: e.usage });
+        await statsPanel.refreshStats();
       } catch {
         $.ui.log('Agent Router: completed-turn observations could not be saved.');
       }
@@ -138,10 +158,13 @@ export function register(on: On, options: PluginOptions = {}) {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (failure || !snapshot?.active || e.props.hasSurvey) return next(e);
-    const indicator = snapshot.pendingConfiguration ? '⇄*' : '⇄';
     const content = await next(e);
-    const { Box, Text } = $.ui.resolve(e);
-    return Box({ flexDirection: 'column', children: [content, Text({ dimColor: true, children: [indicator] })] });
+    return statsPanel.render($.ui.resolve(e), content, snapshot.pendingConfiguration === true);
+  });
+
+  on('session.detach', ($, e, next) => {
+    if (e.reason === 'end') activityTimer?.cancel();
+    return next(e);
   });
 
   on('command.run', { command: 'agent-models' }, ($, e) => pickerHost

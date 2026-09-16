@@ -21,6 +21,7 @@ function agentInput(input: Partial<AgentSpawnInput>): AgentSpawnInput {
 async function start($: Engine, on: On, failBridge = false, agents: Array<{ agentId: string; role: string; effectiveModel: string }> = [], calls: Record<string, unknown>[] = []) {
   mock.store(on);
   mock.env(on, {});
+  mock.clock(on);
   on('command.register', ($, e) => ({ value: { command: e.name } }));
   on('session.id', () => ({ value: 'session' }));
   on('session.start', ($, e) => ({ cwd: e.cwd }));

@@ -246,6 +246,78 @@ test('observations without a turn identity cannot inflate completed-turn usage',
   assert.equal(status.routes[0].usage.input_tokens, 7);
 });
 
+test('stats isolate sessions even when agent, turn and routing identities are reused', async t => {
+  const { request } = await fixture(t);
+  const empty = { routed: 0, overrides: 0, mismatches: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 };
+  assert.deepEqual(await request('stats', { session_id: 'not-started' }), empty);
+  await assert.rejects(request('stats', { session_id: undefined }), /identity/);
+  await assert.rejects(request('stats', { session_id: '' }), /identity/);
+  await request('bootstrap', { session_id: 'two' });
+  for (const [session_id, input_tokens] of [['one', 7], ['two', 100]]) {
+    await request('route', { ...route(), session_id, requestedModel: policy.roles.scout.model });
+    await request('observe', { session_id, agent_id: 'child', turn_id: 'turn', usage: { input_tokens } });
+  }
+  assert.deepEqual(await request('stats'), { ...empty, routed: 1, inputTokens: 7 });
+  assert.deepEqual(await request('stats', { session_id: 'two' }), { ...empty, routed: 1, inputTokens: 100 });
+});
+
+test('stats count observations once per agent and turn without requiring result records', async t => {
+  const { request, root } = await fixture(t);
+  const completion = {
+    agent_id: 'child', turn_id: 'turn',
+    usage: { input_tokens: 7, output_tokens: 3, cache_read_input_tokens: 5, cache_creation_input_tokens: 99 },
+  };
+  await Promise.all([request('observe', completion), request('observe', completion)]);
+  await request('observe', { ...completion, usage: { input_tokens: 999 } });
+  await request('observe', { ...completion, turn_id: 'next', usage: { input_tokens: 4, output_tokens: 6 } });
+  await request('observe', { ...completion, agent_id: 'other', usage: { input_tokens: 2, cache_read_input_tokens: 1 } });
+  const expected = { routed: 0, overrides: 0, mismatches: 0, inputTokens: 13, outputTokens: 9, cacheReadTokens: 6 };
+  assert.deepEqual(await request('stats'), expected);
+  await writeRecord(recordPath(root, 'observations', 'one', 'duplicate'), {
+    sessionId: 'one', agentId: 'child', turnId: 'turn', responseModels: [], usage: completion.usage,
+  });
+  await writeRecord(recordPath(root, 'observations', 'one', 'invalid-usage'), {
+    sessionId: 'one', agentId: 'child', turnId: 'invalid', responseModels: [],
+    usage: { input_tokens: -10, output_tokens: '20', cache_read_input_tokens: 1.5 },
+  });
+  await writeRecord(recordPath(root, 'observations', 'one', 'unscoped'), {
+    sessionId: 'one', agentId: 'child', responseModels: [], usage: { input_tokens: 1000 },
+  });
+  assert.deepEqual(await request('stats'), expected);
+  for (const tool_use_id of ['original', 'resumed']) {
+    await request('route', { ...route(tool_use_id), requestedModel: policy.roles.scout.model });
+    await request('result', { tool_use_id, result: { agentId: 'child', model: policy.roles.scout.model } });
+    await request('result', { tool_use_id, result: { agentId: 'child', model: policy.roles.scout.model } });
+  }
+  await request('bootstrap');
+  assert.deepEqual(await request('stats'), { ...expected, routed: 2 });
+});
+
+test('stats distinguish requested model overrides from resolved model mismatches', async t => {
+  const { request } = await fixture(t);
+  const model = policy.roles.scout.model;
+  const plain = model.replace(/\[1m\]$/i, '');
+  const cases = [
+    ['override', 'provider/requested-other', model],
+    ['mismatch', model, 'provider/resolved-other'],
+    ['both', 'provider/requested-other', 'provider/resolved-other'],
+    ['context-suffix', `${plain}[1m]`, plain],
+    ['implicit', undefined, model],
+  ];
+  for (const [tool_use_id, requestedModel, resolvedModel] of cases) {
+    await request('route', { ...route(tool_use_id), requestedModel });
+    await request('route', { ...route(tool_use_id), requestedModel });
+    await request('result', { tool_use_id, result: { agentId: tool_use_id, model: resolvedModel } });
+    await request('observe', { agent_id: tool_use_id, turn_id: 'turn', usage: { model: 'provider/response-other' } });
+  }
+  await request('route', { ...route('pending'), requestedModel: undefined });
+  await request('route', { ...route('denied'), requestedModel: undefined });
+  await request('result', { tool_use_id: 'denied', result: { deny: 'Not allowed' } });
+  assert.deepEqual(await request('stats'), {
+    routed: 7, overrides: 2, mismatches: 2, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
+  });
+});
+
 test('sessions without an explicit endpoint stay inactive and never query a gateway', async t => {
   const { request, env, root } = await fixture(t);
   for (const [session_id, ANTHROPIC_BASE_URL] of [['unset', undefined], ['empty', '']]) {

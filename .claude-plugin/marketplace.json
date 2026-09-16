@@ -8,7 +8,7 @@
     {
       "name": "agent-router",
       "source": "./agent-router",
-      "description": "Choose models for five agent roles from a searchable endpoint catalog, with exact-model routing and local diagnostics."
+      "description": "Choose models for five agent roles from a searchable catalog, with exact-model routing and a cycling activity, usage, and routing panel."
     }
   ]
 }

@@ -99,7 +99,27 @@ The dispatch guard enforces local named roles and validates their configured mod
 
 Each initialized session retains its endpoint and model-policy snapshot. You can update saved role assignments with `/agent-models` while routing continues with that snapshot. Start a new session to apply the updated assignments. A fresh session becomes routing-ready once its five roles are configured.
 
-The terminal prompt area shows `⇄` while routing is active. `⇄*` means saved model changes apply to your next session. Setup failures use Claude Code's warning line.
+The terminal prompt area shows a clickable `⇄` icon while routing is active. `⇄*` means saved model changes apply to your next session. Setup failures use Claude Code's warning line.
+
+## Developer panel
+
+Click the left-hand icon to cycle through **Activity**, **Usage**, and **Routing**. The selected view is remembered across configuration reloads and sessions.
+
+Mouse clicks follow Claude Code's [fullscreen renderer](https://code.claude.com/docs/en/fullscreen#use-the-mouse); run `/tui fullscreen` to enable it. The icon also supports the panel's standard focus and Enter controls.
+
+```text
+[⇄] Activity  2 running · 7 completed · 1 failed
+[⇄] Usage     42k in · 9k out · 31k cache read
+[⇄] Routing   12 routed · 2 overrides · 0 mismatches
+```
+
+These example values illustrate the layout. The panel displays statistics for managed subagents in the current session:
+
+- **Activity** follows Claude's native agent roster, refreshed once per second. Completed and failed states observed by the panel are retained when roster entries disappear; failed includes killed agents. Running counts always come from the current roster.
+- **Usage** totals recorded completed-turn input, output, and cache-read tokens. Repeated observations and resumed routes count each agent turn once.
+- **Routing** counts persisted routing decisions. Overrides count explicit requested models that differ from the configured assignment; mismatches compare the assignment with Claude's resolved model.
+
+Usage and routing refresh when their records change. A view shows `unavailable` when its data cannot be read.
 
 ## Inspect routing
 
