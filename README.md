@@ -99,6 +99,8 @@ The dispatch guard enforces local named roles and validates their configured mod
 
 Each initialized session retains its endpoint and model-policy snapshot. You can update saved role assignments with `/agent-models` while routing continues with that snapshot. Start a new session to apply the updated assignments. A fresh session becomes routing-ready once its five roles are configured.
 
+The terminal prompt area shows `⇄` while routing is active. `⇄*` means saved model changes apply to your next session. Setup failures use Claude Code's warning line.
+
 ## Inspect routing
 
 Run:

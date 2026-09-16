@@ -26,6 +26,7 @@ async function start($: Engine, on: On, failBridge = false, agents: Array<{ agen
   on('session.start', ($, e) => ({ cwd: e.cwd }));
   on('ui.status', () => ({ value: undefined }));
   on('ui.log', () => ({ value: undefined }));
+  on('ui.invalidate', () => ({ value: undefined }));
   on('process.run', ($, e) => {
     const input = JSON.parse(e.init?.stdin || '{}');
     calls.push(input);

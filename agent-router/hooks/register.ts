@@ -51,12 +51,13 @@ export function register(on: On, options: PluginOptions = {}) {
         }
       }
       failure = '';
-      $.ui.status(loaded.active ? (loaded.pendingConfiguration ? 'Agent Router active; saved models apply to your next session' : 'Agent Router: agent.spawn routing active') : undefined);
+      $.ui.status(undefined);
     })().catch(error => {
       failure = error instanceof Error ? error.message : 'Agent Router initialization failed.';
       $.ui.status('Choose role models with /agent-models');
     });
     await ready;
+    $.ui.invalidate('ui.render');
     pickerHost = {
       plugin: { name: $.plugin.name, root: $.plugin.root },
       ui: {
@@ -133,6 +134,14 @@ export function register(on: On, options: PluginOptions = {}) {
       }
     }
     return next(e);
+  });
+
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (failure || !snapshot?.active || e.props.hasSurvey) return next(e);
+    const indicator = snapshot.pendingConfiguration ? '⇄*' : '⇄';
+    const content = await next(e);
+    const { Box, Text } = $.ui.resolve(e);
+    return Box({ flexDirection: 'column', children: [content, Text({ dimColor: true, children: [indicator] })] });
   });
 
   on('command.run', { command: 'agent-models' }, ($, e) => pickerHost
