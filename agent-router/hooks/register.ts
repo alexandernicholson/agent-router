@@ -58,7 +58,7 @@ export function register(on: On, options: PluginOptions = {}) {
       $.ui.status(undefined);
     })().catch(error => {
       failure = error instanceof Error ? error.message : 'Agent Router initialization failed.';
-      $.ui.status('Choose role models with /agent-models');
+      $.ui.status('Routing setup needs attention · /agent-models');
     });
     await ready;
     $.ui.invalidate('ui.render');

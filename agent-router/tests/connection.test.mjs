@@ -226,3 +226,23 @@ test('client-aware gateways bootstrap custom roles with a cold discovery cache',
     }), /does not advertise/);
   });
 });
+
+test('refused discovery explains missing gateway credentials without forwarding login tokens', async t => {
+  const key = 'gateway-key-test';
+  const oauth = 'oauth-token-test';
+  await withGateway((request, response) => {
+    assert.equal(request.headers.authorization, undefined);
+    if (request.headers['x-api-key'] === key) catalog(response);
+    else { response.writeHead(403); response.end(); }
+  }, async baseUrl => {
+    const env = { ...await discoveryCache(t, baseUrl, []), CLAUDE_CODE_OAUTH_TOKEN: oauth, OTHER_GATEWAY_KEY: key };
+    await assert.rejects(fetchModels({ env, baseUrl }), error => {
+      assert.match(error.message, /HTTP 403/);
+      assert.match(error.message, /ANTHROPIC_API_KEY/);
+      assert.match(error.message, /ANTHROPIC_AUTH_TOKEN/);
+      assert.doesNotMatch(error.message, /gateway-key-test|oauth-token-test/);
+      return true;
+    });
+    assert.deepEqual(await fetchModels({ env: { ...env, ANTHROPIC_API_KEY: key }, baseUrl }), [{ id: 'vendor/code-v1' }]);
+  });
+});

@@ -44,6 +44,10 @@ export function createModelPicker(options: PluginOptions) {
   let page = 0;
   let models: ModelEntry[] = [];
   let rows: ConfigRow[] = [];
+  let catalogLoaded = false;
+  let configLoaded = false;
+  let catalogError = '';
+  let configError = '';
   let loading = false;
   let saving = false;
   let error = '';
@@ -62,24 +66,37 @@ export function createModelPicker(options: PluginOptions) {
     const request = ++generation;
     loading = true;
     error = '';
+    catalogError = '';
+    configError = '';
+    catalogLoaded = false;
+    configLoaded = false;
     models = [];
+    rows = [];
     redraw(host);
     try {
-      const [result, currentRows] = await Promise.all([
+      const [discovery, settings] = await Promise.allSettled([
         host.process.run(['node', `${host.plugin.root}/scripts/bridge.mjs`], {
           stdin: JSON.stringify({ action: 'catalog' }), timeoutMs: 20_000,
         }),
         host.config.list(),
       ]);
+      if (request !== generation || !open) return;
+      if (settings.status === 'fulfilled') {
+        rows = settings.value;
+        configLoaded = true;
+      } else {
+        configError = `Settings unavailable: ${message(settings.reason)}`;
+      }
+      if (discovery.status === 'rejected') throw discovery.reason;
+      const result = discovery.value;
       if (result.exitCode !== 0) throw new Error(result.stderr.trim() || 'Check your configured endpoint and refresh the model catalog.');
       const catalog = JSON.parse(result.stdout);
-      if (request !== generation || !open) return;
       if (!Array.isArray(catalog.models)) throw new Error('Refresh the catalog after checking the configured endpoint.');
       models = catalog.models;
-      rows = currentRows;
+      catalogLoaded = true;
       page = 0;
     } catch (cause) {
-      if (request === generation && open) error = message(cause);
+      if (request === generation && open) catalogError = message(cause);
     } finally {
       if (request === generation) { loading = false; redraw(host); }
     }
@@ -177,7 +194,7 @@ export function createModelPicker(options: PluginOptions) {
     const { Box, Text, Button, Select, Input } = host.ui.resolve(e);
     let current: ConfigRow | undefined;
     let rowError = '';
-    if (!loading) {
+    if (!loading && configLoaded) {
       try { current = roleRow(rows, host.plugin.name, role); } catch (cause) { rowError = message(cause); }
     }
     const filtered: ModelEntry[] = filterModels(models, query);
@@ -197,6 +214,8 @@ export function createModelPicker(options: PluginOptions) {
       <Text>Choose a model for each role. Search by name or ID, then select an entry. Active sessions retain their current assignments.</Text>
       {notice ? <Text>{notice}</Text> : null}
       {error ? <Text>{error}</Text> : null}
+      {catalogError ? <Text>{catalogError}</Text> : null}
+      {configError ? <Text>{configError}</Text> : null}
       <Box flexDirection="row" gap={1}>
         {saving ? null : <Button key="refresh" label="Refresh catalog" onPress={() => act(() => refresh(host))} />}
         <Button key="close" label="Close" onPress={() => act(() => close(host))} />
@@ -206,11 +225,11 @@ export function createModelPicker(options: PluginOptions) {
         role = value; page = 0; error = ''; notice = ''; redraw(host);
         return act(() => intent(host));
       }} />
-      <Text>{`Saved: ${current?.value || 'Choose a model'}`}</Text>
+      <Text>{`Saved: ${configError ? 'unavailable' : current?.value || 'Choose a model'}`}</Text>
       {current?.isLocked ? <Text>Your administrator manages this setting. Ask them to update its model.</Text> : null}
       {rowError ? <Text>{rowError}</Text> : null}
       <Input key="search" label="Search" placeholder="Name, exact ID, or description" value={query} autoFocus onInput={search} onSubmit={search} />
-      {loading ? <Text>Loading endpoint catalog…</Text> : saving ? <Text>Saving model selection…</Text> : <Box flexDirection="column" gap={1}>
+      {loading ? <Text>Loading endpoint catalog…</Text> : saving ? <Text>Saving model selection…</Text> : !catalogLoaded ? <Text>Catalog unavailable. Resolve the discovery error, then refresh.</Text> : <Box flexDirection="column" gap={1}>
         <Text>{`${filtered.length} matching models · page ${page + 1} of ${pages}`}</Text>
         {/* Stable controls precede changing model rows to preserve terminal keyboard focus. */}
         {pages > 1 ? <Box flexDirection="row" gap={1}>

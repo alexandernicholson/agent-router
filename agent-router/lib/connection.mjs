@@ -60,6 +60,15 @@ async function fetchEndpointModels(env, base, gatewayDiscovery) {
     catch { throw new Error('Model discovery failed or timed out; check gateway connectivity and credentials.'); }
     if (!response.ok) {
       await response.body?.cancel().catch(() => {});
+      if (response.status === 401 || response.status === 403) {
+        const hasKey = Boolean(headers.get('x-api-key'));
+        const hasAuthorization = Boolean(headers.get('authorization'));
+        const context = `Discovery headers: x-api-key ${hasKey ? 'set' : 'unset'}, Authorization ${hasAuthorization ? 'set' : 'unset'}. Gateway discovery: ${gatewayDiscovery ? 'on' : 'off'}.`;
+        const guidance = hasKey || hasAuthorization
+          ? 'Check these credentials and gateway permission for GET /v1/models.'
+          : 'Set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN, or gateway-required ANTHROPIC_CUSTOM_HEADERS, in the environment that launches Claude. CLAUDE_CODE_OAUTH_TOKEN is not sent as a gateway discovery credential.';
+        throw new Error(`Model discovery returned HTTP ${response.status}. ${context} ${guidance}`);
+      }
       throw new Error(`Model discovery returned HTTP ${response.status}; check the gateway URL and credentials (redirects are refused).`);
     }
     let text = '';

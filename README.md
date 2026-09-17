@@ -52,6 +52,10 @@ Claude Code owns `~/.claude/cache/gateway-models.json`; `CLAUDE_CONFIG_DIR` sele
 
 Keep credentials in your local environment or secret-management system.
 
+Gateway-specific credential variable names need to be mapped to `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or the gateway's required custom headers. `CLAUDE_CODE_OAUTH_TOKEN` selects Claude sign-in credentials; gateway model discovery uses the credential sources listed above.
+
+For HTTP 401 or 403, the picker reports whether `x-api-key` and `Authorization` were supplied, with their values kept private. Check the affected session's launch environment and its permission to call `GET /v1/models`. With CVM/CVP, put the gateway credentials in the active profile, then start a fresh Claude session. Discovery failures preserve the saved role settings and show the catalog as unavailable.
+
 ### 2. Install the plugin
 
 Inside Claude Code:

@@ -1,6 +1,6 @@
 import { test, expect, mock, tier } from 'claude-code/testing';
 import type { Engine } from 'claude-code/testing';
-import type { ConfigRow, On, RenderInput } from 'claude-code';
+import type { ConfigRow, On, RenderInput, RenderNode } from 'claude-code';
 
 tier('user');
 
@@ -15,7 +15,7 @@ function world(on: On, models = [{ id: 'vendor/selected', name: 'Selected model'
     kind: 'text', value: '', provider: { plugin: 'agent-router@agent-router-tools', tier: 'user' }, isLocked: false }));
   // A similarly named foreign row must never receive the selection.
   rows.unshift({ ...rows[0], key: 'foreign.scout_model', provider: { plugin: 'foreign', tier: 'user' } });
-  const state = { rows, writes: 0, deny: '', opened: 0 };
+  const state = { rows, writes: 0, deny: '', opened: 0, catalogError: '' };
   mock.store(on);
   mock.env(on, {});
   on('session.id', () => ({ value: 'picker-session' }));
@@ -36,6 +36,9 @@ function world(on: On, models = [{ id: 'vendor/selected', name: 'Selected model'
   });
   on('process.run', ($, e) => {
     const request = JSON.parse(e.init?.stdin || '{}');
+    if (request.action === 'catalog' && state.catalogError) {
+      return { value: { exitCode: 1, stderr: state.catalogError, stdout: '' } };
+    }
     return { value: { exitCode: 0, stderr: '', stdout: JSON.stringify(request.action === 'catalog'
       ? { endpoint: 'https://gateway.example', models }
       : { active: false, policy: null, digest: null, gateway: null, sessionId: 'picker-session' }) } };
@@ -101,4 +104,24 @@ test('catalog navigation selects models across full and partial pages', async ($
   await $.ui.render(pane);
   await $.ui.press({ plugin: 'agent-router', key: 'model:vendor/page-4', requestId: 'agent-models' });
   expect(state.rows[2].value).toBe('vendor/page-4');
+});
+
+function text(node: RenderNode): string {
+  if (typeof node === 'string') return node;
+  return 'children' in node && Array.isArray(node.children) ? node.children.map(text).join(' ') : '';
+}
+
+test('catalog refusal preserves saved settings and refresh can recover', async ($, on) => {
+  const state = world(on);
+  state.rows[1].value = 'vendor/current';
+  state.catalogError = 'Model discovery returned HTTP 403';
+  await open($);
+  const failed = text(await $.ui.render(pane));
+  expect(failed.includes('vendor/current')).toBe(true);
+  expect(failed.includes('HTTP 403')).toBe(true);
+  state.catalogError = '';
+  await $.ui.press({ plugin: 'agent-router', key: 'refresh', requestId: 'agent-models' });
+  await $.ui.render(pane);
+  await $.ui.press({ plugin: 'agent-router', key: 'model:vendor/selected', requestId: 'agent-models' });
+  expect(state.rows[1].value).toBe('vendor/selected');
 });
