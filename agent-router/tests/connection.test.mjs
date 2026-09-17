@@ -5,6 +5,8 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fetchModels, normalizeBaseUrl } from '../lib/connection.mjs';
+import { handleRequest } from '../lib/bridge.mjs';
+import { modelOptions } from './fixtures.mjs';
 
 async function withGateway(handler, run) {
   const server = createServer(handler);
@@ -47,10 +49,10 @@ test('explicit unauthenticated gateways discover models without credential heade
   assert.equal(request.headers.authorization, undefined);
 });
 
-test('supplied standard headers and nonempty case-insensitive overrides reach the gateway', async () => {
+test('supplied standard headers and nonempty case-insensitive overrides reach the gateway', async t => {
   const requests = [];
   await withGateway((req, res) => { requests.push(req.headers); catalog(res); }, async baseUrl => {
-    const env = { ANTHROPIC_API_KEY: 'fake-api-key', ANTHROPIC_AUTH_TOKEN: 'fake-token' };
+    const env = { ...await discoveryCache(t, baseUrl, []), ANTHROPIC_API_KEY: 'fake-api-key', ANTHROPIC_AUTH_TOKEN: 'fake-token' };
     await fetchModels({ env, baseUrl });
     await fetchModels({ baseUrl, env: {
       ...env,
@@ -202,5 +204,25 @@ test('gateway discovery cache is ignored after selecting a third-party provider'
     const env = await discoveryCache(t, baseUrl, [{ id: 'gateway/claude-review' }]);
     env.CLAUDE_CODE_USE_BEDROCK = '1';
     await assert.rejects(fetchModels({ env, baseUrl }), /HTTP 403/);
+  });
+});
+
+test('client-aware gateways bootstrap custom roles with a cold discovery cache', async t => {
+  const standard = { id: 'claude-standard-v1' };
+  const custom = { id: 'gateway/code-task-v1' };
+  await withGateway((request, response) => {
+    const isClaudeClient = /^claude-(?:code|cli)\//i.test(request.headers['user-agent'] || '');
+    catalog(response, { data: isClaudeClient ? [standard, custom] : [standard] });
+  }, async baseUrl => {
+    const env = await discoveryCache(t, baseUrl, []);
+    await rm(join(env.CLAUDE_CONFIG_DIR, 'cache', 'gateway-models.json'));
+    const runtime = { ...env, ANTHROPIC_BASE_URL: baseUrl, CLAUDE_PLUGIN_DATA: join(env.CLAUDE_CONFIG_DIR, 'data') };
+    const input = { action: 'bootstrap', session_id: 'cold-gateway', options: Object.fromEntries(Object.keys(modelOptions).map(key => [key, custom.id])) };
+    const snapshot = await handleRequest(input, runtime);
+    assert.equal(snapshot.active, true);
+    assert.deepEqual(Object.values(snapshot.policy.roles).map(role => role.model), Array(5).fill(custom.id));
+    await assert.rejects(handleRequest({ ...input, session_id: 'discovery-disabled' }, {
+      ...runtime, CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '0',
+    }), /does not advertise/);
   });
 });

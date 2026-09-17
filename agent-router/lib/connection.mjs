@@ -21,9 +21,9 @@ export function normalizeBaseUrl(value) {
   return url.href.replace(/\/+$/, '');
 }
 
-function discoveryHeaders(env) {
+function discoveryHeaders(env, gatewayDiscovery) {
   const headers = new Headers({
-    'User-Agent': 'agent-router',
+    'User-Agent': gatewayDiscovery ? 'claude-code/agent-router' : 'agent-router',
     'anthropic-version': '2023-06-01',
   });
   try {
@@ -44,8 +44,8 @@ function discoveryHeaders(env) {
   return headers;
 }
 
-async function fetchEndpointModels(env, base) {
-  const headers = discoveryHeaders(env);
+async function fetchEndpointModels(env, base, gatewayDiscovery) {
+  const headers = discoveryHeaders(env, gatewayDiscovery);
   const rows = new Map();
   const cursors = new Set();
   let after;
@@ -88,9 +88,8 @@ async function fetchEndpointModels(env, base) {
   throw new Error('Gateway model catalog exceeded the pagination limit.');
 }
 
-async function readGatewayModels(env, base) {
-  if (!isTruthy(env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY) ||
-      PROVIDER_FLAGS.some(key => isTruthy(env[key])) || new URL(base).hostname === 'api.anthropic.com') return [];
+async function readGatewayModels(env, base, gatewayDiscovery) {
+  if (!gatewayDiscovery) return [];
   const config = env.CLAUDE_CONFIG_DIR || join(env.HOME || env.USERPROFILE || homedir(), '.claude');
   const file = await open(join(config, 'cache', 'gateway-models.json'), 'r');
   try {
@@ -105,8 +104,10 @@ async function readGatewayModels(env, base) {
 
 export async function fetchModels({ env = process.env, baseUrl = env.ANTHROPIC_BASE_URL } = {}) {
   const base = normalizeBaseUrl(baseUrl);
+  const gatewayDiscovery = isTruthy(env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY) &&
+    !PROVIDER_FLAGS.some(key => isTruthy(env[key])) && new URL(base).hostname !== 'api.anthropic.com';
   const [endpoint, discovery] = await Promise.allSettled([
-    fetchEndpointModels(env, base), readGatewayModels(env, base),
+    fetchEndpointModels(env, base, gatewayDiscovery), readGatewayModels(env, base, gatewayDiscovery),
   ]);
   // Claude owns this optional cache, including authentication-helper discovery.
   const cached = discovery.status === 'fulfilled' ? discovery.value : [];

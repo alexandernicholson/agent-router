@@ -13,7 +13,7 @@ Agent Router is a Claude Code Mod that assigns an exact model to each subagent r
 
 ## Requirements
 
-- **Claude Code with function hooks enabled.** Agent Router is verified with Claude Code **2.1.272**. Function hooks are an early-access API; keep your Claude version and generated type declarations aligned when updating the Mod.
+- **Claude Code with function hooks enabled.** Agent Router is verified with Claude Code **2.1.272** and **2.1.273**, including Ubuntu with a CVM-managed installation. Function hooks are an early-access API; keep your Claude version and generated type declarations aligned when updating the Mod.
 - **Node.js 22 or newer**, available on `PATH`.
 - An explicitly configured **Anthropic-compatible endpoint** that supports inference and model discovery through `GET /v1/models`.
 - Five role assignments, selected from your endpoint's catalog with `/agent-models`.
@@ -42,13 +42,13 @@ Model discovery reads these standard environment variables:
 | `ANTHROPIC_API_KEY` | Sends the `x-api-key` header when supplied |
 | `ANTHROPIC_AUTH_TOKEN` | Sends a bearer `Authorization` header when supplied |
 | `ANTHROPIC_CUSTOM_HEADERS` | Adds service-specific headers; nonempty values override matching headers case-insensitively |
-| `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` | Includes Claude Code's endpoint-matched gateway discovery cache when enabled |
+| `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` | Enables Claude-compatible gateway discovery and includes the endpoint-matched native cache |
 
-The discovery client sends `agent-router` as its User-Agent. Services with a specific client-header requirement can provide that header through `ANTHROPIC_CUSTOM_HEADERS`. Endpoints that allow unauthenticated model discovery can use their own authentication policy.
+For an Anthropic-format gateway with gateway discovery enabled, requests identify the integration with `User-Agent: claude-code/agent-router`. This lets client-aware gateways advertise their custom models on first startup. Other discovery requests use `agent-router`. Services with a specific client-header requirement can override the header through `ANTHROPIC_CUSTOM_HEADERS`. Endpoints that allow unauthenticated discovery can use their own authentication policy.
 
 With `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`, Agent Router combines fresh endpoint results with Claude Code's [gateway discovery cache](https://code.claude.com/docs/en/llm-gateway-protocol#model-discovery). This preserves models discovered using Claude's resolved credentials, including `apiKeyHelper`, while retaining non-Claude models from the endpoint. Fresh metadata takes precedence for duplicate IDs. If direct discovery fails, the matching cached models remain available.
 
-Claude Code owns `~/.claude/cache/gateway-models.json`; `CLAUDE_CONFIG_DIR` selects its configuration root. Agent Router reads that cache for the same endpoint and provider mode. Restart Claude Code after enabling gateway discovery so Claude can populate it.
+Claude Code owns `~/.claude/cache/gateway-models.json`; `CLAUDE_CONFIG_DIR` selects its configuration root. Agent Router reads that cache for the same endpoint and provider mode. Fresh gateway discovery also works before Claude has populated the cache.
 
 Keep credentials in your local environment or secret-management system.
 
