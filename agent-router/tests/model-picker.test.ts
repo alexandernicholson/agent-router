@@ -15,17 +15,20 @@ function world(on: On, models = [{ id: 'vendor/selected', name: 'Selected model'
     kind: 'text', value: '', provider: { plugin: 'agent-router@agent-router-tools', tier: 'user' }, isLocked: false }));
   // A similarly named foreign row must never receive the selection.
   rows.unshift({ ...rows[0], key: 'foreign.scout_model', provider: { plugin: 'foreign', tier: 'user' } });
-  const state = { rows, writes: 0, deny: '', opened: 0, catalogError: '' };
+  const state = { rows, writes: 0, deny: '', opened: 0, catalogError: '', openArgs: undefined as Record<string, unknown> | undefined, squeezed: '', logs: [] as string[] };
   mock.store(on);
   mock.env(on, {});
   on('session.id', () => ({ value: 'picker-session' }));
   on('session.start', ($, e) => ({ cwd: e.cwd }));
   on('command.register', ($, e) => ({ value: { command: e.name } }));
-  on('ui.open', () => { state.opened++; return { value: undefined }; });
+  on('ui.open', ($, e) => {
+    state.opened++; state.openArgs = { ...e };
+    return { value: state.squeezed ? { isPlaced: false, reason: state.squeezed } : { isPlaced: true } };
+  });
   on('ui.close', () => ({ value: undefined }));
   on('ui.invalidate', () => ({ value: undefined }));
   on('ui.status', () => ({ value: undefined }));
-  on('ui.log', () => ({ value: undefined }));
+  on('ui.log', ($, e) => { state.logs.push(e.text); return { value: undefined }; });
   on('config.list', () => ({ value: state.rows }));
   on('config.set', ($, e) => {
     state.writes++;
@@ -124,4 +127,21 @@ test('catalog refusal preserves saved settings and refresh can recover', async (
   await $.ui.render(pane);
   await $.ui.press({ plugin: 'agent-router', key: 'model:vendor/selected', requestId: 'agent-models' });
   expect(state.rows[1].value).toBe('vendor/selected');
+});
+
+test('the picker requests a dock width wide enough for its controls', async ($, on) => {
+  const state = world(on);
+  await open($);
+  expect(state.opened).toBe(1);
+  expect(state.openArgs?.rows).toBe(24);
+  expect(typeof state.openArgs?.columns).toBe('number');
+  expect((state.openArgs?.columns as number) >= 110).toBe(true);
+});
+
+test('an unplaced picker pane tells the person why it waits', async ($, on) => {
+  const state = world(on);
+  state.squeezed = 'the terminal is 100 columns wide; 110 seats it';
+  await open($);
+  expect(state.opened).toBe(1);
+  expect(state.logs.some(log => log.includes(state.squeezed))).toBe(true);
 });

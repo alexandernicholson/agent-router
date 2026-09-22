@@ -93,7 +93,7 @@ export function register(on: On, options: PluginOptions = {}) {
         redraw: () => $.ui.invalidate('ui.render'),
       }, await $.session.id());
       activityTimer = $.clock.every(1000, () => {
-        statsPanel.refreshActivity().catch(() => $.ui.log('Agent Router: activity statistics are unavailable.'));
+        statsPanel.refreshActivity().catch(() => $.ui.log('Agent Router: activity statistics are unavailable.', { to: 'debug' }));
       });
     }
     return next(e);
@@ -122,7 +122,7 @@ export function register(on: On, options: PluginOptions = {}) {
         result: { agentId: result.agentId, model: result.model, deny: result.deny } });
       if (typeof recorded.systemMessage === 'string') $.ui.log(recorded.systemMessage);
     } catch {
-      $.ui.log('Agent Router: agent started, but its resolution record could not be saved.');
+      $.ui.log('Agent Router: agent started, but its resolution record could not be saved.', { to: 'debug' });
     }
     await statsPanel.refreshStats();
     await statsPanel.refreshActivity();
@@ -150,7 +150,7 @@ export function register(on: On, options: PluginOptions = {}) {
         await bridge({ action: 'observe', agent_id: e.agentId, turn_id: e.turnId, reason: e.reason, usage: e.usage });
         await statsPanel.refreshStats();
       } catch {
-        $.ui.log('Agent Router: completed-turn observations could not be saved.');
+        $.ui.log('Agent Router: completed-turn observations could not be saved.', { to: 'debug' });
       }
     }
     return next(e);
@@ -162,8 +162,9 @@ export function register(on: On, options: PluginOptions = {}) {
     return statsPanel.render($.ui.resolve(e), content, snapshot.pendingConfiguration === true);
   });
 
-  on('session.detach', ($, e, next) => {
-    if (e.reason === 'end') activityTimer?.cancel();
+  on('session.end', ($, e, next) => {
+    activityTimer?.cancel();
+    activityTimer = undefined;
     return next(e);
   });
 

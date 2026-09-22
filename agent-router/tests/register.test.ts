@@ -18,26 +18,30 @@ function agentInput(input: Partial<AgentSpawnInput>): AgentSpawnInput {
     parentModel: 'sonnet', background: true, fork: input.subagentType === 'fork', ...input };
 }
 
-async function start($: Engine, on: On, failBridge = false, agents: Array<{ agentId: string; role: string; effectiveModel: string }> = [], calls: Record<string, unknown>[] = []) {
+type Log = { text: string; to: string };
+
+async function start($: Engine, on: On, failBridge = false, agents: Array<{ agentId: string; role: string; effectiveModel: string }> = [], calls: Record<string, unknown>[] = [], logs: Log[] = [], failAction = '') {
   mock.store(on);
   mock.env(on, {});
-  mock.clock(on);
+  const clock = mock.clock(on);
   on('command.register', ($, e) => ({ value: { command: e.name } }));
   on('session.id', () => ({ value: 'session' }));
   on('session.start', ($, e) => ({ cwd: e.cwd }));
   on('ui.status', () => ({ value: undefined }));
-  on('ui.log', () => ({ value: undefined }));
+  on('ui.log', ($, e) => { logs.push({ text: e.text, to: e.to }); return { value: undefined }; });
   on('ui.invalidate', () => ({ value: undefined }));
   on('process.run', ($, e) => {
     const input = JSON.parse(e.init?.stdin || '{}');
     calls.push(input);
+    const failed = failBridge || input.action === failAction;
     return { value: {
-      exitCode: failBridge ? 1 : 0, stderr: failBridge ? 'catalog unavailable' : '',
+      exitCode: failed ? 1 : 0, stderr: failed ? 'catalog unavailable' : '',
       stdout: JSON.stringify(input.action === 'bootstrap'
         ? { active: true, policy, sessionId: 'session', gateway: 'https://gateway.example', digest: 'pinned', agents } : {}),
     } };
   });
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true });
+  return clock;
 }
 
 test('built-in Explore cannot override its assigned model with Sonnet', async ($, on) => {
@@ -146,4 +150,31 @@ test('completed-turn observations never include the agent answer', async ($, on)
   const observation = calls.find(call => call.action === 'observe');
   expect(observation === undefined).toBe(false);
   expect(JSON.stringify(observation).includes('SENSITIVE_ANSWER_NOT_FOR_STORAGE')).toBe(false);
+});
+
+test('session end cancels the activity timer once', async ($, on) => {
+  let rosterReads = 0;
+  on('agent.list', () => { rosterReads++; return { value: [] }; });
+  on('session.end', ($, e) => ({ sessionId: e.sessionId }));
+  const clock = await start($, on);
+  const before = rosterReads;
+  await clock.advance(1000);
+  expect(rosterReads > before).toBe(true);
+  const ended = await $.session.end({ reason: 'other', sessionId: 'session', resume: { id: 'session' } });
+  expect(ended.sessionId).toBe('session');
+  const after = rosterReads;
+  await clock.advance(3000);
+  expect(rosterReads).toBe(after);
+});
+
+test('failed bookkeeping is logged to the debug sink, never the transcript', async ($, on) => {
+  const logs: Log[] = [];
+  on('agent.spawn', ($, e) => ({ model: e.model!, agentId: 'quiet-child' }));
+  on('turn.complete', ($, e) => ({ text: e.answer }));
+  await start($, on, false, [], [], logs, 'result');
+  const spawned = await $.agent.spawn(agentInput({ subagentType: 'scout' }));
+  expect(spawned.deny).toBe(undefined);
+  const recordFailure = logs.find(log => log.text.includes('resolution record'));
+  expect(recordFailure?.to).toBe('debug');
+  expect(logs.filter(log => log.to === 'transcript' && /Agent Router:/.test(log.text)).length).toBe(0);
 });

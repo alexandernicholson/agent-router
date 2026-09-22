@@ -22,6 +22,8 @@ const roles = [
   { value: 'sonic_model', label: 'Sonic' },
 ];
 const pageSize = 3;
+// The picker's controls need this many columns; a fullscreen dock opens this wide.
+const minimumColumns = 110;
 const message = (error: unknown) => error instanceof Error ? error.message : 'Open /agent-models again to retry.';
 
 // Ownership comes from the actual config rows, never from a constructed write key.
@@ -108,7 +110,8 @@ export function createModelPicker(options: PluginOptions) {
     page = 0;
     error = '';
     await intent(host);
-    await host.ui.open({ id: paneId, title: 'Agent Router models', focus: true, closeOnEscape: true, rows: 24 });
+    const opened = await host.ui.open({ id: paneId, title: 'Agent Router models', focus: true, closeOnEscape: true, rows: 24, columns: minimumColumns });
+    if (!opened.isPlaced) host.ui.log(`Agent Router models: the picker is open but waits undrawn. ${opened.reason}`);
     await refresh(host);
   }
 
@@ -172,8 +175,8 @@ export function createModelPicker(options: PluginOptions) {
 
   const commandRun = async (host: ModelPickerHost, e: Args<'command.run'>) => {
     if (!interactive) return { text: 'Open /agent-models in an interactive Claude Code terminal or desktop session.' };
-    if (terminal && e.presentation.columns < 110) {
-      return { text: 'Widen the terminal to at least 110 columns, then run /agent-models.' };
+    if (terminal && e.presentation.columns < minimumColumns) {
+      return { text: `Widen the terminal to at least ${minimumColumns} columns, then run /agent-models.` };
     }
     try { await show(host); return {}; }
     catch (cause) { return { text: `Agent Router models: ${message(cause)}` }; }
