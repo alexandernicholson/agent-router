@@ -20,7 +20,7 @@ function agentInput(input: Partial<AgentSpawnInput>): AgentSpawnInput {
 
 type Log = { text: string; to: string };
 
-async function start($: Engine, on: On, failBridge = false, agents: Array<{ agentId: string; role: string; effectiveModel: string }> = [], calls: Record<string, unknown>[] = [], logs: Log[] = [], failAction = '') {
+async function start($: Engine, on: On, failBridge = false, agents: Array<{ agentId: string; role: string; effectiveModel: string }> = [], calls: Record<string, unknown>[] = [], logs: Log[] = [], failAction = '', routing: Record<string, unknown> = policy) {
   mock.store(on);
   mock.env(on, {});
   const clock = mock.clock(on);
@@ -37,7 +37,7 @@ async function start($: Engine, on: On, failBridge = false, agents: Array<{ agen
     return { value: {
       exitCode: failed ? 1 : 0, stderr: failed ? 'catalog unavailable' : '',
       stdout: JSON.stringify(input.action === 'bootstrap'
-        ? { active: true, policy, sessionId: 'session', gateway: 'https://gateway.example', digest: 'pinned', agents } : {}),
+        ? { active: true, policy: routing, sessionId: 'session', gateway: 'https://gateway.example', digest: 'pinned', agents } : {}),
     } };
   });
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true });
@@ -177,4 +177,50 @@ test('failed bookkeeping is logged to the debug sink, never the transcript', asy
   const recordFailure = logs.find(log => log.text.includes('resolution record'));
   expect(recordFailure?.to).toBe('debug');
   expect(logs.filter(log => log.to === 'transcript' && /Agent Router:/.test(log.text)).length).toBe(0);
+});
+
+async function steps($: Engine, input: { turnId: string; agentId?: string; model: string; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' }) {
+  const chunks = [];
+  for await (const chunk of $.turn.step({ index: 0, messageCount: 1, ...input })) chunks.push(chunk);
+  return chunks;
+}
+
+function echoStep(on: On) {
+  on('turn.step', async function* ($, e) {
+    yield { kind: 'text' as const, index: 0, text: `${e.model}|${e.effort ?? 'none'}` };
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn' as const, usage: null };
+  });
+}
+
+test('managed subagent steps use the role effort while the lead keeps its own', async ($, on) => {
+  echoStep(on);
+  on('agent.spawn', ($, e) => ({ model: e.model!, agentId: 'effort-child' }));
+  const efforted = { ...policy, roles: { ...policy.roles, reviewer: { ...policy.roles.reviewer, effort: 'max' } } };
+  await start($, on, false, [], [], [], '', efforted);
+  await $.agent.spawn(agentInput({ subagentType: 'reviewer' }));
+  expect(await steps($, { turnId: 'child', agentId: 'effort-child', model: 'sonnet', effort: 'medium' }))
+    .toEqual([{ kind: 'text', index: 0, text: `${policy.roles.reviewer.model}|max` }]);
+  expect(await steps($, { turnId: 'lead', model: 'vendor/lead-v1', effort: 'low' }))
+    .toEqual([{ kind: 'text', index: 0, text: 'vendor/lead-v1|low' }]);
+});
+
+test('roles on default effort and models without effort are left untouched', async ($, on) => {
+  echoStep(on);
+  on('agent.spawn', ($, e) => ({ model: e.model!, agentId: e.subagentType }));
+  const efforted = { ...policy, roles: { ...policy.roles, reviewer: { ...policy.roles.reviewer, effort: 'high' } } };
+  await start($, on, false, [], [], [], '', efforted);
+  await $.agent.spawn(agentInput({ subagentType: 'scout' }));
+  await $.agent.spawn(agentInput({ subagentType: 'reviewer' }));
+  expect(await steps($, { turnId: 'scout', agentId: 'agent-router:scout', model: 'sonnet', effort: 'medium' }))
+    .toEqual([{ kind: 'text', index: 0, text: `${policy.roles.scout.model}|medium` }]);
+  expect(await steps($, { turnId: 'plain', agentId: 'agent-router:reviewer', model: 'sonnet' }))
+    .toEqual([{ kind: 'text', index: 0, text: `${policy.roles.reviewer.model}|none` }]);
+});
+
+test('resumed teammates regain their role effort', async ($, on) => {
+  echoStep(on);
+  const efforted = { ...policy, roles: { ...policy.roles, scout: { ...policy.roles.scout, effort: 'low' } } };
+  await start($, on, false, [{ agentId: 'teammate-2', role: 'scout', effectiveModel: policy.roles.scout.model }], [], [], '', efforted);
+  expect(await steps($, { turnId: 'resumed', agentId: 'teammate-2', model: 'sonnet', effort: 'high' }))
+    .toEqual([{ kind: 'text', index: 0, text: `${policy.roles.scout.model}|low` }]);
 });

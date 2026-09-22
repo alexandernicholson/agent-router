@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { validatePolicy, ROLES } from './routing.js';
+import { validatePolicy, ROLES, EFFORTS } from './routing.js';
 
 const aliases = {
   scout: ['scout', 'Explore'], reviewer: ['reviewer'],
@@ -16,11 +16,20 @@ export function policyFromOptions(options = {}) {
   for (const role of ROLES) {
     const key = `${role.replaceAll('-', '_')}_model`;
     roles[role] = { model: options[key], aliases: [...aliases[role]] };
+    const effortKey = `${role.replaceAll('-', '_')}_effort`;
+    const effort = options[effortKey];
+    if (effort === undefined || effort === '' || effort === 'default') continue;
+    if (!EFFORTS.includes(effort)) throw new Error(`Choose default or one of ${EFFORTS.join(', ')} for ${effortKey} in /agent-models.`);
+    roles[role].effort = effort;
   }
   return validatePolicy({ version: 1, roles });
 }
 
 export function policyDigest(policy) {
-  const normalized = ROLES.map(role => [role, policy.roles[role].model, [...policy.roles[role].aliases].sort()]);
+  // Effort joins the digest only when set, so pre-effort sessions keep theirs.
+  const normalized = ROLES.map(role => {
+    const { model, aliases, effort } = policy.roles[role];
+    return effort === undefined ? [role, model, [...aliases].sort()] : [role, model, [...aliases].sort(), effort];
+  });
   return createHash('sha256').update(JSON.stringify(normalized)).digest('hex');
 }

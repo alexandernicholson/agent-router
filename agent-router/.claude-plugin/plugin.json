@@ -1,6 +1,6 @@
 {
   "name": "agent-router",
-  "version": "0.7.2",
+  "version": "0.8.0",
   "license": "MIT",
   "description": "Choose subagent models with /agent-models and click the prompt panel to inspect activity, token usage, and routing. Requires Claude Code Mod function hooks enabled.",
   "author": {
@@ -13,10 +13,40 @@
       "description": "Choose the scout's model with /agent-models, or enter an exact model ID.",
       "required": false
     },
+    "scout_effort": {
+      "type": "string",
+      "title": "Scout effort",
+      "description": "Reasoning effort for the scout role. Default keeps the engine's effort; models without effort support ignore it.",
+      "options": [
+        "default",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default": "default",
+      "required": false
+    },
     "reviewer_model": {
       "type": "string",
       "title": "Reviewer model",
       "description": "Choose the reviewer's model with /agent-models, or enter an exact model ID.",
+      "required": false
+    },
+    "reviewer_effort": {
+      "type": "string",
+      "title": "Reviewer effort",
+      "description": "Reasoning effort for the reviewer role. Default keeps the engine's effort; models without effort support ignore it.",
+      "options": [
+        "default",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default": "default",
       "required": false
     },
     "security_reviewer_model": {
@@ -25,16 +55,61 @@
       "description": "Choose the security reviewer's model with /agent-models, or enter an exact model ID.",
       "required": false
     },
+    "security_reviewer_effort": {
+      "type": "string",
+      "title": "Security reviewer effort",
+      "description": "Reasoning effort for the security reviewer role. Default keeps the engine's effort; models without effort support ignore it.",
+      "options": [
+        "default",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default": "default",
+      "required": false
+    },
     "task_model": {
       "type": "string",
       "title": "Task model",
       "description": "Choose the task and native Plan model with /agent-models, or enter an exact model ID.",
       "required": false
     },
+    "task_effort": {
+      "type": "string",
+      "title": "Task effort",
+      "description": "Reasoning effort for the task role. Default keeps the engine's effort; models without effort support ignore it.",
+      "options": [
+        "default",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default": "default",
+      "required": false
+    },
     "sonic_model": {
       "type": "string",
       "title": "Sonic model",
       "description": "Choose the sonic model with /agent-models, or enter an exact model ID.",
+      "required": false
+    },
+    "sonic_effort": {
+      "type": "string",
+      "title": "Sonic effort",
+      "description": "Reasoning effort for the sonic role. Default keeps the engine's effort; models without effort support ignore it.",
+      "options": [
+        "default",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default": "default",
       "required": false
     }
   }

@@ -84,6 +84,10 @@ Use a terminal at least **110 columns** wide. During interactive setup, Claude C
 | `task` | `task_model` | General-purpose delegated work |
 | `sonic` | `sonic_model` | Mechanical updates and data collection |
 
+Each role also has an effort key: `scout_effort`, `reviewer_effort`, `security_reviewer_effort`, `task_effort`, and `sonic_effort`. Choose **Default** to keep Claude Code's own effort, or `low`, `medium`, `high`, `xhigh`, or `max` to pin that role's reasoning effort. In `/agent-models`, the **Effort** selector applies to the role currently selected.
+
+A pinned effort applies to every model request of that role's subagents, including resumed teammates. The lead session keeps its own effort. A model that takes no effort setting receives none. Like model changes, effort changes apply to new sessions, and `/agent-router:routes` records each route's `effectiveEffort`.
+
 The picker saves the exact model ID advertised by your endpoint. The same model can serve several roles. Model IDs may include provider prefixes, local paths, and Unicode names. For direct ID entry, use `/plugin configure agent-router@agent-router-tools`. Administrator-managed settings remain under their existing policy.
 
 The scout and security-reviewer roles use read-only inspection tools. Reviewer uses inspection tools, read-only diff/history commands through Bash, and scouting delegation where available. Task and sonic receive the ordinary editing, command, research, and delegation tools. Claude Code's permissions, organization-managed policies, and delegation depth govern execution.

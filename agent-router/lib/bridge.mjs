@@ -75,7 +75,7 @@ async function recordRoute(input, env, snapshot) {
     sessionId: input.session_id, toolUseId: input.tool_use_id, parentAgentId: input.agent_id || null,
     requestedType: typeof input.requestedType === 'string' ? input.requestedType : null,
     requestedModel: typeof input.requestedModel === 'string' ? input.requestedModel : null,
-    role: selected.role, effectiveType: selected.type, effectiveModel: selected.model,
+    role: selected.role, effectiveType: selected.type, effectiveModel: selected.model, effectiveEffort: selected.effort ?? null,
     mode: 'mod', gateway: snapshot.gateway, policyDigest: snapshot.digest,
     state: 'dispatched', createdAt: new Date().toISOString(), upstreamVerified: false,
   };

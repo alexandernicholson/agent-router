@@ -13,7 +13,11 @@ function world(on: On, models = [{ id: 'vendor/selected', name: 'Selected model'
   const fields = ['scout_model', 'reviewer_model', 'security_reviewer_model', 'task_model', 'sonic_model'];
   const rows: ConfigRow[] = fields.map(field => ({ key: `actual-owner.${field}`, label: field,
     kind: 'text', value: '', provider: { plugin: 'agent-router@agent-router-tools', tier: 'user' }, isLocked: false }));
-  // A similarly named foreign row must never receive the selection.
+  const efforts = ['default', 'low', 'medium', 'high', 'xhigh', 'max'];
+  for (const field of fields) rows.push({ key: `actual-owner.${field.replace(/_model$/, '_effort')}`, label: field,
+    kind: 'choice', value: 'default', options: efforts, provider: { plugin: 'agent-router@agent-router-tools', tier: 'user' }, isLocked: false });
+  // Similarly named foreign rows must never receive the selection.
+  rows.push({ ...rows[rows.length - 5], key: 'foreign.scout_effort', provider: { plugin: 'foreign', tier: 'user' } });
   rows.unshift({ ...rows[0], key: 'foreign.scout_model', provider: { plugin: 'foreign', tier: 'user' } });
   const state = { rows, writes: 0, deny: '', opened: 0, catalogError: '', openArgs: undefined as Record<string, unknown> | undefined, squeezed: '', logs: [] as string[] };
   mock.store(on);
@@ -144,4 +148,31 @@ test('an unplaced picker pane tells the person why it waits', async ($, on) => {
   await open($);
   expect(state.opened).toBe(1);
   expect(state.logs.some(log => log.includes(state.squeezed))).toBe(true);
+});
+
+function hasSelect(node: RenderNode, key: string): boolean {
+  if (typeof node !== 'object' || node === null) return false;
+  if ('type' in node && node.type === 'Select' && 'props' in node && (node.props as { key?: string }).key === key) return true;
+  return 'children' in node && Array.isArray(node.children) && node.children.some(child => hasSelect(child, key));
+}
+
+test('effort selection writes only the owned effort row for the current role', async ($, on) => {
+  const state = world(on);
+  await open($);
+  expect(hasSelect(await $.ui.render(pane), 'effort')).toBe(true);
+  await $.ui.select({ plugin: 'agent-router', key: 'effort', requestId: 'agent-models', value: 'high' });
+  expect(state.rows.find(row => row.key === 'actual-owner.scout_effort')?.value).toBe('high');
+  expect(state.rows.find(row => row.key === 'foreign.scout_effort')?.value).toBe('default');
+  expect(state.rows.find(row => row.key === 'actual-owner.reviewer_effort')?.value).toBe('default');
+});
+
+test('locked effort rows are shown but never written', async ($, on) => {
+  const state = world(on);
+  state.rows.find(row => row.key === 'actual-owner.scout_effort')!.isLocked = true;
+  await open($);
+  const drawn = await $.ui.render(pane);
+  expect(hasSelect(drawn, 'effort')).toBe(false);
+  expect(text(drawn).includes('managed by your administrator')).toBe(true);
+  expect(state.writes).toBe(0);
+  expect(state.rows.find(row => row.key === 'actual-owner.scout_effort')?.value).toBe('default');
 });

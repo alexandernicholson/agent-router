@@ -3,7 +3,9 @@ import { routeAgent, validatePolicy, sameModel } from '../lib/routing.js';
 import { createModelPicker, type ModelPickerHost } from './model-picker';
 import { createStatsPanel } from './stats-panel';
 
-type Policy = { version: number; roles: Record<string, { model: string; aliases: string[] }> };
+type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+type Policy = { version: number; roles: Record<string, { model: string; aliases: string[]; effort?: Effort }> };
+type Assignment = { model: string; effort?: Effort };
 type Snapshot = { active: true; policy: Policy; pendingConfiguration?: boolean } | { active: false; policy: null };
 type Bridge = (request: Record<string, unknown>) => Promise<any>;
 
@@ -16,7 +18,7 @@ export function register(on: On, options: PluginOptions = {}) {
   let ready: Promise<void> | undefined;
   let bridge: Bridge | undefined;
   let failure = 'Agent Router Mod has not initialized.';
-  const agents = new Map<string, string>();
+  const agents = new Map<string, Assignment>();
 
   on('tool.call', async ($, e, next) => {
     if (!/^(Agent|Task)$/.test(e.tool)) return next(e);
@@ -50,8 +52,9 @@ export function register(on: On, options: PluginOptions = {}) {
       snapshot = loaded;
       agents.clear();
       for (const saved of loaded.agents || []) {
-        if (loaded.active && typeof saved.agentId === 'string' && loaded.policy.roles[saved.role]?.model === saved.effectiveModel) {
-          agents.set(saved.agentId, saved.effectiveModel);
+        const role = loaded.active ? loaded.policy.roles[saved.role] : undefined;
+        if (role && typeof saved.agentId === 'string' && role.model === saved.effectiveModel) {
+          agents.set(saved.agentId, { model: role.model, effort: role.effort });
         }
       }
       failure = '';
@@ -116,7 +119,7 @@ export function register(on: On, options: PluginOptions = {}) {
     }
     await statsPanel.refreshStats();
     const result = await next({ ...e, subagentType: selected.type, model: selected.model });
-    if (result.agentId) agents.set(result.agentId, selected.model);
+    if (result.agentId) agents.set(result.agentId, { model: selected.model, effort: selected.effort });
     try {
       const recorded = await bridge({ action: 'result', tool_use_id: e.tool_use_id,
         result: { agentId: result.agentId, model: result.model, deny: result.deny } });
@@ -131,17 +134,23 @@ export function register(on: On, options: PluginOptions = {}) {
 
   on('turn.step', async function* ($, e, next) {
     if (!snapshot?.active || !e.agentId) return yield* next(e);
-    let model = agents.get(e.agentId);
-    if (!model) {
+    let assignment = agents.get(e.agentId);
+    if (!assignment) {
       const agent = (await $.agent.list()).find(item => item.id === e.agentId);
       if (agent) {
-        try { model = routeAgent(snapshot.policy, { subagentType: agent.type }).model; }
-        catch { /* Other engine loops are not managed roles. */ }
+        try {
+          const selected = routeAgent(snapshot.policy, { subagentType: agent.type });
+          assignment = { model: selected.model, effort: selected.effort };
+        } catch { /* Other engine loops are not managed roles. */ }
       }
-      if (model) agents.set(e.agentId, model);
+      if (assignment) agents.set(e.agentId, assignment);
     }
-    if (model && !sameModel(model, e.model)) $.ui.log(`Agent Router corrected a subagent model substitution to ${model}.`);
-    return yield* next(model ? { ...e, model } : e);
+    if (!assignment) return yield* next(e);
+    const { model, effort } = assignment;
+    if (!sameModel(model, e.model)) $.ui.log(`Agent Router corrected a subagent model substitution to ${model}.`);
+    // An absent effort means the model takes none, so none is forced on it.
+    const pinned = effort !== undefined && e.effort !== undefined ? { ...e, model, effort } : { ...e, model };
+    return yield* next(pinned);
   });
 
   on('turn.complete', async ($, e, next) => {

@@ -27,13 +27,17 @@ const minimumColumns = 110;
 const message = (error: unknown) => error instanceof Error ? error.message : 'Open /agent-models again to retry.';
 
 // Ownership comes from the actual config rows, never from a constructed write key.
-function roleRow(rows: ConfigRow[], plugin: string, field: string): ConfigRow {
+function ownedRow(rows: ConfigRow[], plugin: string, field: string, kind: ConfigRow['kind']): ConfigRow {
   const matches = rows.filter(row => (row.provider.plugin === plugin || row.provider.plugin.startsWith(`${plugin}@`)) && row.key.endsWith(`.${field}`));
   if (matches.length !== 1) throw new Error(`Open /config and check that ${field} has one visible Agent Router setting.`);
   const row = matches[0];
-  if (row.kind !== 'text') throw new Error(`Open /config to edit ${row.label}; this setting requires its native control.`);
+  if (row.kind !== kind) throw new Error(`Open /config to edit ${row.label}; this setting requires its native control.`);
   return row;
 }
+const roleRow = (rows: ConfigRow[], plugin: string, field: string) => ownedRow(rows, plugin, field, 'text');
+const effortField = (field: string) => field.replace(/_model$/, '_effort');
+const effortRow = (rows: ConfigRow[], plugin: string, field: string) => ownedRow(rows, plugin, effortField(field), 'choice');
+const effortLabel = (value: string) => value === 'default' ? 'Default (engine effort)' : value;
 
 export function createModelPicker(options: PluginOptions) {
   let session = '';
@@ -154,6 +158,31 @@ export function createModelPicker(options: PluginOptions) {
     }
   }
 
+  async function saveEffort(host: ModelPickerHost, field: string, value: string, renderedGeneration: number) {
+    if (!open || saving || loading || renderedGeneration !== generation || field !== role) return;
+    saving = true;
+    error = '';
+    notice = '';
+    redraw(host);
+    try {
+      rows = await host.config.list();
+      if (!open) return;
+      const row = effortRow(rows, host.plugin.name, field);
+      if (row.isLocked) throw new Error('Your administrator manages this setting. Ask them to update its effort.');
+      if (!row.options?.includes(value)) return;
+      const result = await host.config.set({ key: row.key, value });
+      if (result.deny !== undefined) throw new Error(result.deny);
+      if (result.value !== value) throw new Error('The config writer returned a different value. Open /config to inspect the saved setting.');
+      rows = rows.map(item => item.key === row.key ? { ...item, value } : item);
+      notice = `Saved ${roles.find(item => item.value === field)!.label} effort. New sessions use the saved settings; this session keeps its routing policy.`;
+    } catch (cause) {
+      error = message(cause);
+    } finally {
+      saving = false;
+      redraw(host);
+    }
+  }
+
   async function initialize(host: ModelPickerHost, e: Args<'session.start'>) {
     interactive = e.isInteractive && (e.surface === 'terminal' || e.surface === 'desktop');
     terminal = e.surface === 'terminal';
@@ -196,9 +225,12 @@ export function createModelPicker(options: PluginOptions) {
     }
     const { Box, Text, Button, Select, Input } = host.ui.resolve(e);
     let current: ConfigRow | undefined;
+    let effort: ConfigRow | undefined;
     let rowError = '';
+    let effortError = '';
     if (!loading && configLoaded) {
       try { current = roleRow(rows, host.plugin.name, role); } catch (cause) { rowError = message(cause); }
+      try { effort = effortRow(rows, host.plugin.name, role); } catch (cause) { effortError = message(cause); }
     }
     const filtered: ModelEntry[] = filterModels(models, query);
     const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
@@ -231,6 +263,11 @@ export function createModelPicker(options: PluginOptions) {
       <Text>{`Saved: ${configError ? 'unavailable' : current?.value || 'Choose a model'}`}</Text>
       {current?.isLocked ? <Text>Your administrator manages this setting. Ask them to update its model.</Text> : null}
       {rowError ? <Text>{rowError}</Text> : null}
+      {effort && !effort.isLocked && !saving ? <Select key="effort" label="Effort" value={String(effort.value)}
+        options={(effort.options || []).map(value => ({ value, label: effortLabel(value) }))}
+        onSelect={value => act(() => saveEffort(host, field, value, renderedGeneration))} />
+        : effort ? <Text>{`Effort: ${effortLabel(String(effort.value))}${effort.isLocked ? ' · managed by your administrator' : ''}`}</Text> : null}
+      {effortError ? <Text>{effortError}</Text> : null}
       <Input key="search" label="Search" placeholder="Name, exact ID, or description" value={query} autoFocus onInput={search} onSubmit={search} />
       {loading ? <Text>Loading endpoint catalog…</Text> : saving ? <Text>Saving model selection…</Text> : !catalogLoaded ? <Text>Catalog unavailable. Resolve the discovery error, then refresh.</Text> : <Box flexDirection="column" gap={1}>
         <Text>{`${filtered.length} matching models · page ${page + 1} of ${pages}`}</Text>

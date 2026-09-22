@@ -11,7 +11,7 @@ allowed-tools: Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/status.mjs" --data "${CL
 Summarize the supplied status by session and role, keeping these categories separate:
 
 - **Requested:** the original agent type and model requested by the caller, where recorded.
-- **Effective:** the role and exact model identifier enforced by Agent Router's configured routing policy.
+- **Effective:** the role and exact model identifier enforced by Agent Router's configured routing policy, with `effectiveEffort` when the role pins one (null means Claude Code's own effort).
 - **Resolved:** `resolvedModel`, the model Claude actually selected for the spawned agent.
 - **Observed:** model identifiers and token counts from native completed-turn usage, where available.
 
