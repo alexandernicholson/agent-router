@@ -105,9 +105,11 @@ The plugin exposes OMP-derived agents such as `agent-router:scout`. Its aliases 
 
 The dispatch guard enforces local named roles and validates their configured models against the same discovery catalog used by the picker. Per-role assignments take precedence over the caller's requested model. Keep `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` unset when using differentiated role models.
 
-Each initialized session retains its endpoint and model-policy snapshot. You can update saved role assignments with `/agent-models` while routing continues with that snapshot. Start a new session to apply the updated assignments. A fresh session becomes routing-ready once its five roles are configured.
+Each initialized session retains its endpoint and model-policy snapshot. You can update saved role assignments with `/agent-models` while routing continues with that snapshot. Start a new session to apply the updated assignments, or run `/agent-models-apply` to apply them to the current session. A fresh session becomes routing-ready once its five roles are configured.
 
-The terminal prompt area shows a clickable `⇄` icon while routing is active. `⇄*` means saved model changes apply to your next session. Setup failures use Claude Code's warning line. Failures to save routing records or completed-turn observations go to the debug log (`claude --debug`), not the transcript.
+`/agent-models-apply` checks the saved models against your endpoint's catalog, as a new session does. When every model is advertised, new subagents use the saved models and efforts at once. Subagents already running keep the model and effort they started with. If a model is missing or the catalog is unavailable, the session keeps its current routing and the command says why. The endpoint stays pinned; changing `ANTHROPIC_BASE_URL` still requires a new session. You can run the command while a turn is in progress.
+
+The terminal prompt area shows a clickable `⇄` icon while routing is active. `⇄*` means saved model changes apply to your next session, or now with `/agent-models-apply`. Setup failures use Claude Code's warning line. Failures to save routing records or completed-turn observations go to the debug log (`claude --debug`), not the transcript.
 
 ## Developer panel
 

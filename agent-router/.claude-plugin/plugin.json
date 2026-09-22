@@ -1,10 +1,10 @@
 {
   "name": "agent-router",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "license": "MIT",
   "description": "Choose subagent models with /agent-models and click the prompt panel to inspect activity, token usage, and routing. Requires Claude Code Mod function hooks enabled.",
   "author": {
-    "name": "Agent Router maintainers"
+    "name": "Alexander Nicholson"
   },
   "userConfig": {
     "scout_model": {

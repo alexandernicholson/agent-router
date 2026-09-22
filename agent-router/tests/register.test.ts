@@ -20,7 +20,7 @@ function agentInput(input: Partial<AgentSpawnInput>): AgentSpawnInput {
 
 type Log = { text: string; to: string };
 
-async function start($: Engine, on: On, failBridge = false, agents: Array<{ agentId: string; role: string; effectiveModel: string }> = [], calls: Record<string, unknown>[] = [], logs: Log[] = [], failAction = '', routing: Record<string, unknown> = policy) {
+async function start($: Engine, on: On, failBridge = false, agents: Array<{ agentId: string; role: string; effectiveModel: string }> = [], calls: Record<string, unknown>[] = [], logs: Log[] = [], failAction = '', routing: Record<string, unknown> = policy, applied?: Record<string, unknown>) {
   mock.store(on);
   mock.env(on, {});
   const clock = mock.clock(on);
@@ -37,7 +37,8 @@ async function start($: Engine, on: On, failBridge = false, agents: Array<{ agen
     return { value: {
       exitCode: failed ? 1 : 0, stderr: failed ? 'catalog unavailable' : '',
       stdout: JSON.stringify(input.action === 'bootstrap'
-        ? { active: true, policy: routing, sessionId: 'session', gateway: 'https://gateway.example', digest: 'pinned', agents } : {}),
+        ? { active: true, policy: routing, sessionId: 'session', gateway: 'https://gateway.example', digest: 'pinned', agents, pendingConfiguration: applied !== undefined }
+        : input.action === 'apply' ? { active: true, policy: applied, pendingConfiguration: false } : {}),
     } };
   });
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true });
@@ -223,4 +224,43 @@ test('resumed teammates regain their role effort', async ($, on) => {
   await start($, on, false, [{ agentId: 'teammate-2', role: 'scout', effectiveModel: policy.roles.scout.model }], [], [], '', efforted);
   expect(await steps($, { turnId: 'resumed', agentId: 'teammate-2', model: 'sonnet', effort: 'high' }))
     .toEqual([{ kind: 'text', index: 0, text: `${policy.roles.scout.model}|low` }]);
+});
+
+const applyCommand = { command: 'agent-models-apply', args: '', origin: { kind: 'composer' as const }, presentation: { isFullscreen: false, columns: 120 } };
+
+test('applying saved settings routes new spawns immediately and keeps running agents pinned', async ($, on) => {
+  echoStep(on);
+  const calls: Record<string, unknown>[] = [];
+  let spawned = 0;
+  on('agent.spawn', ($, e) => ({ model: e.model!, agentId: `reviewer-${++spawned}` }));
+  const saved = { ...policy, roles: { ...policy.roles, reviewer: { ...policy.roles.reviewer, model: 'vendor/review-v2', effort: 'high' } } };
+  await start($, on, false, [], calls, [], '', policy, saved);
+  await $.agent.spawn(agentInput({ subagentType: 'reviewer', tool_use_id: 'before' }));
+  const result = await $.command.run(applyCommand);
+  expect(calls.some(call => call.action === 'apply')).toBe(true);
+  expect(typeof result.text === 'string' && result.text.includes('vendor/review-v2')).toBe(true);
+  const after = await $.agent.spawn(agentInput({ subagentType: 'reviewer', tool_use_id: 'after' }));
+  expect(after.model).toBe('vendor/review-v2');
+  expect(await steps($, { turnId: 'new', agentId: 'reviewer-2', model: 'sonnet', effort: 'low' }))
+    .toEqual([{ kind: 'text', index: 0, text: 'vendor/review-v2|high' }]);
+  expect(await steps($, { turnId: 'old', agentId: 'reviewer-1', model: 'sonnet', effort: 'low' }))
+    .toEqual([{ kind: 'text', index: 0, text: `${policy.roles.reviewer.model}|low` }]);
+});
+
+test('a refused apply reports why and keeps the pinned routing', async ($, on) => {
+  on('agent.spawn', ($, e) => ({ model: e.model!, agentId: 'kept' }));
+  const saved = { ...policy, roles: { ...policy.roles, reviewer: { ...policy.roles.reviewer, model: 'vendor/review-v2' } } };
+  await start($, on, false, [], [], [], 'apply', policy, saved);
+  const result = await $.command.run(applyCommand);
+  expect(typeof result.text === 'string' && result.text.includes('catalog unavailable')).toBe(true);
+  const spawn = await $.agent.spawn(agentInput({ subagentType: 'reviewer' }));
+  expect(spawn.model).toBe(policy.roles.reviewer.model);
+});
+
+test('apply reports when the session already uses the saved settings', async ($, on) => {
+  const calls: Record<string, unknown>[] = [];
+  await start($, on, false, [], calls);
+  const result = await $.command.run(applyCommand);
+  expect(calls.some(call => call.action === 'apply')).toBe(false);
+  expect(typeof result.text === 'string' && result.text.includes('already')).toBe(true);
 });

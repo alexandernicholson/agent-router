@@ -24,14 +24,8 @@ async function bootstrap(input, env, discover) {
     }
     return { ...previous, pendingConfiguration: pendingConfiguration(previous, input.options), agents: await agentAssignments(root, input.session_id) };
   }
-  const policy = baseUrl ? policyFromOptions(input.options) : null;
+  const policy = baseUrl ? await advertisedPolicy(input.options, baseUrl, env, discover) : null;
   const digest = policy ? policyDigest(policy) : null;
-  const ids = baseUrl ? (await discover({ baseUrl, env })).map(model => model.id) : [];
-  if (baseUrl) for (const role of ROLES) {
-    if (!ids.includes(policy.roles[role].model)) {
-      throw new Error(`Endpoint catalog does not advertise the model configured for ${role}: ${policy.roles[role].model}. No implicit model fallback is permitted.`);
-    }
-  }
   const snapshot = {
     sessionId: input.session_id, policy, digest, gateway: baseUrl, active: Boolean(baseUrl),
     mode: baseUrl ? 'mod' : 'inactive', createdAt: new Date().toISOString(),
@@ -40,6 +34,28 @@ async function bootstrap(input, env, discover) {
   const pinned = await readRecord(file);
   if (pinned.digest !== digest || pinned.gateway !== baseUrl) throw new Error('Conflicting concurrent Agent Router bootstrap.');
   return { ...pinned, pendingConfiguration: false, agents: await agentAssignments(root, input.session_id) };
+}
+
+// Every configured model must be advertised; there is no implicit fallback.
+async function advertisedPolicy(options, baseUrl, env, discover) {
+  const policy = policyFromOptions(options);
+  const ids = (await discover({ baseUrl, env })).map(model => model.id);
+  for (const role of ROLES) {
+    if (!ids.includes(policy.roles[role].model)) {
+      throw new Error(`Endpoint catalog does not advertise the model configured for ${role}: ${policy.roles[role].model}. No implicit model fallback is permitted.`);
+    }
+  }
+  return policy;
+}
+
+// Re-pins a running session to the saved options; its endpoint stays pinned.
+async function apply(input, env, discover, snapshot) {
+  if (!snapshot.active) throw new Error('Configure an Anthropic-compatible endpoint before applying Agent Router settings.');
+  const policy = await advertisedPolicy(input.options, snapshot.gateway, env, discover);
+  const file = recordPath(stateDirectory(env), 'sessions', input.session_id);
+  const updated = { ...snapshot, policy, digest: policyDigest(policy), appliedAt: new Date().toISOString() };
+  await writeRecord(file, updated);
+  return { ...updated, pendingConfiguration: false };
 }
 
 function pendingConfiguration(snapshot, options) {
@@ -127,11 +143,12 @@ async function observe(input, env) {
 
 export async function handleRequest(input, env = process.env, discover = fetchModels) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Expected a bridge JSON object.');
-  if (!['bootstrap', 'catalog', 'route', 'result', 'observe', 'stats'].includes(input.action)) throw new Error('Unknown Agent Router bridge action.');
+  if (!['bootstrap', 'catalog', 'route', 'result', 'observe', 'stats', 'apply'].includes(input.action)) throw new Error('Unknown Agent Router bridge action.');
   if (input.action === 'catalog') return catalog(env, discover);
   if (input.action === 'stats') return sessionStats(stateDirectory(env), input.session_id);
   if (input.action === 'bootstrap') return bootstrap(input, env, discover);
   const snapshot = await snapshotFor(input, env);
+  if (input.action === 'apply') return apply(input, env, discover, snapshot);
   if (input.action === 'route') return recordRoute(input, env, snapshot);
   if (input.action === 'result') return recordResult(input, env);
   return observe(input, env);

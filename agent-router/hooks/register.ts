@@ -85,6 +85,8 @@ export function register(on: On, options: PluginOptions = {}) {
       session: { id: () => $.session.id() },
       endpoint: () => $.env.get('ANTHROPIC_BASE_URL'),
     };
+    await $.command.register({ name: 'agent-models-apply', immediate: true,
+      description: 'Apply saved Agent Router role models and efforts to this session now.' });
     try { await picker.initialize(pickerHost, e); }
     catch (error) { $.ui.log(`Agent Router models: ${error instanceof Error ? error.message : 'Open /agent-models to retry.'}`); }
     if (!failure && snapshot?.active && e.isInteractive && e.surface === 'terminal') {
@@ -175,6 +177,25 @@ export function register(on: On, options: PluginOptions = {}) {
     activityTimer?.cancel();
     activityTimer = undefined;
     return next(e);
+  });
+
+  on('command.run', { command: 'agent-models-apply' }, async $ => {
+    await ready;
+    if (!snapshot || !bridge) return { text: `Agent Router could not apply settings: ${failure || 'session setup has not completed.'}` };
+    if (!snapshot.active) return { text: 'Configure an Anthropic-compatible endpoint before applying Agent Router settings.' };
+    if (!snapshot.pendingConfiguration) return { text: 'This session already uses the saved Agent Router settings.' };
+    try {
+      const applied = await bridge({ action: 'apply' });
+      validatePolicy(applied.policy);
+      snapshot = { active: true, policy: applied.policy, pendingConfiguration: false };
+    } catch (error) {
+      return { text: `Agent Router kept this session's routing. ${error instanceof Error ? error.message : 'The saved settings could not be applied.'}` };
+    }
+    $.ui.invalidate('ui.render');
+    const roles = Object.entries(snapshot.policy.roles)
+      .map(([role, entry]) => `- ${role}: ${entry.model}${entry.effort ? ` (${entry.effort} effort)` : ''}`);
+    return { text: ['Agent Router applied the saved settings. New subagents use:', ...roles,
+      'Subagents already running keep the model and effort they started with.'].join('\n') };
   });
 
   on('command.run', { command: 'agent-models' }, ($, e) => pickerHost

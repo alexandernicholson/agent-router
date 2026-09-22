@@ -148,7 +148,7 @@ export function createModelPicker(options: PluginOptions) {
       rows = rows.map(item => item.key === row.key ? { ...item, value: id } : item);
       role = nextRole;
       page = 0;
-      notice = `Saved ${roles.find(item => item.value === field)!.label}. New sessions use the saved settings; this session keeps its routing policy.`;
+      notice = `Saved ${roles.find(item => item.value === field)!.label}. New sessions use the saved settings; run /agent-models-apply to use them in this session.`;
     } catch (cause) {
       error = message(cause);
       if (open) await intent(host, field);
@@ -174,7 +174,7 @@ export function createModelPicker(options: PluginOptions) {
       if (result.deny !== undefined) throw new Error(result.deny);
       if (result.value !== value) throw new Error('The config writer returned a different value. Open /config to inspect the saved setting.');
       rows = rows.map(item => item.key === row.key ? { ...item, value } : item);
-      notice = `Saved ${roles.find(item => item.value === field)!.label} effort. New sessions use the saved settings; this session keeps its routing policy.`;
+      notice = `Saved ${roles.find(item => item.value === field)!.label} effort. New sessions use the saved settings; run /agent-models-apply to use them in this session.`;
     } catch (cause) {
       error = message(cause);
     } finally {
