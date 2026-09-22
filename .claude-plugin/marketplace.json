@@ -2,7 +2,7 @@
   "name": "agent-router-tools",
   "description": "Agent Router plugins for Claude Code.",
   "owner": {
-    "name": "Agent Router maintainers"
+    "name": "Alexander Nicholson"
   },
   "plugins": [
     {
