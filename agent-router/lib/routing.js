@@ -13,8 +13,16 @@ export function validatePolicy(value) {
   if (!value || value.version !== 1 || !value.roles || typeof value.roles !== 'object') {
     throw new Error('Routing policy must have version 1 and a roles object.');
   }
-  if (Object.keys(value).some(key => !['version', 'roles'].includes(key))) {
+  if (Object.keys(value).some(key => !['version', 'roles', 'teammate'].includes(key))) {
     throw new Error('Unknown routing policy field.');
+  }
+  if ('teammate' in value) {
+    const mate = value.teammate;
+    if (!mate || typeof mate !== 'object' || Array.isArray(mate) || !Object.keys(mate).length ||
+        Object.keys(mate).some(key => !['model', 'effort'].includes(key)) ||
+        ('model' in mate && !isExactModelId(mate.model)) || ('effort' in mate && !EFFORTS.includes(mate.effort))) {
+      throw new Error('The teammate override needs an exact model ID, a valid effort, or both.');
+    }
   }
   if (Object.keys(value.roles).sort().join() !== [...ROLES].sort().join()) {
     throw new Error(`Routing policy must define exactly ${ROLES.join(', ')}.`);
@@ -58,6 +66,20 @@ export function routeAgent(policy, input) {
   // Keep the native read-only Plan definition while assigning the task model.
   const selected = { role, type: type === 'Plan' ? 'Plan' : `agent-router:${role}`, model: policy.roles[role].model };
   return policy.roles[role].effort === undefined ? selected : { ...selected, effort: policy.roles[role].effort };
+}
+
+// Teammates route by their agent type like subagents; the override then wins.
+/** @returns {{ role: string, type: string, model: string, effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' }} */
+export function routeTeammate(policy, input) {
+  const type = input.subagentType ?? 'general-purpose';
+  if (type === 'Plan') {
+    throw new Error('Plan cannot run as a teammate under Agent Router: its read-only definition applies to subagents only. Use agent-router:task.');
+  }
+  const selected = routeAgent(policy, { ...input, subagentType: type });
+  const model = policy.teammate?.model ?? selected.model;
+  const effort = policy.teammate?.effort ?? selected.effort;
+  const routed = { role: selected.role, type: `agent-router:${selected.role}`, model };
+  return effort === undefined ? routed : { ...routed, effort };
 }
 
 export function isTruthy(value) {

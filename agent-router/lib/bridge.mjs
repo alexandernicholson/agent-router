@@ -1,8 +1,9 @@
 import { policyFromOptions, policyDigest } from './policy.mjs';
-import { routeAgent, isTruthy, ROLES, sameModel } from './routing.js';
+import { routeAgent, routeTeammate, isTruthy, ROLES, sameModel } from './routing.js';
+import { teamMember } from './teammate.mjs';
 import { fetchModels, normalizeBaseUrl } from './connection.mjs';
 import { normalizeCatalog } from './catalog.js';
-import { stateDirectory, recordPath, readRecord, writeRecord, agentAssignments, sessionStats, idKey, USAGE_KEYS } from './state.mjs';
+import { stateDirectory, recordPath, readRecord, writeRecord, agentAssignments, sessionStats, idKey, linkTeammate, USAGE_KEYS } from './state.mjs';
 
 
 function assertOverrides(env) {
@@ -22,7 +23,20 @@ async function bootstrap(input, env, discover) {
     if (previous.gateway !== baseUrl) {
       throw new Error('Agent Router endpoint changed during this session. Start a new Claude session to apply it.');
     }
-    return { ...previous, pendingConfiguration: pendingConfiguration(previous, input.options), agents: await agentAssignments(root, input.session_id) };
+    const pending = previous.leadSessionId ? false : pendingConfiguration(previous, input.options);
+    return { ...previous, pendingConfiguration: pending, agents: await agentAssignments(root, input.session_id) };
+  }
+  let teammateNotice;
+  if (baseUrl && input.teammate) {
+    const inherited = await inheritFromLead(root, input, baseUrl, env);
+    if (inherited.snapshot) {
+      await writeRecord(file, inherited.snapshot, true);
+      const pinned = await readRecord(file);
+      if (pinned.leadSessionId !== inherited.snapshot.leadSessionId) throw new Error('Conflicting concurrent Agent Router bootstrap.');
+      await linkTeammate(root, pinned.leadSessionId, input.session_id);
+      return { ...pinned, pendingConfiguration: false, agents: await agentAssignments(root, input.session_id) };
+    }
+    teammateNotice = inherited.notice;
   }
   const policy = baseUrl ? await advertisedPolicy(input.options, baseUrl, env, discover) : null;
   const digest = policy ? policyDigest(policy) : null;
@@ -33,7 +47,29 @@ async function bootstrap(input, env, discover) {
   await writeRecord(file, snapshot, true);
   const pinned = await readRecord(file);
   if (pinned.digest !== digest || pinned.gateway !== baseUrl) throw new Error('Conflicting concurrent Agent Router bootstrap.');
-  return { ...pinned, pendingConfiguration: false, agents: await agentAssignments(root, input.session_id) };
+  return { ...pinned, pendingConfiguration: false, agents: await agentAssignments(root, input.session_id), ...(teammateNotice && { teammateNotice }) };
+}
+
+// A split-pane teammate adopts its lead's pinned policy, never the settings
+// saved when it happened to start; `self` is the route its own steps use.
+async function inheritFromLead(root, input, baseUrl, env) {
+  const identity = input.teammate;
+  if (!identity || typeof identity !== 'object' || !teamMember(identity, env)) {
+    return { notice: 'Agent Router could not confirm this teammate against its team config, so it routes as its own session.' };
+  }
+  const lead = await readRecord(recordPath(root, 'sessions', identity.parentSessionId));
+  if (!lead?.active) {
+    return { notice: 'Agent Router is not routing in this teammate\'s lead session, so the teammate routes as its own session.' };
+  }
+  if (lead.gateway !== baseUrl) {
+    throw new Error('This teammate\'s endpoint differs from its lead session\'s endpoint. Start the lead and its teammates with the same ANTHROPIC_BASE_URL.');
+  }
+  const self = routeTeammate(lead.policy, { subagentType: identity.agentType });
+  return { snapshot: {
+    sessionId: input.session_id, policy: lead.policy, digest: lead.digest, gateway: lead.gateway, active: true,
+    mode: 'mod', createdAt: new Date().toISOString(), leadSessionId: identity.parentSessionId, self,
+    teammate: { agentId: identity.agentId, name: identity.agentName ?? null, teamName: identity.teamName, agentType: identity.agentType ?? null },
+  } };
 }
 
 // Every configured model must be advertised; there is no implicit fallback.
@@ -45,12 +81,16 @@ async function advertisedPolicy(options, baseUrl, env, discover) {
       throw new Error(`Endpoint catalog does not advertise the model configured for ${role}: ${policy.roles[role].model}. No implicit model fallback is permitted.`);
     }
   }
+  if (policy.teammate?.model && !ids.includes(policy.teammate.model)) {
+    throw new Error(`Endpoint catalog does not advertise the model configured for teammates: ${policy.teammate.model}. No implicit model fallback is permitted.`);
+  }
   return policy;
 }
 
 // Re-pins a running session to the saved options; its endpoint stays pinned.
 async function apply(input, env, discover, snapshot) {
   if (!snapshot.active) throw new Error('Configure an Anthropic-compatible endpoint before applying Agent Router settings.');
+  if (snapshot.leadSessionId) throw new Error('This teammate follows its lead session\'s routing. Run /agent-models-apply in the lead; teammates started after that use the new settings.');
   const policy = await advertisedPolicy(input.options, snapshot.gateway, env, discover);
   const file = recordPath(stateDirectory(env), 'sessions', input.session_id);
   const updated = { ...snapshot, policy, digest: policyDigest(policy), appliedAt: new Date().toISOString() };
@@ -86,9 +126,13 @@ async function snapshotFor(input, env) {
 async function recordRoute(input, env, snapshot) {
   if (!snapshot.active) throw new Error('Configure an Anthropic-compatible endpoint before using an Agent Router role.');
   if (input.agent_id !== undefined) idKey(input.agent_id);
-  const selected = routeAgent(snapshot.policy, { subagentType: input.effectiveType });
+  const teammate = input.kind === 'teammate';
+  const selected = teammate
+    ? routeTeammate(snapshot.policy, { subagentType: input.effectiveType })
+    : routeAgent(snapshot.policy, { subagentType: input.effectiveType });
   const record = {
     sessionId: input.session_id, toolUseId: input.tool_use_id, parentAgentId: input.agent_id || null,
+    kind: teammate ? 'teammate' : 'subagent', ...(teammate && { name: typeof input.name === 'string' ? input.name : null }),
     requestedType: typeof input.requestedType === 'string' ? input.requestedType : null,
     requestedModel: typeof input.requestedModel === 'string' ? input.requestedModel : null,
     role: selected.role, effectiveType: selected.type, effectiveModel: selected.model, effectiveEffort: selected.effort ?? null,
@@ -113,11 +157,14 @@ async function recordResult(input, env) {
     record.agentId = result.agentId;
   }
   if (typeof result.model === 'string') record.resolvedModel = result.model;
+  if (record.kind === 'teammate' && ['in-process', 'tmux', 'iterm2'].includes(result.backend)) record.backend = result.backend;
   record.updatedAt = new Date().toISOString();
   await writeRecord(path, record);
   if (!failed && record.agentId) await writeRecord(recordPath(root, 'agents', input.session_id, record.agentId), {
     sessionId: input.session_id, agentId: record.agentId, role: record.role,
     effectiveModel: record.effectiveModel, toolUseId: record.toolUseId,
+    ...(record.effectiveEffort && { effectiveEffort: record.effectiveEffort }),
+    ...(record.kind === 'teammate' && { kind: 'teammate', name: record.name, backend: record.backend ?? null }),
   });
   if (record.resolvedModel && !sameModel(record.effectiveModel, record.resolvedModel)) {
     return { systemMessage: `Agent Router mismatch: ${record.role} selected ${record.effectiveModel}, Claude resolved ${record.resolvedModel}. The run is not verified; inspect /agent-router:routes.` };

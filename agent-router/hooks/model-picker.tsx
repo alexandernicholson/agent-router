@@ -21,6 +21,10 @@ const roles = [
   { value: 'task_model', label: 'Task' },
   { value: 'sonic_model', label: 'Sonic' },
 ];
+// Optional: an unset teammate override means each teammate uses its role's.
+const teammateEntry = { value: 'teammate_model', label: 'Teammates' };
+const entries = [...roles, teammateEntry];
+const entryLabel = (field: string) => entries.find(item => item.value === field)!.label;
 const pageSize = 3;
 // The picker's controls need this many columns; a fullscreen dock opens this wide.
 const minimumColumns = 110;
@@ -148,10 +152,33 @@ export function createModelPicker(options: PluginOptions) {
       rows = rows.map(item => item.key === row.key ? { ...item, value: id } : item);
       role = nextRole;
       page = 0;
-      notice = `Saved ${roles.find(item => item.value === field)!.label}. New sessions use the saved settings; run /agent-models-apply to use them in this session.`;
+      notice = `Saved ${entryLabel(field)}. New sessions use the saved settings; run /agent-models-apply to use them in this session.`;
     } catch (cause) {
       error = message(cause);
       if (open) await intent(host, field);
+    } finally {
+      saving = false;
+      redraw(host);
+    }
+  }
+
+  async function clearTeammate(host: ModelPickerHost, renderedGeneration: number) {
+    if (!open || saving || loading || renderedGeneration !== generation || role !== teammateEntry.value) return;
+    saving = true;
+    error = '';
+    notice = '';
+    redraw(host);
+    try {
+      rows = await host.config.list();
+      if (!open) return;
+      const row = roleRow(rows, host.plugin.name, teammateEntry.value);
+      if (row.isLocked) throw new Error('Your administrator manages this setting. Ask them to update its model.');
+      const result = await host.config.set({ key: row.key, value: '' });
+      if (result.deny !== undefined) throw new Error(result.deny);
+      rows = rows.map(item => item.key === row.key ? { ...item, value: '' } : item);
+      notice = 'Teammates use each role\'s model. New sessions use the saved settings; run /agent-models-apply to use them in this session.';
+    } catch (cause) {
+      error = message(cause);
     } finally {
       saving = false;
       redraw(host);
@@ -174,7 +201,7 @@ export function createModelPicker(options: PluginOptions) {
       if (result.deny !== undefined) throw new Error(result.deny);
       if (result.value !== value) throw new Error('The config writer returned a different value. Open /config to inspect the saved setting.');
       rows = rows.map(item => item.key === row.key ? { ...item, value } : item);
-      notice = `Saved ${roles.find(item => item.value === field)!.label} effort. New sessions use the saved settings; run /agent-models-apply to use them in this session.`;
+      notice = `Saved ${entryLabel(field)} effort. New sessions use the saved settings; run /agent-models-apply to use them in this session.`;
     } catch (cause) {
       error = message(cause);
     } finally {
@@ -190,7 +217,7 @@ export function createModelPicker(options: PluginOptions) {
     session = await host.session.id();
     intentKey = `${paneId}:${session}`;
     const saved = await host.store.get(intentKey) as { session?: string; open?: boolean; role?: string } | undefined;
-    if (saved?.session === session && saved.open && roles.some(item => item.value === saved.role)) {
+    if (saved?.session === session && saved.open && entries.some(item => item.value === saved.role)) {
       role = saved.role!;
       if (e.isInteractive && (e.surface === 'terminal' || e.surface === 'desktop')) {
         try { await show(host); } catch (cause) { host.ui.log(`Agent Router models: ${message(cause)}`); }
@@ -255,12 +282,15 @@ export function createModelPicker(options: PluginOptions) {
         {saving ? null : <Button key="refresh" label="Refresh catalog" onPress={() => act(() => refresh(host))} />}
         <Button key="close" label="Close" onPress={() => act(() => close(host))} />
       </Box>
-      <Select key="role" label="Role" value={role} options={roles} onSelect={value => {
-        if (saving || !roles.some(item => item.value === value)) return;
+      <Select key="role" label="Role" value={role} options={entries} onSelect={value => {
+        if (saving || !entries.some(item => item.value === value)) return;
         role = value; page = 0; error = ''; notice = ''; redraw(host);
         return act(() => intent(host));
       }} />
-      <Text>{`Saved: ${configError ? 'unavailable' : current?.value || 'Choose a model'}`}</Text>
+      <Text>{`Saved: ${configError ? 'unavailable' : current?.value || (role === teammateEntry.value ? 'Default (each role\'s model)' : 'Choose a model')}`}</Text>
+      {role === teammateEntry.value ? <Text dimColor>Teammates use this model and effort in place of their role's. Default keeps each role's.</Text> : null}
+      {role === teammateEntry.value && current?.value && !current.isLocked && !saving
+        ? <Button key="teammate-default" label="Use role defaults" onPress={() => act(() => clearTeammate(host, renderedGeneration))} /> : null}
       {current?.isLocked ? <Text>Your administrator manages this setting. Ask them to update its model.</Text> : null}
       {rowError ? <Text>{rowError}</Text> : null}
       {effort && !effort.isLocked && !saving ? <Select key="effort" label="Effort" value={String(effort.value)}

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { validatePolicy, ROLES, EFFORTS } from './routing.js';
+import { validatePolicy, isExactModelId, ROLES, EFFORTS } from './routing.js';
 
 const aliases = {
   scout: ['scout', 'Explore'], reviewer: ['reviewer'],
@@ -22,7 +22,20 @@ export function policyFromOptions(options = {}) {
     if (!EFFORTS.includes(effort)) throw new Error(`Choose default or one of ${EFFORTS.join(', ')} for ${effortKey} in /agent-models.`);
     roles[role].effort = effort;
   }
-  return validatePolicy({ version: 1, roles });
+  const policy = { version: 1, roles };
+  const teammate = {};
+  const mateModel = options.teammate_model;
+  if (typeof mateModel === 'string' && mateModel.trim() && mateModel !== 'default') {
+    if (!isExactModelId(mateModel)) throw new Error('Choose an exact model ID or default for teammate_model in /agent-models.');
+    teammate.model = mateModel;
+  }
+  const mateEffort = options.teammate_effort;
+  if (mateEffort !== undefined && mateEffort !== '' && mateEffort !== 'default') {
+    if (!EFFORTS.includes(mateEffort)) throw new Error(`Choose default or one of ${EFFORTS.join(', ')} for teammate_effort in /agent-models.`);
+    teammate.effort = mateEffort;
+  }
+  if (Object.keys(teammate).length) policy.teammate = teammate;
+  return validatePolicy(policy);
 }
 
 export function policyDigest(policy) {
@@ -31,5 +44,7 @@ export function policyDigest(policy) {
     const { model, aliases, effort } = policy.roles[role];
     return effort === undefined ? [role, model, [...aliases].sort()] : [role, model, [...aliases].sort(), effort];
   });
+  // The teammate override joins only when set, so earlier sessions keep theirs.
+  if (policy.teammate) normalized.push(['teammate', policy.teammate.model ?? null, policy.teammate.effort ?? null]);
   return createHash('sha256').update(JSON.stringify(normalized)).digest('hex');
 }

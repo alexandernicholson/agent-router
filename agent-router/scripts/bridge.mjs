@@ -4,6 +4,7 @@ import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { handleRequest } from '../lib/bridge.mjs';
+import { readTeammateIdentity } from '../lib/teammate.mjs';
 
 process.umask(0o077);
 let input;
@@ -39,6 +40,11 @@ try {
     const ids = exact.length ? exact : entries.map(([id]) => id).filter(id => id.split('@')[0] === name);
     if (ids.length !== 1) throw new Error('Cannot resolve an unambiguous Agent Router installation identity; reinstall agent-router@agent-router-tools through the marketplace.');
     env.CLAUDE_PLUGIN_DATA = join(config, 'plugins', 'data', ids[0].replace(/[^a-zA-Z0-9_-]/g, '-'));
+  }
+  // The hooks module cannot see launch flags; only bootstrap needs them.
+  if (input?.action === 'bootstrap' && input.teammate === undefined) {
+    const identity = readTeammateIdentity();
+    if (identity) input.teammate = identity;
   }
   const output = await handleRequest(input, env);
   process.stdout.write(`${JSON.stringify(output)}\n`);

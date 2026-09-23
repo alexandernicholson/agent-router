@@ -109,7 +109,32 @@ Each initialized session retains its endpoint and model-policy snapshot. You can
 
 `/agent-models-apply` checks the saved models against your endpoint's catalog, as a new session does. When every model is advertised, new subagents use the saved models and efforts at once. Subagents already running keep the model and effort they started with. If a model is missing or the catalog is unavailable, the session keeps its current routing and the command says why. The endpoint stays pinned; changing `ANTHROPIC_BASE_URL` still requires a new session. You can run the command while a turn is in progress.
 
-The terminal prompt area shows a clickable `⇄` icon while routing is active. `⇄*` means saved model changes apply to your next session, or now with `/agent-models-apply`. Setup failures use Claude Code's warning line. Failures to save routing records or completed-turn observations go to the debug log (`claude --debug`), not the transcript.
+The terminal prompt area shows a clickable `⇄` icon while routing is active. While you view a subagent's or teammate's transcript, the icon also shows the model and effort that agent's requests use, such as `[ ⇄ · claude-opus-5-5 · high ]`. Efforts are shortened to `low`, `med`, `high`, `xhigh`, and `max`, and a model without an effort setting shows the model alone. A split-pane teammate's session always shows its own. `⇄*` means saved model changes apply to your next session, or now with `/agent-models-apply`. Setup failures use Claude Code's warning line. Failures to save routing records or completed-turn observations go to the debug log (`claude --debug`), not the transcript.
+
+## Agent team teammates
+
+With `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, Claude launches a teammate when it calls the Agent tool with a `name`. Agent Router routes teammates by their agent type, like subagents:
+
+| Teammate type | Managed role |
+| --- | --- |
+| `Explore` or `scout` | `agent-router:scout` |
+| None, `general-purpose`, or `task` | `agent-router:task` |
+| `reviewer`, `security-reviewer`, or `sonic` | The matching `agent-router:` role |
+
+`Plan` and unmapped agent types are refused as teammates. A named call that Claude Code runs as a subagent, such as one with `isolation` or `cwd`, keeps the subagent routing.
+
+The optional **Teammates** entry in `/agent-models` sets `teammate_model` and `teammate_effort`. When set, they replace the role's model and effort for every teammate. Leave them on the default to use each role's model and effort.
+
+Both display modes follow the lead session's pinned routing:
+
+- **In-process teammates** start on the routed model, and each model request uses the routed model and effort.
+- **Split-pane teammates** run as separate Claude sessions. Claude Code starts them on the routed model. Each teammate session then adopts its lead's pinned policy, so a teammate's own subagents route by the lead's settings, not by settings saved later.
+
+`/agent-models-apply` in the lead applies to teammates launched afterwards. Teammates already running keep the model and effort they started with. The command is refused inside a split-pane teammate session.
+
+A split-pane teammate confirms its identity against the team config Claude Code writes under `~/.claude/teams`. When the lead session has no active Agent Router routing, the teammate routes as its own session and notes this in the debug log. A teammate whose `ANTHROPIC_BASE_URL` differs from its lead's refuses to route.
+
+Agent Router reads the teammate launch details that Claude Code 2.1.280 provides: the Agent tool's teammate result and the split-pane teammate's launch flags. Neither is part of the documented plugin API, so recheck teammate routing after upgrading Claude Code.
 
 ## Developer panel
 
@@ -125,8 +150,8 @@ Mouse clicks follow Claude Code's [fullscreen renderer](https://code.claude.com/
 
 These example values illustrate the layout. The panel displays statistics for managed subagents in the current session:
 
-- **Activity** follows Claude's native agent roster, refreshed once per second. Completed and failed states observed by the panel are retained when roster entries disappear; failed includes killed agents. Running counts always come from the current roster.
-- **Usage** totals recorded completed-turn input, output, and cache-read tokens. Repeated observations and resumed routes count each agent turn once.
+- **Activity** follows Claude's native agent roster, refreshed once per second. It includes in-process teammates. Completed and failed states observed by the panel are retained when roster entries disappear; failed includes killed agents. Running counts always come from the current roster.
+- **Usage** totals recorded completed-turn input, output, and cache-read tokens, including split-pane teammate sessions. Repeated observations and resumed routes count each agent turn once.
 - **Routing** counts persisted routing decisions. Overrides count explicit requested models that differ from the configured assignment; mismatches compare the assignment with Claude's resolved model.
 
 Usage and routing refresh when their records change. A view shows `unavailable` when its data cannot be read.

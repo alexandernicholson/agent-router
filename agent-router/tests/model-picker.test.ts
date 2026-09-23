@@ -16,6 +16,10 @@ function world(on: On, models = [{ id: 'vendor/selected', name: 'Selected model'
   const efforts = ['default', 'low', 'medium', 'high', 'xhigh', 'max'];
   for (const field of fields) rows.push({ key: `actual-owner.${field.replace(/_model$/, '_effort')}`, label: field,
     kind: 'choice', value: 'default', options: efforts, provider: { plugin: 'agent-router@agent-router-tools', tier: 'user' }, isLocked: false });
+  rows.push({ key: 'actual-owner.teammate_model', label: 'teammate_model', kind: 'text', value: '',
+    provider: { plugin: 'agent-router@agent-router-tools', tier: 'user' }, isLocked: false });
+  rows.push({ key: 'actual-owner.teammate_effort', label: 'teammate_effort', kind: 'choice', value: 'default', options: efforts,
+    provider: { plugin: 'agent-router@agent-router-tools', tier: 'user' }, isLocked: false });
   // Similarly named foreign rows must never receive the selection.
   rows.push({ ...rows[rows.length - 5], key: 'foreign.scout_effort', provider: { plugin: 'foreign', tier: 'user' } });
   rows.unshift({ ...rows[0], key: 'foreign.scout_model', provider: { plugin: 'foreign', tier: 'user' } });
@@ -175,4 +179,35 @@ test('locked effort rows are shown but never written', async ($, on) => {
   expect(text(drawn).includes('managed by your administrator')).toBe(true);
   expect(state.writes).toBe(0);
   expect(state.rows.find(row => row.key === 'actual-owner.scout_effort')?.value).toBe('default');
+});
+
+test('the Teammates entry saves a teammate model and effort, and default clears the override', async ($, on) => {
+  const state = world(on);
+  for (const row of state.rows) if (row.kind === 'text' && row.key.startsWith('actual-owner.') && row.key !== 'actual-owner.teammate_model') row.value = 'vendor/selected';
+  await open($);
+  await $.ui.render(pane);
+  await $.ui.select({ plugin: 'agent-router', key: 'role', requestId: 'agent-models', value: 'teammate_model' });
+  const drawn = await $.ui.render(pane);
+  expect(text(drawn).includes('each role')).toBe(true);
+  await $.ui.press({ plugin: 'agent-router', key: 'model:vendor/selected', requestId: 'agent-models' });
+  expect(state.rows.find(row => row.key === 'actual-owner.teammate_model')?.value).toBe('vendor/selected');
+  await $.ui.render(pane);
+  await $.ui.select({ plugin: 'agent-router', key: 'effort', requestId: 'agent-models', value: 'high' });
+  expect(state.rows.find(row => row.key === 'actual-owner.teammate_effort')?.value).toBe('high');
+  await $.ui.render(pane);
+  await $.ui.press({ plugin: 'agent-router', key: 'teammate-default', requestId: 'agent-models' });
+  expect(state.rows.find(row => row.key === 'actual-owner.teammate_model')?.value).toBe('');
+  expect(state.rows.find(row => row.key === 'foreign.scout_model')?.value).toBe('');
+});
+
+test('an unset teammate override never blocks the role setup flow', async ($, on) => {
+  const state = world(on);
+  await open($);
+  for (let index = 0; index < 5; index++) {
+    await $.ui.render(pane);
+    await $.ui.press({ plugin: 'agent-router', key: 'model:vendor/selected', requestId: 'agent-models' });
+  }
+  const roles = state.rows.filter(row => row.kind === 'text' && row.key.startsWith('actual-owner.') && row.key !== 'actual-owner.teammate_model');
+  expect(roles.every(row => row.value === 'vendor/selected')).toBe(true);
+  expect(state.rows.find(row => row.key === 'actual-owner.teammate_model')?.value).toBe('');
 });

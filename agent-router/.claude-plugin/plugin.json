@@ -1,6 +1,6 @@
 {
   "name": "agent-router",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "license": "MIT",
   "description": "Choose subagent models with /agent-models and click the prompt panel to inspect activity, token usage, and routing. Requires Claude Code Mod function hooks enabled.",
   "author": {
@@ -101,6 +101,27 @@
       "type": "string",
       "title": "Sonic effort",
       "description": "Reasoning effort for the sonic role. Default keeps the engine's effort; models without effort support ignore it.",
+      "options": [
+        "default",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default": "default",
+      "required": false
+    },
+    "teammate_model": {
+      "type": "string",
+      "title": "Teammate model",
+      "description": "Model for agent team teammates in place of their role's model. Choose with /agent-models; leave empty to use each role's model.",
+      "required": false
+    },
+    "teammate_effort": {
+      "type": "string",
+      "title": "Teammate effort",
+      "description": "Reasoning effort for agent team teammates. Default keeps each role's effort; models without effort support ignore it.",
       "options": [
         "default",
         "low",

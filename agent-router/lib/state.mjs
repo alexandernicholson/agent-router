@@ -72,12 +72,27 @@ export async function agentAssignments(root, sessionId) {
   return listRecords(root, 'agents', sessionId);
 }
 
+// A pane teammate is its own session; its lead links it here so the lead's
+// panel counts the teammate's completed turns with its own.
+export async function linkTeammate(root, leadSessionId, teammateSessionId) {
+  await writeRecord(recordPath(root, 'teammates', leadSessionId, teammateSessionId), { leadSessionId, sessionId: teammateSessionId });
+}
+
+export async function linkedTeammates(root, leadSessionId) {
+  return (await listRecords(root, 'teammates', leadSessionId))
+    .filter(link => link.leadSessionId === leadSessionId && typeof link.sessionId === 'string' && link.sessionId);
+}
+
 export async function sessionStats(root, sessionId) {
   idKey(sessionId);
-  const [routes, observations] = await Promise.all([
+  const linked = await linkedTeammates(root, sessionId);
+  const [routes, ...observationSets] = await Promise.all([
     listRecords(root, 'routes', sessionId),
     listRecords(root, 'observations', sessionId),
+    ...linked.map(link => listRecords(root, 'observations', link.sessionId)),
   ]);
+  const sessions = new Set([sessionId, ...linked.map(link => link.sessionId)]);
+  const observations = observationSets.flat();
   const stats = { routed: 0, overrides: 0, mismatches: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 };
   const decisions = new Set();
   for (const route of routes) {
@@ -90,13 +105,14 @@ export async function sessionStats(root, sessionId) {
   }
   const turns = new Map();
   for (const observation of observations) {
-    if (observation.sessionId !== sessionId || typeof observation.agentId !== 'string' || !observation.agentId ||
+    if (!sessions.has(observation.sessionId) || typeof observation.agentId !== 'string' || !observation.agentId ||
         typeof observation.turnId !== 'string' || !observation.turnId ||
         !Array.isArray(observation.responseModels) || !observation.usage || typeof observation.usage !== 'object') continue;
-    let agentTurns = turns.get(observation.agentId);
+    const agentKey = JSON.stringify([observation.sessionId, observation.agentId]);
+    let agentTurns = turns.get(agentKey);
     if (!agentTurns) {
       agentTurns = new Set();
-      turns.set(observation.agentId, agentTurns);
+      turns.set(agentKey, agentTurns);
     }
     if (agentTurns.has(observation.turnId)) continue;
     agentTurns.add(observation.turnId);

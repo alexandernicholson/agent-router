@@ -15,6 +15,8 @@ Summarize the supplied status by session and role, keeping these categories sepa
 - **Resolved:** `resolvedModel`, the model Claude actually selected for the spawned agent.
 - **Observed:** model identifiers and token counts from native completed-turn usage, where available.
 
+Routes with `kind: "teammate"` are agent team teammates. Report their `name` and `backend` (`in-process`, or `tmux` for a split pane) with the role. A split-pane teammate runs as its own session: its session has a `leadSessionId`, and its observations belong with that lead's teammate route.
+
 Call out mismatches, blocked or failed routes, and missing evidence. An absent observation is unknown, not confirmation that the effective model ran. Observed models and token counts are completed-turn evidence, not upstream billing proof. A model label is not proof of which upstream model a gateway executed; only separately verified gateway evidence can establish that.
 
 `resolutionMismatch` compares Effective with Resolved, not Requested with Effective. A request intentionally routed to a different configured model is policy enforcement, not a resolution failure. All five roles use the exact model identifiers supplied in plugin configuration, from any compatible endpoint. A stopped agent is not necessarily successful: use `lastTurnReason` and report missing evidence explicitly.

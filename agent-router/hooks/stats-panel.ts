@@ -21,7 +21,7 @@ export type StatsPanel = {
   initialize: (host: StatsPanelHost, sessionId: string) => Promise<void>;
   refreshStats: () => Promise<void>;
   refreshActivity: () => Promise<void>;
-  render: (elements: Elements[RenderSurface], content: RenderElement, pending: boolean) => RenderElement;
+  render: (elements: Elements[RenderSurface], content: RenderElement, pending: boolean, agent?: string) => RenderElement;
 };
 
 type View = 'Activity' | 'Usage' | 'Routing';
@@ -222,10 +222,12 @@ export function createStatsPanel(): StatsPanel {
     await Promise.all([refreshStats(), refreshActivity()]);
   }
 
-  function render(elements: Elements[RenderSurface], content: RenderElement, pending: boolean): RenderElement {
+  // `agent` is the viewed agent's `model · effort`, beside the icon.
+  function render(elements: Elements[RenderSurface], content: RenderElement, pending: boolean, agent?: string): RenderElement {
     const { Box, Button, Text } = elements;
+    const icon = pending ? '⇄*' : '⇄';
     return Box({ flexDirection: 'column', children: [content, Box({ flexDirection: 'row', gap: 1, children: [
-      Button({ key: 'router-view', label: pending ? '⇄*' : '⇄', onPress: cycle }),
+      Button({ key: 'router-view', label: agent ? `${icon} · ${agent}` : icon, onPress: cycle }),
       Text({ dimColor: true, children: [label()] }),
     ] })] });
   }
