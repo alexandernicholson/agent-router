@@ -15,19 +15,19 @@ const team = 'session-aaaaaaaa';
 const mate = 'bbbbbbbb-1111-4222-8333-444444444444';
 const catalog = async () => [...new Set([...Object.values(modelOptions), 'vendor/mate-v1'])].map(id => ({ id }));
 
-async function fixture(t, { leadOptions = modelOptions, member = { agentType: 'agent-router:scout' } } = {}) {
+async function fixture(t, { leadOptions = modelOptions, member = { agentType: 'agent-router:scout' }, configLead = lead } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'agent-router-teammate-test-'));
   const config = await mkdtemp(join(tmpdir(), 'agent-router-teammate-config-'));
   t.after(() => Promise.all([rm(root, { recursive: true, force: true }), rm(config, { recursive: true, force: true })]));
   const env = { CLAUDE_PLUGIN_DATA: root, CLAUDE_CONFIG_DIR: config, ANTHROPIC_BASE_URL: 'https://gateway.example' };
   await mkdir(join(config, 'teams', team), { recursive: true });
   await writeFile(join(config, 'teams', team, 'config.json'), JSON.stringify({
-    name: team, leadSessionId: lead,
+    name: team, leadSessionId: configLead,
     members: [{ agentId: `team-lead@${team}`, name: 'team-lead', agentType: 'team-lead' },
       ...(member ? [{ agentId: `probe@${team}`, name: 'probe', backendType: 'tmux', ...member }] : [])],
   }));
   const request = (action, fields = {}, environment = env, discover = catalog) =>
-    handleRequest({ action, options: modelOptions, ...fields }, environment, discover);
+    handleRequest({ action, options: modelOptions, ...fields }, environment, discover, { confirmMs: 60, stepMs: 10 });
   if (leadOptions) await request('bootstrap', { session_id: lead, options: leadOptions });
   const identity = { agentId: `probe@${team}`, agentName: 'probe', teamName: team, parentSessionId: lead, agentType: 'agent-router:scout' };
   return { root, env, request, identity };
@@ -145,4 +145,42 @@ test('teammate identity is read from the nearest teammate ancestor process', () 
   assert.deepEqual(readTeammateIdentity(100, run), { agentId: `probe@${team}`, agentName: 'probe', teamName: team, parentSessionId: lead, agentType: 'agent-router:scout' });
   assert.equal(readTeammateIdentity(80, run), null);
   assert.equal(readTeammateIdentity(100, () => { throw new Error('no ps'); }), null);
+});
+
+// A resumed lead keeps its team, named for and recorded under the session it
+// started as, while the process (and the teammate's launch flag) moves on to
+// the resumed session's id. The team name alone cannot vouch for a lead.
+test('a teammate of a resumed lead inherits the policy its launch flag names', async t => {
+  const original = 'dddddddd-1111-4222-8333-444444444444';
+  const { request, identity } = await fixture(t, { configLead: original });
+  await request('route', { session_id: lead, tool_use_id: 'launch', effectiveType: 'agent-router:scout', kind: 'teammate', name: 'probe' });
+  await request('result', { session_id: lead, tool_use_id: 'launch', result: { agentId: identity.agentId, backend: 'tmux' } });
+  const snapshot = await request('bootstrap', { session_id: mate, teammate: identity }, undefined, async () => assert.fail('must inherit, not discover'));
+  assert.equal(snapshot.leadSessionId, lead);
+  assert.equal(snapshot.self.model, modelOptions.scout_model);
+});
+
+test('a lead id that neither the team config nor the lead records back is refused', async t => {
+  const { request, identity } = await fixture(t, { configLead: 'dddddddd-1111-4222-8333-444444444444' });
+  const other = 'eeeeeeee-1111-4222-8333-444444444444';
+  await request('bootstrap', { session_id: other });
+  const snapshot = await request('bootstrap', { session_id: mate, teammate: { ...identity, parentSessionId: other } });
+  assert.equal(snapshot.leadSessionId, undefined);
+  assert.equal(typeof snapshot.teammateNotice, 'string');
+});
+
+test('a resumed lead\'s launch record that lands after the teammate starts is still found', async t => {
+  const { request, identity } = await fixture(t, { configLead: 'dddddddd-1111-4222-8333-444444444444' });
+  await request('route', { session_id: lead, tool_use_id: 'launch', effectiveType: 'agent-router:scout', kind: 'teammate', name: 'probe' });
+  setTimeout(() => request('result', { session_id: lead, tool_use_id: 'launch', result: { agentId: identity.agentId, backend: 'tmux' } }), 20);
+  const snapshot = await request('bootstrap', { session_id: mate, teammate: identity });
+  assert.equal(snapshot.leadSessionId, lead);
+});
+
+test('a subagent record never vouches for a teammate of a resumed lead', async t => {
+  const { request, identity } = await fixture(t, { configLead: 'dddddddd-1111-4222-8333-444444444444' });
+  await request('route', { session_id: lead, tool_use_id: 'sub', effectiveType: 'agent-router:scout' });
+  await request('result', { session_id: lead, tool_use_id: 'sub', result: { agentId: identity.agentId } });
+  const snapshot = await request('bootstrap', { session_id: mate, teammate: identity });
+  assert.equal(snapshot.leadSessionId, undefined);
 });

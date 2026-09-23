@@ -44,9 +44,11 @@ export function teamMember(identity, env = process.env) {
   let config;
   try { config = JSON.parse(readFileSync(join(root, 'teams', identity.teamName, 'config.json'), 'utf8')); }
   catch { return null; }
-  if (config?.leadSessionId !== identity.parentSessionId || !Array.isArray(config.members)) return null;
+  if (!Array.isArray(config?.members)) return null;
   const member = config.members.find(item => item?.agentId === identity.agentId);
   if (!member || member.agentType === 'team-lead') return null;
   if ((member.agentType ?? undefined) !== (identity.agentType ?? undefined)) return null;
-  return member;
+  // A resumed lead keeps the team it started with, recorded under that first
+  // session's id, while its teammates' launch flag names the resumed session.
+  return { member, leadConfirmed: config.leadSessionId === identity.parentSessionId };
 }

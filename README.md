@@ -132,7 +132,7 @@ Both display modes follow the lead session's pinned routing:
 
 `/agent-models-apply` in the lead applies to teammates launched afterwards. Teammates already running keep the model and effort they started with. The command is refused inside a split-pane teammate session.
 
-A split-pane teammate confirms its identity against the team config Claude Code writes under `~/.claude/teams`. When the lead session has no active Agent Router routing, the teammate routes as its own session and notes this in the debug log. A teammate whose `ANTHROPIC_BASE_URL` differs from its lead's refuses to route.
+A split-pane teammate confirms its identity against the team config Claude Code writes under `~/.claude/teams`. A resumed lead keeps the team recorded under the session it started as, so its teammates are also confirmed by the launch record the lead writes. When the lead session has no active Agent Router routing, the teammate routes as its own session and notes this in the debug log. A teammate whose `ANTHROPIC_BASE_URL` differs from its lead's refuses to route.
 
 Agent Router reads the teammate launch details that Claude Code 2.1.280 provides: the Agent tool's teammate result and the split-pane teammate's launch flags. Neither is part of the documented plugin API, so recheck teammate routing after upgrading Claude Code.
 

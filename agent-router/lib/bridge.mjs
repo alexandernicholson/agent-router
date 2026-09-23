@@ -12,7 +12,7 @@ function assertOverrides(env) {
   }
 }
 
-async function bootstrap(input, env, discover) {
+async function bootstrap(input, env, discover, timing) {
   const root = stateDirectory(env);
   const file = recordPath(root, 'sessions', input.session_id);
   // Gateway and session identity are pinned before considering newly saved options.
@@ -28,7 +28,7 @@ async function bootstrap(input, env, discover) {
   }
   let teammateNotice;
   if (baseUrl && input.teammate) {
-    const inherited = await inheritFromLead(root, input, baseUrl, env);
+    const inherited = await inheritFromLead(root, input, baseUrl, env, timing);
     if (inherited.snapshot) {
       await writeRecord(file, inherited.snapshot, true);
       const pinned = await readRecord(file);
@@ -52,10 +52,22 @@ async function bootstrap(input, env, discover) {
 
 // A split-pane teammate adopts its lead's pinned policy, never the settings
 // saved when it happened to start; `self` is the route its own steps use.
-async function inheritFromLead(root, input, baseUrl, env) {
+// The lead writes its launch record as the launch returns, which can land a
+// moment after the teammate's own session starts.
+async function leadLaunched(root, identity, { confirmMs, stepMs }) {
+  const file = recordPath(root, 'agents', identity.parentSessionId, identity.agentId);
+  for (const deadline = Date.now() + confirmMs; ; await new Promise(done => setTimeout(done, stepMs))) {
+    const launched = await readRecord(file);
+    if (launched?.kind === 'teammate' && launched.agentId === identity.agentId) return true;
+    if (Date.now() >= deadline) return false;
+  }
+}
+
+async function inheritFromLead(root, input, baseUrl, env, timing) {
   const identity = input.teammate;
-  if (!identity || typeof identity !== 'object' || !teamMember(identity, env)) {
-    return { notice: 'Agent Router could not confirm this teammate against its team config, so it routes as its own session.' };
+  const found = identity && typeof identity === 'object' ? teamMember(identity, env) : null;
+  if (!found || !(found.leadConfirmed || await leadLaunched(root, identity, timing))) {
+    return { notice: 'Agent Router could not confirm this teammate against its team config and lead session, so it routes as its own session.' };
   }
   const lead = await readRecord(recordPath(root, 'sessions', identity.parentSessionId));
   if (!lead?.active) {
@@ -188,12 +200,12 @@ async function observe(input, env) {
   return {};
 }
 
-export async function handleRequest(input, env = process.env, discover = fetchModels) {
+export async function handleRequest(input, env = process.env, discover = fetchModels, timing = { confirmMs: 5000, stepMs: 250 }) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Expected a bridge JSON object.');
   if (!['bootstrap', 'catalog', 'route', 'result', 'observe', 'stats', 'apply'].includes(input.action)) throw new Error('Unknown Agent Router bridge action.');
   if (input.action === 'catalog') return catalog(env, discover);
   if (input.action === 'stats') return sessionStats(stateDirectory(env), input.session_id);
-  if (input.action === 'bootstrap') return bootstrap(input, env, discover);
+  if (input.action === 'bootstrap') return bootstrap(input, env, discover, timing);
   const snapshot = await snapshotFor(input, env);
   if (input.action === 'apply') return apply(input, env, discover, snapshot);
   if (input.action === 'route') return recordRoute(input, env, snapshot);
