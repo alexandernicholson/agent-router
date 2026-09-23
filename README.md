@@ -151,7 +151,7 @@ Mouse clicks follow Claude Code's [fullscreen renderer](https://code.claude.com/
 These example values illustrate the layout. The panel displays statistics for managed subagents in the current session:
 
 - **Activity** follows Claude's native agent roster, refreshed once per second. It includes in-process teammates. Completed and failed states observed by the panel are retained when roster entries disappear; failed includes killed agents. Running counts always come from the current roster.
-- **Usage** totals recorded completed-turn input, output, and cache-read tokens, including split-pane teammate sessions. Repeated observations and resumed routes count each agent turn once.
+- **Usage** totals recorded completed-turn input, output, and cache-read tokens, including split-pane teammate sessions. While a split-pane teammate is running, the lead refreshes these totals every five seconds. Repeated observations and resumed routes count each agent turn once.
 - **Routing** counts persisted routing decisions. Overrides count explicit requested models that differ from the configured assignment; mismatches compare the assignment with Claude's resolved model.
 
 Usage and routing refresh when their records change. A view shows `unavailable` when its data cannot be read.

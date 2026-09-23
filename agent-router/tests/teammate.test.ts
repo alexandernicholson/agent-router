@@ -1,5 +1,5 @@
 import { test, expect, mock, tier } from 'claude-code/testing';
-import type { Engine } from 'claude-code/testing';
+import type { Engine, MockClock } from 'claude-code/testing';
 import type { On, AgentInfo, RenderInput, RenderNode } from 'claude-code';
 
 tier('user');
@@ -14,11 +14,12 @@ const roles = {
 const policy = { version: 1, roles };
 const withMate = { ...policy, teammate: { model: 'vendor/mate-v1', effort: 'high' } };
 
-type World = { calls: Record<string, any>[]; env: Array<{ name: string; value?: string }>; roster: AgentInfo[]; logs: string[]; applied?: Record<string, unknown>; redraws: number };
+type World = { calls: Record<string, any>[]; env: Array<{ name: string; value?: string }>; roster: AgentInfo[]; logs: string[]; applied?: Record<string, unknown>; redraws: number; backend?: 'tmux'; clock?: MockClock };
 
 async function lead($: Engine, on: On, snapshot: Record<string, unknown> = { active: true, policy }, world: World = { calls: [], env: [], roster: [], logs: [], redraws: 0 }): Promise<World> {
   mock.store(on);
-  mock.clock(on);
+  world.clock = mock.clock(on);
+  on('session.end', ($, e) => ({ sessionId: e.sessionId }));
   on('env.get', ($, e) => ({ value: e.name === 'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS' ? '1' : world.env.filter(item => item.name === e.name).at(-1)?.value }));
   on('env.set', ($, e) => { world.env.push({ name: e.name, value: e.value }); return { value: undefined }; });
   on('command.register', ($, e) => ({ value: { command: e.name } }));
@@ -43,7 +44,7 @@ async function lead($: Engine, on: On, snapshot: Record<string, unknown> = { act
     const input = e as Record<string, any>;
     const model = world.env.filter(item => item.name === 'CLAUDE_CODE_SUBAGENT_MODEL').at(-1)?.value;
     world.calls.push({ action: 'launch', input, model });
-    const backend = world.applied?.backend === 'tmux' ? 'tmux' : 'in-process';
+    const backend = world.backend ?? 'in-process';
     return { result: { status: 'teammate_spawned', teammate_id: `${input.name}@session-lead`, agent_id: `${input.name}@session-lead`,
       agent_type: input.subagent_type ?? 'general-purpose', model: model ?? 'claude-opus-5-5', name: input.name,
       tmux_pane_id: backend === 'in-process' ? 'in-process' : '%9', is_splitpane: backend !== 'in-process', team_name: 'session-lead' } } as any;
@@ -258,4 +259,41 @@ test('pending settings keep their mark beside the viewed agent', async ($, on) =
   const spawned = await $.agent.spawn(spawnInput('Explore'));
   world.roster = [{ id: spawned.agentId!, description: 'Look around', type: 'agent-router:scout', status: 'running' }];
   expect(badge(await $.ui.render(band(spawned.agentId)))).toBe(`⇄* · ${roles.scout.model} · low`);
+});
+
+const statsReads = (world: World) => world.calls.filter(item => item.action === 'stats').length;
+
+// A split-pane teammate records its turns from its own process, so nothing in
+// the lead signals them; the lead polls its stats while such a teammate exists.
+test('a lead with a split-pane teammate keeps its usage current', async ($, on) => {
+  const world = await lead($, on);
+  const idle = statsReads(world);
+  await world.clock!.advance(10_000);
+  expect(statsReads(world)).toBe(idle);
+  world.backend = 'tmux';
+  await $.tool.call(call({ name: 'pane', subagent_type: 'reviewer' }));
+  const launched = statsReads(world);
+  await world.clock!.advance(5_000);
+  expect(statsReads(world) > launched).toBe(true);
+  await $.session.end({ reason: 'other', sessionId: 'lead-session', resume: { id: 'lead-session' } });
+  const ended = statsReads(world);
+  await world.clock!.advance(10_000);
+  expect(statsReads(world)).toBe(ended);
+});
+
+test('an in-process teammate adds no polling, since its turns reach the lead directly', async ($, on) => {
+  const world = await lead($, on);
+  await $.tool.call(call({ name: 'inline', subagent_type: 'reviewer' }));
+  const launched = statsReads(world);
+  await world.clock!.advance(10_000);
+  expect(statsReads(world)).toBe(launched);
+});
+
+test('a reloaded lead resumes polling for its split-pane teammates', async ($, on) => {
+  const world = await lead($, on, { active: true, policy, agents: [
+    { agentId: 'pane@session-lead', role: 'reviewer', effectiveModel: roles.reviewer.model, kind: 'teammate', name: 'pane', backend: 'tmux' },
+  ] });
+  const started = statsReads(world);
+  await world.clock!.advance(5_000);
+  expect(statsReads(world) > started).toBe(true);
 });

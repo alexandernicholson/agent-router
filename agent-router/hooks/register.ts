@@ -23,6 +23,10 @@ export function register(on: On, options: PluginOptions = {}) {
   const picker = createModelPicker(options);
   const statsPanel = createStatsPanel();
   let activityTimer: Timer | undefined;
+  let activityTicks = 0;
+  // Split-pane teammates record their turns from their own processes, which
+  // nothing in the lead signals, so the lead polls its stats while one exists.
+  const paneTeammates = new Set<string>();
   let pickerHost: ModelPickerHost | undefined;
   let snapshot: Snapshot | undefined;
   let ready: Promise<void> | undefined;
@@ -88,6 +92,7 @@ export function register(on: On, options: PluginOptions = {}) {
         teammates.set(spawned.name, assignment);
       }
       const backend = spawned.is_splitpane || (spawned.tmux_pane_id && spawned.tmux_pane_id !== 'in-process') ? 'tmux' : 'in-process';
+      if (backend === 'tmux') paneTeammates.add(spawned.agent_id ?? call.name);
       try {
         await bridge({ action: 'result', tool_use_id: call.tool_use_id, result: { agentId: spawned.agent_id, model: spawned.model, backend } });
       } catch {
@@ -128,12 +133,14 @@ export function register(on: On, options: PluginOptions = {}) {
       snapshot = loaded;
       agents.clear();
       teammates.clear();
+      paneTeammates.clear();
       for (const saved of loaded.agents || []) {
         if (!loaded.active || typeof saved.agentId !== 'string') continue;
         if (saved.kind === 'teammate') {
           if (typeof saved.name === 'string' && typeof saved.effectiveModel === 'string') {
             teammates.set(saved.name, { model: saved.effectiveModel, effort: saved.effectiveEffort });
           }
+          if (saved.backend === 'tmux') paneTeammates.add(saved.agentId);
           continue;
         }
         const role = loaded.policy.roles[saved.role];
@@ -182,8 +189,13 @@ export function register(on: On, options: PluginOptions = {}) {
         store: pickerHost.store,
         redraw: () => $.ui.invalidate('ui.render'),
       }, await $.session.id());
+      activityTicks = 0;
       activityTimer = $.clock.every(1000, () => {
         statsPanel.refreshActivity().catch(() => $.ui.log('Agent Router: activity statistics are unavailable.', { to: 'debug' }));
+        // Every fifth second: each refresh runs the bridge as a process.
+        if (paneTeammates.size && ++activityTicks % 5 === 0) {
+          statsPanel.refreshStats().catch(() => $.ui.log('Agent Router: usage statistics are unavailable.', { to: 'debug' }));
+        }
       });
     }
     return next(e);
