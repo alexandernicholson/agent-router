@@ -1,12 +1,20 @@
 {
   "name": "agent-router",
-  "version": "0.10.2",
+  "version": "0.11.0",
   "license": "MIT",
-  "description": "Choose subagent models with /agent-models and click the prompt panel to inspect activity, token usage, and routing. Requires Claude Code Mod function hooks enabled.",
+  "description": "Choose subagent models with /agent-models and inspect activity, routing, and per-agent prompt cache bars with /agent-cache. Requires Claude Code Mod function hooks enabled.",
   "author": {
     "name": "Alexander Nicholson"
   },
   "userConfig": {
+    "cache_ttl": {
+      "type": "string",
+      "title": "Cache lifetime estimate",
+      "description": "Display estimate only; does not change provider cache control. Auto follows Claude's TTL settings for an explicit Anthropic API endpoint and leaves third-party provider TTL unknown. Choose 5m or 1h only when your provider uses that lifetime.",
+      "options": ["auto", "5m", "1h"],
+      "default": "auto",
+      "required": false
+    },
     "scout_model": {
       "type": "string",
       "title": "Scout model",

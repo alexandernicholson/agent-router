@@ -1,0 +1,50 @@
+import { recordPath, writeRecord, listRecords, linkedTeammates, agentAssignments, idKey } from './state.mjs';
+import { validSample, loopKey } from './cache.js';
+
+export async function recordCacheSample(root, sessionId, input) {
+  // Whitelist fields: never persist an answer, prompt, credentials or arbitrary payload.
+  const sample = Object.fromEntries(['agentId', 'turnId', 'index', 'model', 'startedAt', 'read', 'write', 'fresh', 'output', 'ttlMs', 'ttlSource', 'disabled'].map(k => [k, input?.[k]]));
+  sample.sessionId = sessionId;
+  if (!validSample(sample)) throw new Error('Invalid cache sample.');
+  idKey(sample.turnId);
+  if (sample.agentId !== null) idKey(sample.agentId);
+  const identity = JSON.stringify([sample.agentId, sample.turnId, sample.index]);
+  await writeRecord(recordPath(root, 'cache-samples', sessionId, identity), sample, true);
+  return {};
+}
+
+export async function resetCache(root, sessionId, agentId, resetAt) {
+  if (agentId !== null) idKey(agentId);
+  if (!Number.isSafeInteger(resetAt) || resetAt < 0) throw new Error('Invalid cache reset time.');
+  await writeRecord(recordPath(root, 'cache-resets', sessionId, JSON.stringify(agentId)), { sessionId, agentId, resetAt });
+  return {};
+}
+
+export async function cacheSnapshot(root, sessionId) {
+  idKey(sessionId);
+  const links = await linkedTeammates(root, sessionId);
+  const sessions = [sessionId, ...new Set(links.map(link => link.sessionId))];
+  const data = await Promise.all(sessions.map(async id => ({
+    id, samples: await listRecords(root, 'cache-samples', id), resets: await listRecords(root, 'cache-resets', id),
+    agents: await agentAssignments(root, id),
+  })));
+  const labels = new Map([[loopKey(sessionId, null), 'Main']]);
+  for (const { id, agents } of data) {
+    for (const agent of agents) labels.set(loopKey(id, agent.agentId), `${agent.name || agent.role} (${agent.agentId})`);
+  }
+  // Split-pane main loops use their own session identity. Join only by the confirmed link.
+  const leadAgents = data[0].agents;
+  for (const id of sessions.slice(1)) {
+    const records = await listRecords(root, 'sessions', id);
+    const mate = records.find(r => r.sessionId === id && r.leadSessionId === sessionId)?.teammate;
+    if (mate) {
+      const assigned = leadAgents.find(a => a.agentId === mate.agentId);
+      labels.set(loopKey(id, null), `${mate.name || assigned?.name || 'Teammate'} (${mate.agentId})`);
+    }
+  }
+  return {
+    samples: data.flatMap(d => d.samples.filter(s => s.sessionId === d.id && validSample(s))),
+    resets: data.flatMap(d => d.resets.filter(r => r.sessionId === d.id && (r.agentId === null || typeof r.agentId === 'string') && Number.isSafeInteger(r.resetAt) && r.resetAt >= 0)),
+    labels: [...labels],
+  };
+}
