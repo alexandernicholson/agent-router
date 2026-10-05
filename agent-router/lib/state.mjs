@@ -48,7 +48,7 @@ export async function writeRecord(file, value, exclusive = false) {
   }
 }
 
-async function listRecords(root, kind, sessionId) {
+export async function listRecords(root, kind, sessionId) {
   const directory = join(root, kind);
   let sessions;
   try { sessions = sessionId ? [idKey(sessionId)] : await readdir(directory); }

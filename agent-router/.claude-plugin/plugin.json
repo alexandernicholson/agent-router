@@ -1,8 +1,8 @@
 {
   "name": "agent-router",
-  "version": "0.10.2",
+  "version": "0.11.0",
   "license": "MIT",
-  "description": "Choose subagent models with /agent-models and click the prompt panel to inspect activity, token usage, and routing. Requires Claude Code Mod function hooks enabled.",
+  "description": "Choose subagent models with /agent-models and inspect activity, routing, and per-agent prompt cache bars with /agent-cache. Requires Claude Code Mod function hooks enabled.",
   "author": {
     "name": "Alexander Nicholson"
   },

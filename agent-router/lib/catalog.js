@@ -1,6 +1,6 @@
 import { isExactModelId } from './routing.js';
 
-function displayText(value, limit) {
+export function displayText(value, limit) {
   if (typeof value !== 'string') return '';
   return value
     // Consume terminal strings (OSC/DCS/SOS/PM/APC), CSI, and single ESC commands.

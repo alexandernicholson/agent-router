@@ -1,8 +1,9 @@
-import type { AgentInfo, On, PluginOptions, Timer } from 'claude-code';
+import type { AgentInfo, On, PluginOptions, Timer, TurnStepInput, StreamNext } from 'claude-code';
 import { routeAgent, routeTeammate, validatePolicy, sameModel, isTruthy } from '../lib/routing.js';
 import { createModelPicker, type ModelPickerHost } from './model-picker';
 import { createStatsPanel } from './stats-panel';
 import { agentBadge, sameSent, type Sent } from './agent-badge';
+import { createCachePanel, CACHE_PANE } from './cache-panel';
 
 type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 type Policy = { version: number; roles: Record<string, { model: string; aliases: string[]; effort?: Effort }>; teammate?: { model?: string; effort?: Effort } };
@@ -22,6 +23,9 @@ type Bridge = (request: Record<string, unknown>) => Promise<any>;
 export function register(on: On, options: PluginOptions = {}) {
   const picker = createModelPicker(options);
   const statsPanel = createStatsPanel();
+  const cachePanel = createCachePanel();
+  let cacheTimer: Timer | undefined;
+  let cacheTicks = 0;
   let activityTimer: Timer | undefined;
   let activityTicks = 0;
   // Split-pane teammates record their turns from their own processes, which
@@ -43,6 +47,31 @@ export function register(on: On, options: PluginOptions = {}) {
   // What each loop's latest model request carried, for the band's agent line.
   // The main loop is keyed '' (in a pane teammate session, that is the teammate).
   const sent = new Map<string, Sent>();
+
+  // The normalized turn.step usage omits cache_creation. Classic hooks name
+  // the transcripts preserving that API metadata, including subagent paths.
+  on('classic.SessionStart', ($, e, next) => {
+    cachePanel.setTranscript(e.session_id, null, e.transcript_path);
+    return next(e);
+  });
+  on('classic.SubagentStart', ($, e, next) => {
+    cachePanel.setTranscript(e.session_id, null, e.transcript_path);
+    return next(e);
+  });
+  on('classic.PostToolUse', async ($, e, next) => {
+    cachePanel.setTranscript(e.session_id, null, e.transcript_path);
+    await cachePanel.enrich(e.session_id, e.agent_id ?? null);
+    return next(e);
+  });
+  on('classic.Stop', async ($, e, next) => {
+    cachePanel.setTranscript(e.session_id, null, e.transcript_path);
+    await cachePanel.enrich(e.session_id, e.agent_id ?? null);
+    return next(e);
+  });
+  on('classic.SubagentStop', async ($, e, next) => {
+    await cachePanel.enrich(e.session_id, e.agent_id, e.agent_transcript_path);
+    return next(e);
+  });
 
   on('tool.call', async ($, e, next) => {
     if (!/^(Agent|Task)$/.test(e.tool)) return next(e);
@@ -115,6 +144,7 @@ export function register(on: On, options: PluginOptions = {}) {
 
   on('session.start', async ($, e, next) => {
     activityTimer?.cancel();
+    cacheTimer?.cancel();
     interactive = e.isInteractive;
     ready = (async () => {
       snapshot = undefined;
@@ -122,7 +152,7 @@ export function register(on: On, options: PluginOptions = {}) {
       const sessionId = await $.session.id();
       bridge = async request => {
         const result = await $.process.run(['node', `${root}/scripts/bridge.mjs`], {
-          stdin: JSON.stringify({ ...request, options, session_id: sessionId }), timeoutMs: 20_000,
+          stdin: JSON.stringify({ ...request, options, session_id: request.session_id ?? sessionId }), timeoutMs: 20_000,
         });
         if (result.exitCode !== 0) throw new Error(result.stderr.trim() || 'Agent Router bridge failed.');
         return JSON.parse(result.stdout);
@@ -132,6 +162,7 @@ export function register(on: On, options: PluginOptions = {}) {
       if (loaded.active) validatePolicy(loaded.policy);
       snapshot = loaded;
       agents.clear();
+      sent.clear();
       teammates.clear();
       paneTeammates.clear();
       for (const saved of loaded.agents || []) {
@@ -181,6 +212,31 @@ export function register(on: On, options: PluginOptions = {}) {
       description: 'Apply saved Agent Router role models and efforts to this session now.' });
     try { await picker.initialize(pickerHost, e); }
     catch (error) { $.ui.log(`Agent Router models: ${error instanceof Error ? error.message : 'Open /agent-models to retry.'}`); }
+    if (bridge) {
+      await cachePanel.initialize({
+        session: { id: () => $.session.id() },
+        agent: { list: () => $.agent.list() },
+        clock: { now: () => $.clock.now() },
+        ui: { invalidate: event => $.ui.invalidate(event), open: input => $.ui.open(input),
+          close: input => $.ui.close(input), log: (text, settings) => $.ui.log(text, settings) },
+        command: { register: input => $.command.register(input) },
+      }, bridge, await $.session.id(), await $.env.get('ANTHROPIC_BASE_URL'),
+        snapshot?.active && snapshot.teammate ? snapshot.teammate.name ?? snapshot.teammate.agentId : undefined, {
+          env: {
+            DISABLE_PROMPT_CACHING: await $.env.get('DISABLE_PROMPT_CACHING').catch(() => undefined),
+            DISABLE_PROMPT_CACHING_HAIKU: await $.env.get('DISABLE_PROMPT_CACHING_HAIKU').catch(() => undefined),
+            DISABLE_PROMPT_CACHING_SONNET: await $.env.get('DISABLE_PROMPT_CACHING_SONNET').catch(() => undefined),
+            DISABLE_PROMPT_CACHING_OPUS: await $.env.get('DISABLE_PROMPT_CACHING_OPUS').catch(() => undefined),
+          },
+        });
+      if (e.isInteractive && e.surface === 'terminal') {
+        cacheTicks = 0;
+        cacheTimer = $.clock.every(1000, async () => {
+          await cachePanel.tick();
+          if (++cacheTicks % 5 === 0) await cachePanel.refresh();
+        });
+      }
+    }
     if (!failure && snapshot?.active && e.isInteractive && e.surface === 'terminal') {
       await statsPanel.initialize({
         stats: () => bridge!({ action: 'stats' }),
@@ -240,14 +296,28 @@ export function register(on: On, options: PluginOptions = {}) {
     return true;
   }
 
+  async function* measured(e: TurnStepInput, next: StreamNext<'turn.step'>) {
+    // Preserve the entire native stream and return value. Bookkeeping must never
+    // change a model response or prevent the next request from being dispatched.
+    const ticket = await cachePanel.begin(e).catch(() => undefined);
+    let usage;
+    try {
+      const result = yield* next(e);
+      usage = result.usage;
+      return result;
+    } finally {
+      await cachePanel.finish(ticket, e, usage).catch(() => undefined);
+    }
+  }
+
   on('turn.step', async function* ($, e, next) {
-    if (!snapshot?.active) return yield* next(e);
+    if (!snapshot?.active) return yield* measured(e, next);
     // A split-pane teammate is its own session: its main loop is the teammate.
     if (!e.agentId) {
-      if (!snapshot.self) return yield* next(e);
+      if (!snapshot.self) return yield* measured(e, next);
       const request = { ...e, ...pinned(e, snapshot.self) };
       if (record('', request)) $.ui.invalidate('ui.render');
-      return yield* next(request);
+      return yield* measured(request, next);
     }
     let assignment = agents.get(e.agentId);
     if (!assignment) {
@@ -270,12 +340,12 @@ export function register(on: On, options: PluginOptions = {}) {
     }
     if (!assignment) {
       if (record(e.agentId, e)) $.ui.invalidate('ui.render');
-      return yield* next(e);
+      return yield* measured(e, next);
     }
     if (!sameModel(assignment.model, e.model)) $.ui.log(`Agent Router corrected a subagent model substitution to ${assignment.model}.`);
     const request = { ...e, ...pinned(e, assignment) };
     if (record(e.agentId, request)) $.ui.invalidate('ui.render');
-    return yield* next(request);
+    return yield* measured(request, next);
   });
 
   on('turn.complete', async ($, e, next) => {
@@ -302,17 +372,27 @@ export function register(on: On, options: PluginOptions = {}) {
   }
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (failure || !snapshot?.active || e.props.hasSurvey) return next(e);
+    if (e.props.hasSurvey) return next(e);
     const content = await next(e);
     const viewed = e.props.view.agentId;
+    const elements = $.ui.resolve(e);
+    if (failure || !snapshot?.active) return cachePanel.renderBand(elements, content, viewed);
     // Only an in-process teammate not yet stepped needs the roster to find it.
     const agent = viewed && !agents.has(viewed) && !sent.has(viewed) ? (await $.agent.list()).find(item => item.id === viewed) : undefined;
-    return statsPanel.render($.ui.resolve(e), content, snapshot.pendingConfiguration === true, viewedBadge(viewed, agent));
+    return cachePanel.renderBand(elements, statsPanel.render(elements, content, snapshot.pendingConfiguration === true, viewedBadge(viewed, agent)), viewed);
+  });
+
+  on('session.compact', async ($, e, next) => {
+    const result = await next(e);
+    if ('messages' in result && e.trigger !== 'precompute') await cachePanel.reset(e.agentId ?? null).catch(() => undefined);
+    return result;
   });
 
   on('session.end', ($, e, next) => {
     activityTimer?.cancel();
     activityTimer = undefined;
+    if (e.reason === 'clear') cachePanel.clear();
+    else { cacheTimer?.cancel(); cacheTimer = undefined; }
     return next(e);
   });
 
@@ -346,5 +426,12 @@ export function register(on: On, options: PluginOptions = {}) {
     return next(e);
   });
   on('ui.render', { component: 'Pane' }, ($, e, next) =>
+    (e.requestId === CACHE_PANE && cachePanel.renderPane($.ui.resolve(e), e.props.view.agentId)) ||
     (pickerHost && picker.uiRender(pickerHost, e)) || next(e));
+  on('command.run', { command: CACHE_PANE }, async () => {
+    return { text: await cachePanel.show()
+      ? 'Agent cache dashboard opened. Select an agent to inspect recent requests.'
+      : 'Agent cache dashboard is unavailable. Check session setup or widen the terminal.' };
+  });
+  on('ui.close', { id: CACHE_PANE }, ($, e, next) => { cachePanel.close(); return next(e); });
 }

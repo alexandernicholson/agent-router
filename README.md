@@ -10,6 +10,7 @@ Agent Router is a Claude Code Mod that assigns an exact model to each subagent r
 - Pin endpoint and model configuration for each session.
 - Inspect requested, configured, resolved, and response model identifiers with `/agent-router:routes`.
 - Collect completed-turn token counts and restore saved agent assignments when a session resumes.
+- Show per-request prompt cache bars for the main agent, subagents, and teammates with `/agent-cache`.
 
 ## Requirements
 
@@ -156,6 +157,24 @@ These example values illustrate the layout. The panel displays statistics for ma
 
 Usage and routing refresh when their records change. A view shows `unavailable` when its data cannot be read.
 
+## Prompt cache observability
+
+The **Cache** bar beneath the developer panel follows the conversation in view. It shows the last request's cache hit rate and the tokens read, written, and sent uncached. Click **Cache**, or run `/agent-cache`, to open a dashboard with a bar for the main conversation and every observed agent. Select an agent to inspect its last 30 requests, including each response's model, turn, step, and token counts.
+
+The hit rate is `cache_read_input_tokens / (cache_read_input_tokens + cache_creation_input_tokens + input_tokens)`. Output tokens are shown separately. Counts come from every native `turn.step` response, including intermediate tool steps, rather than from completed-turn totals. Separate agent and session identities keep nested agents, parallel requests, and split-pane teammate main loops distinct. Agents in the live roster without usage show **no observation**, not zero usage.
+
+Request records persist across resume. Repeated request identities count once. The dashboard retains totals for all recorded requests; the 30-request limit applies only to the displayed history. The lead polls linked split-pane teammates every five seconds. Successful compaction invalidates the compacted loop's expiry estimate while preserving its historical counts; `/clear` starts a separate cache ledger on the next request.
+
+TTLs come exclusively from response metadata for **every provider**, including third-party gateways. When `usage.cache_creation` contains `ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens`, the dashboard shows the reported write counts and a lifetime bar for each nonzero bucket. Mixed five-minute and one-hour writes remain separate. This metadata describes newly written tokens; it does not establish the TTL of tokens read from cache.
+
+Claude Code's native `turn.step` hook currently normalizes usage to four token totals and omits the TTL breakdown. Agent Router first checks the response usage and then recovers the breakdown from a bounded tail of the corresponding main or subagent transcript. Records must match the session, agent, model, request interval, and all four token counts; ambiguous matches are ignored. Delayed transcript writes are checked again after tool use or at agent completion. Only usage metadata is persisted; transcript text stays out of cache records.
+
+If response TTL metadata is absent, invalid, or ambiguous, the dashboard shows **TTL unknown** for every provider. Requested TTLs, environment variables, endpoint defaults, and prior responses do not establish the current response's TTL. No manual lifetime override is offered. For reported TTLs, expiry countdowns remain **estimates**, timed from request dispatch; responses do not report an exact expiry timestamp. A bar can show a historical cache hit after its estimated lifetime has expired. The plugin does not set API `cache_control` or extend retention.
+
+The dashboard distinguishes caching disabled by `DISABLE_PROMPT_CACHING*`, a response with no cached tokens, missing usage, unknown TTL, and a likely expired entry. It does not attribute a miss to a particular prompt change or claim authoritative upstream billing. No keepalive model requests are sent.
+
+The [prompt-cache-control reference mod](https://github.com/davila7/claude-code-templates/tree/main/cli-tool/components/mods/observability/prompt-cache-control), installed with `npx claude-code-templates@latest --mod observability/prompt-cache-control`, monitors the main conversation. Agent Router implements its own per-agent dashboard; that mod is not required. The `/agent-cache` command remains distinct from its `/cache` command.
+
 ## Inspect routing
 
 Run:
@@ -187,7 +206,7 @@ Claude Code stores plugin options through its standard plugin configuration syst
 ~/.claude/plugins/data/agent-router-agent-router-tools/
 ```
 
-`CLAUDE_CONFIG_DIR` selects the Claude configuration root when you use a custom location. Routing records contain session and agent identities, model selections, turn outcomes, and usage counters. Prompts, answers, and credentials stay with their originating systems.
+`CLAUDE_CONFIG_DIR` selects the Claude configuration root when you use a custom location. Routing and cache records contain session and agent identities, model selections, turn outcomes, request timestamps, response TTL metadata, and usage counters. Prompts, answers, and credentials stay with their originating systems.
 
 Agent Router uses Claude Code's normal startup, plugin installation, configuration, and permissions workflow.
 

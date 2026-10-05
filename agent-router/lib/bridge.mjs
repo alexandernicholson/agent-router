@@ -3,6 +3,7 @@ import { routeAgent, routeTeammate, isTruthy, ROLES, sameModel } from './routing
 import { teamMember } from './teammate.mjs';
 import { fetchModels, normalizeBaseUrl } from './connection.mjs';
 import { normalizeCatalog } from './catalog.js';
+import { recordCacheSample, enrichCacheSamples, resetCache, cacheSnapshot } from './cache-state.mjs';
 import { stateDirectory, recordPath, readRecord, writeRecord, agentAssignments, sessionStats, idKey, linkTeammate, USAGE_KEYS } from './state.mjs';
 
 
@@ -202,9 +203,13 @@ async function observe(input, env) {
 
 export async function handleRequest(input, env = process.env, discover = fetchModels, timing = { confirmMs: 5000, stepMs: 250 }) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Expected a bridge JSON object.');
-  if (!['bootstrap', 'catalog', 'route', 'result', 'observe', 'stats', 'apply'].includes(input.action)) throw new Error('Unknown Agent Router bridge action.');
+  if (!['bootstrap', 'catalog', 'route', 'result', 'observe', 'stats', 'apply', 'cache-sample', 'cache-snapshot', 'cache-reset', 'cache-enrich'].includes(input.action)) throw new Error('Unknown Agent Router bridge action.');
   if (input.action === 'catalog') return catalog(env, discover);
   if (input.action === 'stats') return sessionStats(stateDirectory(env), input.session_id);
+  if (input.action === 'cache-snapshot') return cacheSnapshot(stateDirectory(env), input.session_id);
+  if (input.action === 'cache-sample') return recordCacheSample(stateDirectory(env), input.session_id, input.sample, input.transcript_path);
+  if (input.action === 'cache-enrich') return enrichCacheSamples(stateDirectory(env), input.session_id, input.agent_id ?? null, input.transcript_path);
+  if (input.action === 'cache-reset') return resetCache(stateDirectory(env), input.session_id, input.agent_id ?? null, input.reset_at);
   if (input.action === 'bootstrap') return bootstrap(input, env, discover, timing);
   const snapshot = await snapshotFor(input, env);
   if (input.action === 'apply') return apply(input, env, discover, snapshot);
