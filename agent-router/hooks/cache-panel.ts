@@ -2,8 +2,12 @@ import type { AgentInfo, Elements, EngineInterface, RenderElement, RenderSurface
 import { applyCacheCreation, reportedCacheCreation, reportedLifetimes, cacheBar, cacheClock, cachePolicy, cacheRows, cacheStatus, cacheTokens, loopKey, sampleKey, validSample } from '../lib/cache.js';
 import type { CacheRow, CacheSample, CacheReset } from '../lib/cache.js';
 import { displayText } from '../lib/catalog.js';
+import { sameModel } from '../lib/routing.js';
 
 export const CACHE_PANE = 'agent-cache';
+// Claude can flush a response to its transcript after Stop has run. Recheck an
+// unenriched response this long after it completed, then leave its TTL unknown.
+const RECHECK_MS = [1000, 3000, 10000, 30000];
 type Bridge = (request: Record<string, unknown>) => Promise<any>;
 export type CachePanelHost = {
   session: Pick<EngineInterface['session'], 'id'>;
@@ -24,7 +28,10 @@ type Context = {
   labels: Map<string, string>;
   roster: AgentInfo[];
   now: number;
-  pending: Map<string, { model: string; request: string }>;
+  pending: Map<string, { request: string; changed: boolean }>;
+  requested: Map<string, string>;
+  rechecks: Map<string, number>;
+  rechecking?: Promise<void>;
   refresh?: Promise<void>;
   available: boolean;
 };
@@ -92,7 +99,7 @@ export function createCachePanel() {
   function state(current: Context, row: CacheRow) {
     const value = cacheStatus(row.last, current.now);
     const pending = current.pending.get(loopKey(row.sessionId, row.agentId));
-    if (pending && row.last && pending.model !== row.last.model) {
+    if (pending?.changed && row.last) {
       return { ...value, state: 'model changed · awaiting usage', leftMs: null };
     }
     return value;
@@ -133,7 +140,7 @@ export function createCachePanel() {
   async function initialize(host: CachePanelHost, bridge: Bridge, sessionId: string, endpoint?: string, selfLabel?: string,
     configuration: { env: Record<string, string | undefined> } = { env: {} }) {
     const current: Context = { host, bridge, sessionId, endpoint, selfLabel, ...configuration,
-      samples: new Map(), resets: [], labels: new Map(), roster: [], now: 0, pending: new Map(), available: true };
+      samples: new Map(), resets: [], labels: new Map(), roster: [], now: 0, pending: new Map(), requested: new Map(), rechecks: new Map(), available: true };
     context = current;
     selected = undefined;
     open = false;
@@ -154,9 +161,15 @@ export function createCachePanel() {
     const startedAt = await current.host.clock.now();
     const key = loopKey(current.sessionId, request.agentId);
     const identity = JSON.stringify([request.turnId, request.index]);
-    current.pending.set(key, { model: request.model, request: identity });
+    // Response labels need not echo the requested ID: Claude drops the [1m]
+    // suffix and a gateway may answer under an upstream name. Compare requests
+    // with requests; a response label is the only evidence before the first.
+    const lastRequested = current.requested.get(key);
     const priorModel = rows(current).find(row => loopKey(row.sessionId, row.agentId) === key)?.last?.model;
-    const changed = priorModel !== undefined && priorModel !== request.model;
+    const changed = lastRequested !== undefined ? lastRequested !== request.model
+      : priorModel !== undefined && !sameModel(priorModel, request.model);
+    current.requested.set(key, request.model);
+    current.pending.set(key, { request: identity, changed });
     if (changed) redraw(current);
     return { current, startedAt, key, identity, changed };
   }
@@ -197,10 +210,27 @@ export function createCachePanel() {
     redraw(current);
   }
 
+  async function recheck(current: Context) {
+    const loops = new Map<string, string | null>();
+    for (const sample of current.samples.values()) {
+      if (sample.sessionId !== current.sessionId || sample.cacheCreation || !sample.write || sample.completedAt === undefined) continue;
+      const key = sampleKey(sample);
+      const age = current.now - sample.completedAt;
+      if (age > RECHECK_MS.at(-1)!) { current.rechecks.delete(key); continue; }
+      const due = RECHECK_MS.filter(ms => age >= ms).length;
+      if ((current.rechecks.get(key) ?? 0) >= due) continue;
+      current.rechecks.set(key, due);
+      loops.set(loopKey(sample.sessionId, sample.agentId), sample.agentId);
+    }
+    for (const agentId of loops.values()) await enrich(current.sessionId, agentId);
+  }
+
   async function tick() {
     const current = context;
     if (!current) return;
     current.now = await current.host.clock.now();
+    if (!current.rechecking) current.rechecking = recheck(current).finally(() => { current.rechecking = undefined; });
+    await current.rechecking;
     const display = rows(current).map(row => `${meter(current, row)} ${reportedLifetimes(row.last, current.now).map(part => cacheClock(part.leftMs)).join(' ')}`).join('\n');
     if (display !== lastDisplay) { lastDisplay = display; redraw(current); }
   }

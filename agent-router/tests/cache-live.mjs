@@ -35,7 +35,7 @@ test('live third-party main and child responses report mixed TTLs without config
   let requests = 0;
   const toolResults = [];
   const server = createServer(async (request, response) => {
-    if (request.method === 'GET') {
+    if (request.method !== 'POST') {
       response.writeHead(200, { 'Content-Type': 'application/json' });
       return response.end(JSON.stringify({ data: [{ id: 'vendor/test', type: 'model', display_name: 'Test' }] }));
     }

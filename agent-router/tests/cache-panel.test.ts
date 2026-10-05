@@ -25,7 +25,9 @@ async function setup($: Engine, on: On, endpoint = 'https://gateway.example') {
   const clock = mock.clock(on);
   const world = { samples: [] as Record<string, any>[], resets: [] as Record<string, any>[], calls: [] as Record<string, any>[],
     roster: [] as AgentInfo[], sessionId: 'cache-session', failSave: false, failRead: false, logs: [] as string[],
-    reported: undefined as { fiveMinute: number; oneHour: number } | undefined };
+    reported: undefined as { fiveMinute: number; oneHour: number } | undefined,
+    // TTL buckets the transcript holds once Claude flushes it; undefined until then.
+    flushed: undefined as { fiveMinute: number; oneHour: number } | undefined };
   const policy = { version: 1, roles: Object.fromEntries(ROLES.map(role => [role, { model: `vendor/${role}`, aliases: [role] }])) };
   on('session.id', () => ({ value: world.sessionId }));
   on('session.start', ($, e) => ({ cwd: e.cwd }));
@@ -37,6 +39,8 @@ async function setup($: Engine, on: On, endpoint = 'https://gateway.example') {
   on('ui.invalidate', () => ({ value: undefined }));
   on('ui.log', ($, e) => { world.logs.push(e.text); return { value: undefined }; });
   on('agent.list', () => ({ value: world.roster }));
+  on('classic.SessionStart', () => ({}));
+  on('classic.Stop', () => ({}));
   on('agent.spawn', ($, e) => ({ model: e.model!, agentId: 'child' }));
   on('ui.render', { component: 'AbovePrompt' }, ($, e) => $.ui.resolve(e).Text({ children: ['Existing prompt content'] }));
   on('process.run', ($, e) => {
@@ -45,6 +49,15 @@ async function setup($: Engine, on: On, endpoint = 'https://gateway.example') {
     if (request.action === 'cache-sample') {
       if (world.failSave) return { value: { exitCode: 1, stderr: 'storage failed', stdout: '' } };
       world.samples.push(world.reported ? applyCacheCreation(request.sample, world.reported) : request.sample);
+    }
+    if (request.action === 'cache-enrich') {
+      const enriched = [];
+      for (const [i, s] of world.samples.entries()) {
+        if (!world.flushed || s.sessionId !== request.session_id || s.agentId !== (request.agent_id ?? null) || s.cacheCreation || !s.write) continue;
+        world.samples[i] = applyCacheCreation(s, world.flushed);
+        enriched.push(world.samples[i]);
+      }
+      return { value: { exitCode: 0, stderr: '', stdout: JSON.stringify({ samples: enriched }) } };
     }
     if (request.action === 'cache-reset') world.resets.push({ sessionId: request.session_id, agentId: request.agent_id ?? null, resetAt: request.reset_at });
     if (request.action === 'cache-snapshot' && world.failRead) return { value: { exitCode: 1, stderr: 'storage failed', stdout: '' } };
@@ -194,4 +207,74 @@ test('absent metadata is unknown for main and child on an Anthropic endpoint', a
   const contents = await dashboard($);
   expect(contents.includes('Estimated lifetime')).toBe(false);
   expect(contents.includes('likely expired')).toBe(false);
+});
+
+const transcript = '/transcripts/cache-session.jsonl';
+const enrichments = (world: { calls: Record<string, any>[] }) => world.calls.filter(call => call.action === 'cache-enrich').length;
+
+test('a final response flushed to the transcript after Stop still gets its reported TTL', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  await $.classic.SessionStart({ source: 'startup', session_id: world.sessionId, transcript_path: transcript });
+  await step($);
+  // Stop runs before Claude writes the final response to the transcript.
+  await $.classic.Stop({ stop_hook_active: false, session_id: world.sessionId, transcript_path: transcript });
+  expect(text(await $.ui.render(band())).includes('TTL unknown')).toBe(true);
+  world.flushed = { fiveMinute: 100, oneHour: 0 };
+  await clock.advance(1000);
+  const rendered = text(await $.ui.render(band()));
+  expect(rendered.includes('reported 5m writes')).toBe(true);
+  expect(rendered.includes('TTL unknown')).toBe(false);
+});
+
+test('a response whose TTL never reaches the transcript stops being rechecked', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  await $.classic.SessionStart({ source: 'startup', session_id: world.sessionId, transcript_path: transcript });
+  await step($);
+  await clock.advance(60000);
+  const checks = enrichments(world);
+  expect(checks > 0).toBe(true);
+  await clock.advance(60000);
+  expect(enrichments(world)).toBe(checks);
+  expect(text(await $.ui.render(band())).includes('TTL unknown')).toBe(true);
+});
+
+function labelled(on: On, label: (model: string) => string) {
+  on('turn.step', async function* ($, e) {
+    yield { kind: 'text' as const, index: 0, text: 'answer' };
+    return { turnId: e.turnId, index: e.index, answer: 'answer', toolUses: [], stopReason: 'end_turn' as const,
+      usage: { model: label(e.model), cache_read_input_tokens: 800, cache_creation_input_tokens: 100, input_tokens: 100, output_tokens: 20 } };
+  });
+}
+async function inFlight($: Engine, model: string) {
+  const stream = $.turn.step({ turnId: 'same-turn', index: 1, messageCount: 1, model });
+  await stream.next();
+  const rendered = text(await $.ui.render(band()));
+  while (!(await stream.next()).done);
+  return rendered;
+}
+
+test('a context-window suffix the response label omits is not a model change', async ($, on) => {
+  labelled(on, model => model.replace(/\[1m\]$/, ''));
+  await setup($, on);
+  await step($, { model: 'vendor/main[1m]' });
+  const rendered = await inFlight($, 'vendor/main[1m]');
+  expect(rendered.includes('model changed')).toBe(false);
+  expect(rendered.includes('80% hit')).toBe(true);
+});
+
+test('a gateway that relabels the answering model is not a model change', async ($, on) => {
+  labelled(on, () => 'upstream-main-2026-10-01');
+  await setup($, on);
+  await step($);
+  expect((await inFlight($, 'vendor/main')).includes('model changed')).toBe(false);
+});
+
+test('a request for a different model marks the last bar stale until usage arrives', async ($, on) => {
+  labelled(on, () => 'upstream-main-2026-10-01');
+  await setup($, on);
+  await step($);
+  expect((await inFlight($, 'vendor/other')).includes('model changed · awaiting usage')).toBe(true);
+  expect(text(await $.ui.render(band())).includes('model changed')).toBe(false);
 });
