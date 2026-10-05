@@ -33,7 +33,7 @@ test('resumed agents lose their previous terminal status across roster removal a
   on('ui.render', { component: 'AbovePrompt' }, ($, e) => $.ui.resolve(e).Box({ children: [] }));
   on('process.run', ($, e) => {
     const request = JSON.parse(e.init?.stdin || '{}');
-    return { value: { exitCode: 0, stderr: '', stdout: JSON.stringify(request.action === 'bootstrap'
+    return { value: { isStdoutTruncated: false, isStderrTruncated: false, exitCode: 0, stderr: '', stdout: JSON.stringify(request.action === 'bootstrap'
       ? { active: true, policy, agents: [{ agentId: 'managed', role: 'task', effectiveModel: 'vendor/worker-v1' }] }
       : { routed: 0, overrides: 0, mismatches: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 }) } };
   });

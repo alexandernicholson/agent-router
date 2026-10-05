@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { cachePolicy, validSample, validPrices, cacheRows, cacheStatus, cacheBar, cacheClock, loopKey, applyCacheCreation, cacheGrade, cachePercent, lifeGrade, isKeepalive, keepaliveWorthwhile, keepalivesLeft, cacheDial, cacheBarParts, isCompaction } from '../lib/cache.js';
+import { cachePolicy, validSample, validPrices, cacheRows, cacheStatus, cacheBar, cacheClock, loopKey, applyCacheCreation, cacheGrade, cachePercent, lifeGrade, isKeepalive, keepaliveWorthwhile, keepalivesLeft, cacheDial, cacheBarParts, isCompaction,
+  recentUsage, recentMisses, sampleTtl, MISS_WINDOW_MS, TTL_REPORT_MS } from '../lib/cache.js';
 import { recordCacheSample, resetCache, cacheSnapshot } from '../lib/cache-state.mjs';
 import { recordPath, writeRecord, linkTeammate } from '../lib/state.mjs';
 import { handleRequest } from '../lib/bridge.mjs';
@@ -290,6 +291,68 @@ test('the keepalives left count down to the point where warming stops', () => {
   assert.equal(keepalivesLeft(cacheRows(samples.slice(0, 1))[0], null), 0);
   assert.equal(keepalivesLeft(cacheRows([sample({ read: 0, write: 0 })])[0], standard), null);
   assert.equal(keepalivesLeft(undefined, standard), null);
+});
+
+test('a set number of keepalives is sent after each request whatever it costs, and default follows the price', () => {
+  const standard = { read: 0.1, fiveMinute: 1.25, output: 5 };
+  const counts = (limit, prices = standard) => {
+    const samples = [applyCacheCreation(sample({ read: 9000, write: 1000, fresh: 0 }), { fiveMinute: 1000, oneHour: 0 })];
+    const seen = [];
+    for (let i = 1; i <= 5; i++) {
+      const row = cacheRows(samples)[0];
+      seen.push([keepalivesLeft(row, prices, limit), keepaliveWorthwhile(row, prices, limit)]);
+      samples.push(sample({ turnId: `keepalive:${i}`, startedAt: 1000 + i, read: 10000, write: 0, fresh: 10, output: 2 }));
+    }
+    return seen;
+  };
+  assert.deepEqual(counts(3), [[3, true], [2, true], [1, true], [0, false], [0, false]]);
+  assert.deepEqual(counts(40).map(([left]) => left), [40, 39, 38, 37, 36]);
+  assert.deepEqual(counts(3, null).map(([left]) => left), [3, 2, 1, 0, 0]);
+  assert.deepEqual(counts(Infinity).map(([left, worth]) => [left, worth]), Array(5).fill([Infinity, true]));
+  assert.deepEqual(counts(undefined).map(([left]) => left), [11, 10, 9, 8, 7]);
+  assert.equal(keepalivesLeft(cacheRows([sample({ read: 0, write: 0 })])[0], standard, 3), null);
+});
+
+test('the bar rate covers the last 10 real requests, weighted by tokens, without keepalives', () => {
+  const requests = [sample({ turnId: 'a', startedAt: 1, read: 0, write: 10000, fresh: 0 }),
+    ...Array.from({ length: 3 }, (_, i) => sample({ turnId: `b${i}`, startedAt: 10 + i, read: 10000, write: 0, fresh: 0 }))];
+  const keepalive = sample({ turnId: 'keepalive:20', startedAt: 20, read: 10000, write: 0, fresh: 0 });
+  const usage = recentUsage(cacheRows([...requests, keepalive])[0]);
+  assert.equal(usage.requests, 4);
+  assert.equal(cachePercent(usage), 75);
+  const many = Array.from({ length: 12 }, (_, i) => sample({ turnId: `m${i}`, startedAt: 100 + i, read: i < 2 ? 0 : 1000, write: i < 2 ? 1000 : 0, fresh: 0 }));
+  assert.equal(cachePercent(recentUsage(cacheRows(many)[0])), 100);
+  assert.equal(recentUsage(undefined), undefined);
+});
+
+test('misses are counted by cause for a window of time', () => {
+  const warm = applyCacheCreation(sample({ startedAt: 0, read: 340000, write: 3000 }), { fiveMinute: 3000, oneHour: 0 });
+  const written = (turnId, startedAt, read, write) => applyCacheCreation(sample({ turnId, startedAt, read, write }), { fiveMinute: write, oneHour: 0 });
+  const rows = cacheRows([warm, written('p', 26000, 48648, 297000), written('e', 400000, 0, 345000), written('q', 420000, 100, 345000)]);
+  assert.deepEqual(recentMisses(rows, 430000), { total: 3, latest: 420000, causes: [['prefix changed', 2], ['expired', 1]] });
+  assert.deepEqual(recentMisses(rows, 26000 + MISS_WINDOW_MS + 1), { total: 2, latest: 420000, causes: [['expired', 1], ['prefix changed', 1]] });
+  assert.deepEqual(recentMisses(rows, 420000 + MISS_WINDOW_MS + 1), { total: 0, latest: undefined, causes: [] });
+});
+
+test('a write whose TTL is not yet reported counts down from the requested TTL until the report is due', () => {
+  const written = sample({ startedAt: 0, completedAt: 1000, read: 900, write: 100, requested: '1h' });
+  const status = now => cacheStatus(cacheRows([written])[0], now);
+  assert.equal(status(2000).ttl, '1h');
+  assert.equal(status(2000).awaiting, true);
+  assert.equal(status(2000).leftMs, 3598000);
+  assert.equal(status(1000 + TTL_REPORT_MS).state, 'TTL not reported');
+  assert.equal(cacheStatus(cacheRows([sample({ completedAt: 1000 })])[0], 2000).state, 'TTL not reported');
+  const reported = applyCacheCreation(written, { fiveMinute: 100, oneHour: 0 });
+  assert.equal(cacheStatus(cacheRows([reported])[0], 2000).ttl, '5m');
+  assert.equal(cacheStatus(cacheRows([reported])[0], 2000).awaiting, undefined);
+});
+
+test('each request names the TTL it asked for, and a different reported one', () => {
+  assert.equal(sampleTtl(sample({ requested: '1h' })), '1h');
+  assert.equal(sampleTtl(applyCacheCreation(sample({ requested: '1h' }), { fiveMinute: 100, oneHour: 0 })), '1h (5m reported)');
+  assert.equal(sampleTtl(applyCacheCreation(sample({ requested: '5m' }), { fiveMinute: 100, oneHour: 0 })), '5m');
+  assert.equal(sampleTtl(applyCacheCreation(sample(), { fiveMinute: 40, oneHour: 60 })), '5m+1h');
+  assert.equal(sampleTtl(sample()), undefined);
 });
 
 test('requests remember the TTL they asked for, and moving up to 1h is named as the miss', () => {

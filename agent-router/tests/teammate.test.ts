@@ -35,7 +35,7 @@ async function lead($: Engine, on: On, snapshot: Record<string, unknown> = { act
   on('process.run', ($, e) => {
     const input = JSON.parse(e.init?.stdin || '{}');
     world.calls.push(input);
-    return { value: { exitCode: 0, stderr: '', stdout: JSON.stringify(input.action === 'bootstrap'
+    return { value: { isStdoutTruncated: false, isStderrTruncated: false, exitCode: 0, stderr: '', stdout: JSON.stringify(input.action === 'bootstrap'
       ? { sessionId: 'lead-session', gateway: 'https://gateway.example', digest: 'pinned', agents: [], ...snapshot }
       : input.action === 'apply' ? { active: true, policy: world.applied } : {}) } };
   });

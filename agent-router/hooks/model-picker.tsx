@@ -46,8 +46,15 @@ const effortField = (field: string) => field.replace(/_model$/, '_effort');
 const effortRow = (rows: ConfigRow[], plugin: string, field: string) => ownedRow(rows, plugin, effortField(field), 'choice');
 const effortLabel = (value: string) => value === 'default' ? 'Default (engine effort)' : value;
 const upkeepRow = (rows: ConfigRow[], plugin: string) => ownedRow(rows, plugin, 'teammate_cache_upkeep', 'choice');
-const TTL_FIELDS: Record<string, string> = { 'cache-ttl': 'cache_ttl', 'subagent-ttl': 'subagent_cache_ttl', 'teammate-ttl': 'teammate_cache_ttl' };
-const ttlRow = (rows: ConfigRow[], plugin: string, key: string) => ownedRow(rows, plugin, TTL_FIELDS[key], 'choice');
+const CACHE_FIELDS: Record<string, string> = { 'cache-ttl': 'cache_ttl', 'subagent-ttl': 'subagent_cache_ttl', 'teammate-ttl': 'teammate_cache_ttl', 'keepalive-limit': 'keepalive_limit' };
+const cacheRow = (rows: ConfigRow[], plugin: string, key: string) => ownedRow(rows, plugin, CACHE_FIELDS[key], key === 'keepalive-limit' ? 'text' : 'choice');
+const LIMITS = ['default', 'infinite', '1', '2', '3', '4', '6', '8', '12', '16', '24'];
+const limitValue = (value: string) => {
+  const text = value.trim().toLowerCase();
+  if (text === 'default' || text === 'infinite') return text;
+  return /^[1-9]\d*$/.test(text) && Number.isSafeInteger(Number(text)) ? String(Number(text)) : undefined;
+};
+const limitLabel = (value: string) => value === 'default' ? 'Default (priced)' : value === 'infinite' ? 'Infinite' : value;
 
 export function createModelPicker(options: PluginOptions) {
   let session = '';
@@ -244,8 +251,9 @@ export function createModelPicker(options: PluginOptions) {
     }
   }
 
-  async function saveTtl(host: ModelPickerHost, key: string, value: string, renderedGeneration: number) {
+  async function saveCache(host: ModelPickerHost, key: string, value: string, renderedGeneration: number) {
     if (!open || saving || loading || renderedGeneration !== generation) return;
+    const limit = key === 'keepalive-limit';
     saving = true;
     error = '';
     notice = '';
@@ -253,14 +261,15 @@ export function createModelPicker(options: PluginOptions) {
     try {
       rows = await host.config.list();
       if (!open) return;
-      const row = ttlRow(rows, host.plugin.name, key);
-      if (row.isLocked) throw new Error('Your administrator manages this setting. Ask them to update the prompt cache TTL.');
-      if (!row.options?.includes(value)) return;
+      const row = cacheRow(rows, host.plugin.name, key);
+      if (row.isLocked) throw new Error(`Your administrator manages this setting. Ask them to update the ${limit ? 'keepalive limit' : 'prompt cache TTL'}.`);
+      if (limit ? limitValue(value) !== value : !row.options?.includes(value)) return;
       const result = await host.config.set({ key: row.key, value });
       if (result.deny !== undefined) throw new Error(result.deny);
       if (result.value !== value) throw new Error('The config writer returned a different value. Open /config to inspect the saved setting.');
       rows = rows.map(item => item.key === row.key ? { ...item, value } : item);
-      notice = 'Saved the prompt cache TTL. Conversations that start from now on use it; each one\'s TTL button can change it.';
+      notice = limit ? 'Saved the keepalive limit. It applies to warm and warmcomp after each request from now on.'
+        : 'Saved the prompt cache TTL. Conversations that start from now on use it; each one\'s TTL button can change it.';
     } catch (cause) {
       error = message(cause);
     } finally {
@@ -332,14 +341,23 @@ export function createModelPicker(options: PluginOptions) {
     const search = (text: string) => { if (!saving) { query = text; page = 0; redraw(host); } };
     const act = (operation: () => Promise<void>) => operation().catch(cause => { error = message(cause); redraw(host); });
     const ttlLabel = (fallback?: string) => fallback ? `Default (${fallback})` : 'Default (Claude Code)';
-    const ttlSelect = (key: string, label: string, fallback?: string) => {
+    const cacheSelect = (key: string, label: string, name: (value: string) => string, values?: string[]) => {
       let row: ConfigRow | undefined;
-      try { row = ttlRow(rows, host.plugin.name, key); } catch (cause) { return <Text>{message(cause)}</Text>; }
-      const name = (value: string) => value === 'default' ? ttlLabel(fallback) : value;
-      if (row.isLocked || saving) return <Text>{`${label}: ${name(String(row.value))}${row.isLocked ? ' · managed by your administrator' : ''}`}</Text>;
-      return <Select key={key} label={label} value={String(row.value)} options={(row.options || []).map(value => ({ value, label: name(value) }))}
-        onSelect={value => act(() => saveTtl(host, key, value, renderedGeneration))} />;
+      try { row = cacheRow(rows, host.plugin.name, key); } catch (cause) { return <Text>{message(cause)}</Text>; }
+      const value = String(row.value);
+      if (row.isLocked || saving) return <Text>{`${label}: ${name(value)}${row.isLocked ? ' · managed by your administrator' : ''}`}</Text>;
+      const choices = values ? (values.includes(value) ? values : [...values, value]) : row.options || [];
+      return <Select key={key} label={label} value={value} options={choices.map(option => ({ value: option, label: name(option) }))}
+        onSelect={value => act(() => saveCache(host, key, value, renderedGeneration))} />;
     };
+    const ttlSelect = (key: string, label: string, fallback?: string) => cacheSelect(key, label, value => value === 'default' ? ttlLabel(fallback) : value);
+    const customLimit = (text: string) => {
+      const value = limitValue(text);
+      if (!value) { error = 'Enter default, infinite, or a whole number of keepalives from 1.'; notice = ''; redraw(host); return; }
+      return act(() => saveCache(host, 'keepalive-limit', value, renderedGeneration));
+    };
+    let limitRow: ConfigRow | undefined;
+    try { limitRow = cacheRow(rows, host.plugin.name, 'keepalive-limit'); } catch {}
     const teammateDefault = defaults && (defaults.main.ttl === defaults.subagent.ttl ? defaults.main.ttl : `${defaults.main.ttl} split-pane, ${defaults.subagent.ttl} in-process`);
     if (role === cacheEntry.value) {
       return <Box flexDirection="column">
@@ -358,6 +376,10 @@ export function createModelPicker(options: PluginOptions) {
           {ttlSelect('subagent-ttl', 'Subagents', defaults?.subagent.ttl)}
         </Box> : null}
         <Text dimColor>Default is what Claude Code uses for that conversation with your current settings and sign-in. Each conversation starts in its own setting and its TTL button changes it for that conversation only. Teammates have their own setting under Teammates.</Text>
+        {configLoaded && !loading ? cacheSelect('keepalive-limit', 'Keepalive limit', limitLabel, LIMITS) : null}
+        {configLoaded && !loading && limitRow && !limitRow.isLocked && !saving
+          ? <Input key="keepalive-custom" label="Other number" placeholder="Any whole number, then Enter" value="" onSubmit={customLimit} /> : null}
+        <Text dimColor>How many keepalives warm and warmcomp send after each request; warmcomp then compacts. Default (priced) sends them while each costs less than rewriting the cache. Infinite never stops. A number sends exactly that many, whatever they cost. Each keepalive keeps an idle cache about 4½ minutes longer on a 5m TTL, or 59½ minutes on 1h.</Text>
       </Box>;
     }
     const navigate = (offset: number) => {

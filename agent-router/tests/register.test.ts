@@ -35,7 +35,7 @@ async function start($: Engine, on: On, failBridge = false, agents: Array<{ agen
     calls.push(input);
     const failed = failBridge || input.action === failAction;
     return { value: {
-      exitCode: failed ? 1 : 0, stderr: failed ? 'catalog unavailable' : '',
+      isStdoutTruncated: false, isStderrTruncated: false, exitCode: failed ? 1 : 0, stderr: failed ? 'catalog unavailable' : '',
       stdout: JSON.stringify(input.action === 'bootstrap'
         ? { active: true, policy: routing, sessionId: 'session', gateway: 'https://gateway.example', digest: 'pinned', agents, pendingConfiguration: applied !== undefined }
         : input.action === 'apply' ? { active: true, policy: applied, pendingConfiguration: false } : {}),

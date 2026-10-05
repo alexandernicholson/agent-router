@@ -1,6 +1,6 @@
 {
   "name": "agent-router",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "license": "MIT",
   "description": "Choose subagent models with /agent-models and inspect activity, routing, and per-agent prompt cache bars with /agent-cache. Requires Claude Code Mod function hooks enabled.",
   "author": {
@@ -144,6 +144,13 @@
         "warmcomp"
       ],
       "default": "off",
+      "required": false
+    },
+    "keepalive_limit": {
+      "type": "string",
+      "title": "Keepalive limit",
+      "description": "Keepalives warm and warmcomp send after each request before warming stops; warmcomp then compacts. default sends them while each costs less than rewriting the cache, infinite never stops, and a number sends exactly that many.",
+      "default": "default",
       "required": false
     },
     "cache_ttl": {

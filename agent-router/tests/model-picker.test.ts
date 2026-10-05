@@ -27,6 +27,8 @@ function world(on: On, models = [{ id: 'vendor/selected', name: 'Selected model'
   // Similarly named foreign rows must never receive the selection.
   rows.push({ ...rows[rows.length - 5], key: 'foreign.scout_effort', provider: { plugin: 'foreign', tier: 'user' } });
   rows.unshift({ ...rows[0], key: 'foreign.scout_model', provider: { plugin: 'foreign', tier: 'user' } });
+  rows.push({ key: 'actual-owner.keepalive_limit', label: 'keepalive_limit', kind: 'text', value: 'default',
+    provider: { plugin: 'agent-router@agent-router-tools', tier: 'user' }, isLocked: false });
   const state = { rows, writes: 0, deny: '', opened: 0, catalogError: '', openArgs: undefined as Record<string, unknown> | undefined, squeezed: '', logs: [] as string[] };
   mock.store(on);
   mock.env(on, {});
@@ -52,9 +54,9 @@ function world(on: On, models = [{ id: 'vendor/selected', name: 'Selected model'
   on('process.run', ($, e) => {
     const request = JSON.parse(e.init?.stdin || '{}');
     if (request.action === 'catalog' && state.catalogError) {
-      return { value: { exitCode: 1, stderr: state.catalogError, stdout: '' } };
+      return { value: { isStdoutTruncated: false, isStderrTruncated: false, exitCode: 1, stderr: state.catalogError, stdout: '' } };
     }
-    return { value: { exitCode: 0, stderr: '', stdout: JSON.stringify(request.action === 'catalog'
+    return { value: { isStdoutTruncated: false, isStderrTruncated: false, exitCode: 0, stderr: '', stdout: JSON.stringify(request.action === 'catalog'
       ? { endpoint: 'https://gateway.example', models }
       : { active: false, policy: null, digest: null, gateway: null, sessionId: 'picker-session' }) } };
   });
@@ -211,7 +213,7 @@ test('an unset teammate override never blocks the role setup flow', async ($, on
     await $.ui.render(pane);
     await $.ui.press({ plugin: 'agent-router', key: 'model:vendor/selected', requestId: 'agent-models' });
   }
-  const roles = state.rows.filter(row => row.kind === 'text' && row.key.startsWith('actual-owner.') && row.key !== 'actual-owner.teammate_model');
+  const roles = state.rows.filter(row => row.kind === 'text' && row.key.startsWith('actual-owner.') && row.key !== 'actual-owner.teammate_model' && row.key !== 'actual-owner.keepalive_limit');
   expect(roles.every(row => row.value === 'vendor/selected')).toBe(true);
   expect(state.rows.find(row => row.key === 'actual-owner.teammate_model')?.value).toBe('');
 });
@@ -264,6 +266,52 @@ test('the Prompt cache entry saves the default TTL of the main conversation and 
   expect(state.rows.find(row => row.key === 'actual-owner.cache_ttl')?.value).toBe('1h');
   expect(state.rows.find(row => row.key === 'actual-owner.subagent_cache_ttl')?.value).toBe('5m');
   expect(state.rows.find(row => row.key === 'actual-owner.scout_model')?.value).toBe('');
+});
+
+const limitRow = (state: { rows: ConfigRow[] }) => state.rows.find(row => row.key === 'actual-owner.keepalive_limit')!;
+
+test('the Prompt cache entry saves a keepalive limit, priced by default, infinite or a number', async ($, on) => {
+  const state = world(on);
+  await open($);
+  await $.ui.select({ plugin: 'agent-router', key: 'role', requestId: 'agent-models', value: 'cache_ttl' });
+  const drawn = await $.ui.render(pane);
+  expect(selectOptions(drawn, 'keepalive-limit')?.map(option => option.label)).toEqual(['Default (priced)', 'Infinite', '1', '2', '3', '4', '6', '8', '12', '16', '24']);
+  expect(text(drawn).includes('Each keepalive keeps an idle cache about 4½ minutes longer on a 5m TTL')).toBe(true);
+  await $.ui.select({ plugin: 'agent-router', key: 'keepalive-limit', requestId: 'agent-models', value: '3' });
+  expect(limitRow(state).value).toBe('3');
+  expect(text(await $.ui.render(pane)).includes('Saved the keepalive limit.')).toBe(true);
+  await $.ui.select({ plugin: 'agent-router', key: 'keepalive-limit', requestId: 'agent-models', value: 'infinite' });
+  expect(limitRow(state).value).toBe('infinite');
+});
+
+test('any whole number can be typed as the keepalive limit, and anything else is refused', async ($, on) => {
+  const state = world(on);
+  await open($);
+  await $.ui.select({ plugin: 'agent-router', key: 'role', requestId: 'agent-models', value: 'cache_ttl' });
+  await $.ui.render(pane);
+  await $.ui.input({ plugin: 'agent-router', key: 'keepalive-custom', requestId: 'agent-models', text: ' 37 ' });
+  expect(limitRow(state).value).toBe('37');
+  const drawn = await $.ui.render(pane);
+  expect(selectOptions(drawn, 'keepalive-limit')?.at(-1)).toEqual({ value: '37', label: '37' });
+  const writes = state.writes;
+  for (const bad of ['0', '-2', '1.5', 'lots']) {
+    await $.ui.input({ plugin: 'agent-router', key: 'keepalive-custom', requestId: 'agent-models', text: bad });
+    await $.ui.render(pane);
+  }
+  expect(state.writes).toBe(writes);
+  expect(limitRow(state).value).toBe('37');
+  expect(text(await $.ui.render(pane)).includes('Enter default, infinite, or a whole number')).toBe(true);
+});
+
+test('a locked keepalive limit is shown but never written', async ($, on) => {
+  const state = world(on);
+  Object.assign(state.rows.find(row => row.key === 'actual-owner.keepalive_limit')!, { isLocked: true, value: '3' });
+  await open($);
+  await $.ui.select({ plugin: 'agent-router', key: 'role', requestId: 'agent-models', value: 'cache_ttl' });
+  const drawn = await $.ui.render(pane);
+  expect(selectOptions(drawn, 'keepalive-limit')).toBe(undefined);
+  expect(text(drawn).includes('Keepalive limit: 3 · managed by your administrator')).toBe(true);
+  expect(state.writes).toBe(0);
 });
 
 test('the Teammates entry saves the TTL teammates start in', async ($, on) => {

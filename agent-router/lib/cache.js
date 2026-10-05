@@ -1,15 +1,19 @@
 /** @typedef {{sessionId: string, agentId: string | null, turnId: string, index: number, model: string, startedAt: number, completedAt?: number, read: number, write: number, fresh: number, output: number, ttlMs: number | null, ttlSource: string, disabled: boolean, cacheCreation?: {fiveMinute: number, oneHour: number}, tokensBefore?: number, tokensAfter?: number, miss?: string, requested?: '5m' | '1h'}} CacheSample */
 /** @typedef {{sessionId: string, agentId: string | null, resetAt: number}} CacheReset */
 /** @typedef {{fiveMinute: number, oneHour: number}} CacheCreation */
-/** @typedef {{sessionId: string, agentId: string | null, label: string, samples: CacheSample[], last?: CacheSample, compaction?: CacheSample, touchedAt?: number, creation?: CacheCreation | null, keepalives: CacheSample[], totals: {requests: number, read: number, write: number, fresh: number, output: number}}} CacheRow */
+/** @typedef {{sessionId: string, agentId: string | null, label: string, samples: CacheSample[], recent?: CacheSample[], last?: CacheSample, compaction?: CacheSample, touchedAt?: number, creation?: CacheCreation | null, keepalives: CacheSample[], totals: {requests: number, read: number, write: number, fresh: number, output: number}}} CacheRow */
 /** @typedef {{ttl: '5m' | '1h', ttlMs: number, tokens: number, leftMs: number}} CacheLifetime */
-/** @typedef {{state: string, ratio: number | null, leftMs: number | null, lifetimes: CacheLifetime[], ttl?: string, sample?: CacheSample, compacted?: {before?: number, after?: number}}} CacheStatus */
+/** @typedef {{state: string, ratio: number | null, leftMs: number | null, lifetimes: CacheLifetime[], ttl?: string, sample?: CacheSample, compacted?: {before?: number, after?: number}, awaiting?: boolean}} CacheStatus */
+/** @typedef {{read: number, write: number, fresh: number, requests: number}} CacheUsage */
 /** @typedef {'good' | 'fair' | 'poor'} CacheGrade */
 
 import { sameModel } from './routing.js';
 
 const on = value => value === '1' || value?.toLowerCase() === 'true';
 const count = value => value === undefined || Number.isSafeInteger(value) && value >= 0;
+export const TTL_REPORT_MS = 30000;
+export const RATE_REQUESTS = 10;
+export const MISS_WINDOW_MS = 900000;
 export const loopKey = (sessionId, agentId) => JSON.stringify([sessionId, agentId ?? null]);
 export const sampleKey = sample => JSON.stringify([sample.sessionId, sample.agentId, sample.turnId, sample.index]);
 
@@ -75,9 +79,10 @@ export function validPrices(value) {
 /**
  * @param {CacheRow | undefined} row
  * @param {CachePrices | null | undefined} prices
+ * @param {number} [limit]
  */
-export function keepaliveWorthwhile(row, prices) {
-  const left = keepalivesLeft(row, prices);
+export function keepaliveWorthwhile(row, prices, limit) {
+  const left = keepalivesLeft(row, prices, limit);
   return left !== null && left > 0;
 }
 
@@ -89,12 +94,14 @@ const writePrice = (row, prices) => {
 /**
  * @param {CacheRow | undefined} row
  * @param {CachePrices | null | undefined} prices
+ * @param {number} [limit]
  * @returns {number | null}
  */
-export function keepalivesLeft(row, prices) {
+export function keepalivesLeft(row, prices, limit) {
   const last = row?.last;
   const prefix = last ? last.read + last.write : 0;
   if (!last || !prefix) return null;
+  if (limit !== undefined) return Math.max(0, limit - row.keepalives.length);
   if (!validPrices(prices)) return 0;
   const write = writePrice(row, prices);
   const cost = s => s.read * prices.read + s.write * write + s.fresh + s.output * prices.output;
@@ -102,6 +109,38 @@ export function keepalivesLeft(row, prices) {
   const next = row.keepalives.length ? cost(row.keepalives.at(-1)) : prefix * prices.read;
   if (next <= 0) return null;
   return Math.max(0, Math.floor((prefix * (write - prices.read) - spent) / next + 1e-9));
+}
+
+/**
+ * @param {CacheRow | undefined} row
+ * @returns {CacheUsage | undefined}
+ */
+export function recentUsage(row) {
+  const recent = row?.recent ?? [];
+  if (!recent.length) return undefined;
+  const mean = field => recent.reduce((sum, s) => sum + s[field], 0) / recent.length;
+  return { read: mean('read'), write: mean('write'), fresh: mean('fresh'), requests: recent.length };
+}
+
+/**
+ * @param {CacheRow[]} rows
+ * @param {number} now
+ * @param {number} [windowMs]
+ */
+export function recentMisses(rows, now, windowMs = MISS_WINDOW_MS) {
+  /** @type {Map<string, number>} */
+  const causes = new Map();
+  let total = 0;
+  /** @type {number | undefined} */
+  let latest;
+  for (const row of rows) for (const s of row.samples) {
+    const at = s.completedAt ?? s.startedAt;
+    if (!s.miss || at < now - windowMs) continue;
+    total++;
+    latest = Math.max(latest ?? at, at);
+    causes.set(s.miss, (causes.get(s.miss) ?? 0) + 1);
+  }
+  return { total, latest, causes: [...causes].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])) };
 }
 
 export function cachePolicy(env = {}, model = '') {
@@ -119,7 +158,7 @@ export function cacheRows(samples, resets = [], labels = new Map()) {
     const key = loopKey(s.sessionId, s.agentId);
     let row = rows.get(key);
     if (!row) {
-      row = { sessionId: s.sessionId, agentId: s.agentId, label: labels.get(key) ?? s.agentId ?? 'Main', samples: [], keepalives: [], totals: { requests: 0, read: 0, write: 0, fresh: 0, output: 0 } };
+      row = { sessionId: s.sessionId, agentId: s.agentId, label: labels.get(key) ?? s.agentId ?? 'Main', samples: [], recent: [], keepalives: [], totals: { requests: 0, read: 0, write: 0, fresh: 0, output: 0 } };
       rows.set(key, row);
     }
     row.samples.push(s);
@@ -132,6 +171,7 @@ export function cacheRows(samples, resets = [], labels = new Map()) {
     if (s.read + s.write > 0) row.touchedAt = s.startedAt;
     if (isKeepalive(s)) { row.keepalives.push(s); continue; }
     row.last = s;
+    row.recent = [...(row.recent ?? []), s].slice(-RATE_REQUESTS);
     row.keepalives = [];
     if (s.write > 0) row.creation = s.cacheCreation ?? null;
   }
@@ -156,14 +196,39 @@ export function cacheStatus(row, now, pendingAt) {
   const without = state => ({ state, leftMs: null, ratio, lifetimes: [], sample });
   if (sample.disabled) return without('caching disabled');
   if (sample.read + sample.write === 0) return without('uncached');
-  if (!row.creation) return without('TTL not reported');
+  const creation = row.creation ?? awaitedCreation(row, sample, now);
+  if (!creation) return without('TTL not reported');
   const anchor = Math.max(row.touchedAt ?? sample.startedAt, pendingAt ?? 0);
   /** @type {CacheLifetime[]} */
-  const lifetimes = [{ ttl: '5m', ttlMs: 300000, tokens: row.creation.fiveMinute }, { ttl: '1h', ttlMs: 3600000, tokens: row.creation.oneHour }]
+  const lifetimes = [{ ttl: '5m', ttlMs: 300000, tokens: creation.fiveMinute }, { ttl: '1h', ttlMs: 3600000, tokens: creation.oneHour }]
     .filter(part => part.tokens > 0).map(part => ({ ...part, leftMs: Math.max(0, Math.min(part.ttlMs, anchor + part.ttlMs - now)) }));
   const running = lifetimes.filter(part => part.leftMs > 0).map(part => part.leftMs);
   const leftMs = running.length ? Math.min(...running) : 0;
-  return { state: leftMs ? 'warm' : 'expired', leftMs, ratio, lifetimes, ttl: lifetimes.map(part => part.ttl).join('+'), sample };
+  return { state: leftMs ? 'warm' : 'expired', leftMs, ratio, lifetimes, ttl: lifetimes.map(part => part.ttl).join('+'), sample,
+    ...(row.creation ? {} : { awaiting: true }) };
+}
+
+/**
+ * @param {CacheRow} row
+ * @param {CacheSample} sample
+ * @param {number} now
+ * @returns {CacheCreation | null}
+ */
+function awaitedCreation(row, sample, now) {
+  if (sample !== row.last || !sample.write || sample.cacheCreation || !sample.requested) return null;
+  if (sample.completedAt !== undefined && now - sample.completedAt >= TTL_REPORT_MS) return null;
+  return sample.requested === '1h' ? { fiveMinute: 0, oneHour: sample.write } : { fiveMinute: sample.write, oneHour: 0 };
+}
+
+/**
+ * @param {CacheSample} sample
+ * @returns {string | undefined}
+ */
+export function sampleTtl(sample) {
+  const creation = sample.cacheCreation;
+  const reported = creation ? [creation.fiveMinute ? '5m' : '', creation.oneHour ? '1h' : ''].filter(Boolean).join('+') : '';
+  if (!sample.requested) return reported || undefined;
+  return reported && reported !== sample.requested ? `${sample.requested} (${reported} reported)` : sample.requested;
 }
 
 const DIAL = ['○', '◔', '◑', '◕', '●'];

@@ -3,7 +3,7 @@ import { routeAgent, routeTeammate, validatePolicy, sameModel, isTruthy } from '
 import { createModelPicker, type ModelPickerHost } from './model-picker';
 import { createStatsPanel } from './stats-panel';
 import { agentBadge, sameSent, type Sent } from './agent-badge';
-import { createCachePanel, CACHE_PANE, upkeepMode, ttlOption } from './cache-panel';
+import { createCachePanel, CACHE_PANE, upkeepMode, ttlOption, keepaliveLimit } from './cache-panel';
 import { resolveDefaultTtl } from '../lib/cache-ttl.js';
 import type { TtlAuth } from '../lib/cache-ttl.js';
 
@@ -257,6 +257,7 @@ export function register(on: On, options: PluginOptions = {}) {
             ? { main: ttlOption(options.teammate_cache_ttl), subagent: ttlOption(options.subagent_cache_ttl), teammate: ttlOption(options.teammate_cache_ttl) }
             : { main: ttlOption(options.cache_ttl), subagent: ttlOption(options.subagent_cache_ttl), teammate: ttlOption(options.teammate_cache_ttl) },
           upkeep: snapshot?.active && (snapshot.self || snapshot.teammate) ? upkeepMode(options.teammate_cache_upkeep) : undefined,
+          limit: keepaliveLimit(options.keepalive_limit),
         });
       if (e.isInteractive && e.surface === 'terminal') {
         await cachePanel.introduce();

@@ -78,7 +78,7 @@ async function setup($: Engine, on: On, endpoint = 'https://gateway.example', st
     const request = JSON.parse(e.init?.stdin || '{}');
     world.calls.push(request);
     if (request.action === 'cache-sample') {
-      if (world.failSave) return { value: { exitCode: 1, stderr: 'storage failed', stdout: '' } };
+      if (world.failSave) return { value: { isStdoutTruncated: false, isStderrTruncated: false, exitCode: 1, stderr: 'storage failed', stdout: '' } };
       world.samples.push(world.reported ? applyCacheCreation(request.sample, world.reported) : request.sample);
     }
     if (request.action === 'cache-enrich') {
@@ -88,21 +88,21 @@ async function setup($: Engine, on: On, endpoint = 'https://gateway.example', st
         world.samples[i] = applyCacheCreation(s, world.flushed);
         enriched.push(world.samples[i]);
       }
-      return { value: { exitCode: 0, stderr: '', stdout: JSON.stringify({ samples: enriched }) } };
+      return { value: { isStdoutTruncated: false, isStderrTruncated: false, exitCode: 0, stderr: '', stdout: JSON.stringify({ samples: enriched }) } };
     }
     if (request.action === 'cache-prices') {
       world.priceLookups.push(request.models);
-      if (world.pricesFail) return { value: { exitCode: 1, stderr: 'offline', stdout: '' } };
+      if (world.pricesFail) return { value: { isStdoutTruncated: false, isStderrTruncated: false, exitCode: 1, stderr: 'offline', stdout: '' } };
       const prices = Object.fromEntries(request.models.map((model: string) => [model, world.prices[model] ?? null]));
-      return { value: { exitCode: 0, stderr: '', stdout: JSON.stringify({ catalog: 'fresh', prices }) } };
+      return { value: { isStdoutTruncated: false, isStderrTruncated: false, exitCode: 0, stderr: '', stdout: JSON.stringify({ catalog: 'fresh', prices }) } };
     }
     if (request.action === 'cache-reset') world.resets.push({ sessionId: request.session_id, agentId: request.agent_id ?? null, resetAt: request.reset_at });
-    if (request.action === 'cache-snapshot' && world.failRead) return { value: { exitCode: 1, stderr: 'storage failed', stdout: '' } };
+    if (request.action === 'cache-snapshot' && world.failRead) return { value: { isStdoutTruncated: false, isStderrTruncated: false, exitCode: 1, stderr: 'storage failed', stdout: '' } };
     const output = request.action === 'bootstrap' ? { active: true, policy, agents: [] }
       : request.action === 'cache-sample' ? { sample: world.samples.at(-1) }
       : request.action === 'cache-snapshot' ? { samples: [...world.samples.filter(s => s.sessionId === request.session_id), ...world.linked], resets: world.resets, labels: world.labels }
       : request.action === 'stats' ? { routed: 0, overrides: 0, mismatches: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 } : {};
-    return { value: { exitCode: 0, stderr: '', stdout: JSON.stringify(output) } };
+    return { value: { isStdoutTruncated: false, isStderrTruncated: false, exitCode: 0, stderr: '', stdout: JSON.stringify(output) } };
   });
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true });
   return { world, clock };
@@ -149,7 +149,7 @@ test('main and child cache bars remain distinct and native stream and response s
   expect(contents.includes('1 request ')).toBe(true);
   expect(contents.includes('child')).toBe(true);
   expect(contents.includes('80%')).toBe(true);
-  expect(contents.includes('not reported')).toBe(true);
+  expect(contents.includes('awaiting report')).toBe(true);
   expect(contents.includes('Recent requests')).toBe(true);
   const rendered = text(await $.ui.render(band('child')));
   expect(rendered.includes('Existing prompt content')).toBe(true);
@@ -255,9 +255,9 @@ test('a final response flushed to the transcript after Stop still gets its repor
   await $.classic.SessionStart({ source: 'startup', session_id: world.sessionId, transcript_path: transcript });
   await step($);
   await $.classic.Stop({ stop_hook_active: false, session_id: world.sessionId, transcript_path: transcript });
-  expect(text(await $.ui.render(band())).includes('not reported')).toBe(true);
   world.flushed = { fiveMinute: 100, oneHour: 0 };
   await clock.advance(1000);
+  expect(world.samples[0].cacheCreation).toEqual({ fiveMinute: 100, oneHour: 0 });
   const rendered = text(await $.ui.render(band()));
   expect(rendered.includes('TTL 5m')).toBe(true);
   expect(rendered.includes('not reported')).toBe(false);
@@ -435,7 +435,7 @@ test('the band opens with a bordered dial and the bare upkeep mode', async ($, o
   const shown = text(rendered);
   expect(shown.includes('Cache')).toBe(false);
   expect(shown.includes('ttl')).toBe(false);
-  expect(/◌ ⬦ off TTL 5m █{8} ░{2}\s+80%/.test(shown)).toBe(true);
+  expect(/● ⬦ off TTL 5m █{8} ░{2}\s+80%/.test(shown)).toBe(true);
   expect(button(rendered, 'agent-cache-open')?.plain).toBe(undefined);
   await $.ui.press({ plugin: 'agent-router', key: 'agent-cache-open', requestId: 'cache-band' });
   expect(text(await $.ui.render(pane)).includes('Prompt cache')).toBe(true);
@@ -493,15 +493,126 @@ test('a cache rewritten while it was still warm is labelled a prefix change', as
   world.reported = { fiveMinute: 257000, oneHour: 0 };
   await clock.advance(26000);
   await step($, { index: 1 });
-  expect(text(await $.ui.render(band())).includes('prefix changed')).toBe(true);
+  expect(button(await $.ui.render(band()), 'agent-cache-misses')?.label).toBe('1 prefix');
   Object.assign(usage, { read: 0, write: 306000 });
   world.reported = { fiveMinute: 306000, oneHour: 0 };
   await clock.advance(400000);
   await step($, { index: 2 });
-  expect(text(await $.ui.render(band())).includes('expired ·')).toBe(false);
-  expect(/\d+%\s+·\s+expired/.test(text(await $.ui.render(band())))).toBe(true);
+  expect(button(await $.ui.render(band()), 'agent-cache-misses')?.label).toBe('2 expired·prefix');
   const contents = await dashboard($);
   expect(contents.includes('prefix changed')).toBe(true);
+  expect(contents.includes('· expired ·')).toBe(true);
+});
+
+function missWorld(on: On) {
+  const usage = { read: 300000, write: 5000, fresh: 2 };
+  on('turn.step', async function* ($, e) {
+    yield { kind: 'text' as const, index: 0, text: 'answer' };
+    return { turnId: e.turnId, index: e.index, answer: 'answer', toolUses: [], stopReason: 'end_turn' as const,
+      usage: { model: e.model, cache_read_input_tokens: usage.read, cache_creation_input_tokens: usage.write, input_tokens: usage.fresh, output_tokens: 20 } };
+  });
+  return usage;
+}
+
+test('a cache miss leaves a short chip that dims after 5 minutes and clears after 15', async ($, on) => {
+  const usage = missWorld(on);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 5000, oneHour: 0 };
+  await step($);
+  expect(button(await $.ui.render(band()), 'agent-cache-misses')).toBe(undefined);
+  Object.assign(usage, { read: 48648, write: 257000 });
+  world.reported = { fiveMinute: 257000, oneHour: 0 };
+  await clock.advance(26000);
+  await step($, { index: 1 });
+  let rendered = await $.ui.render(band());
+  expect(button(rendered, 'agent-cache-misses')?.label).toBe('1 prefix');
+  expect(colorOf(rendered, /^✕$/)).toBe(DARK.fair);
+  expect(text(rendered).includes('prefix changed')).toBe(false);
+  Object.assign(usage, { read: 305000, write: 0 });
+  await clock.advance(200000);
+  await step($, { index: 2 });
+  await clock.advance(110000);
+  rendered = await $.ui.render(band());
+  expect((button(rendered, 'agent-cache-misses') as { dimColor?: boolean })?.dimColor).toBe(true);
+  expect(colorOf(rendered, /^✕$/)).toBe(undefined);
+  await clock.advance(600000);
+  expect(button(await $.ui.render(band()), 'agent-cache-misses')).toBe(undefined);
+});
+
+test('the miss chip opens the dashboard on the misses, with their causes and how long ago', async ($, on) => {
+  const usage = missWorld(on);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 5000, oneHour: 0 };
+  await step($);
+  Object.assign(usage, { read: 48648, write: 257000 });
+  world.reported = { fiveMinute: 257000, oneHour: 0 };
+  await clock.advance(26000);
+  await step($, { index: 1 });
+  await clock.advance(64000);
+  await $.ui.render(band());
+  await $.ui.press({ plugin: 'agent-router', key: 'agent-cache-misses', requestId: 'cache-band' });
+  const contents = text(await $.ui.render(pane));
+  expect(contents.includes('✕ 1 cache miss in the last 15 min: 1 prefix changed · latest 1:04 ago')).toBe(true);
+  expect(contents.includes('Recent requests · all agents (last 30 misses)')).toBe(true);
+  expect(contents.includes('same-turn:1')).toBe(true);
+  expect(contents.includes('same-turn:0')).toBe(false);
+});
+
+test('a new write shows the TTL it asked for until the transcript reports one, never a flash of TTL not reported', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  await $.classic.SessionStart({ source: 'startup', session_id: world.sessionId, transcript_path: transcript });
+  await $.ui.render(band());
+  await $.ui.press({ plugin: 'agent-router', key: 'agent-cache-ttl', requestId: 'cache-band' });
+  await step($);
+  let shown = text(await $.ui.render(band()));
+  expect(shown.includes('not reported')).toBe(false);
+  expect(shown.includes('ETA ~60:00')).toBe(true);
+  expect(await dial($)).toBe('●');
+  expect((await dashboard($)).includes('awaiting report')).toBe(true);
+  world.flushed = { fiveMinute: 0, oneHour: 100 };
+  await clock.advance(1000);
+  shown = text(await $.ui.render(band()));
+  expect(shown.includes('ETA ~59:59')).toBe(true);
+  expect(text(await $.ui.render(pane)).includes('awaiting report')).toBe(false);
+  world.flushed = undefined;
+  await step($, { index: 1 });
+  await clock.advance(29000);
+  expect(text(await $.ui.render(band())).includes('not reported')).toBe(false);
+  await clock.advance(1000);
+  expect(text(await $.ui.render(band())).includes('not reported')).toBe(true);
+});
+
+test('recent requests show the TTL each one asked for, and a different one the response reported', async ($, on) => {
+  response(on);
+  const { world } = await setup($, on);
+  world.reported = { fiveMinute: 100, oneHour: 0 };
+  await step($);
+  await $.ui.render(band());
+  await $.ui.press({ plugin: 'agent-router', key: 'agent-cache-ttl', requestId: 'cache-band' });
+  world.reported = { fiveMinute: 0, oneHour: 100 };
+  await step($, { index: 1 });
+  world.reported = { fiveMinute: 100, oneHour: 0 };
+  await step($, { index: 2 });
+  const contents = await dashboard($);
+  expect(/same-turn:0 [^\n]*· TTL 5m ·/.test(contents)).toBe(true);
+  expect(/same-turn:1 [^\n]*· TTL 1h ·/.test(contents)).toBe(true);
+  expect(contents.includes('· TTL 1h (5m reported) ·')).toBe(true);
+});
+
+test('the bar shows the hit rate over the last 10 requests, not just the last one', async ($, on) => {
+  const usage = missWorld(on);
+  Object.assign(usage, { read: 0, write: 10000, fresh: 0 });
+  const { world } = await setup($, on);
+  world.reported = { fiveMinute: 10000, oneHour: 0 };
+  await step($);
+  expect(text(await $.ui.render(band())).includes(' 0%')).toBe(true);
+  Object.assign(usage, { read: 10000, write: 0 });
+  for (let i = 1; i <= 3; i++) await step($, { index: i });
+  expect(text(await $.ui.render(band())).includes('75%')).toBe(true);
+  expect((await dashboard($)).includes('hit rate over the last 4 requests')).toBe(true);
+  for (let i = 4; i <= 12; i++) await step($, { index: i });
+  expect(text(await $.ui.render(band())).includes('100%')).toBe(true);
 });
 
 test('nothing is the default upkeep and sends no request', async ($, on) => {
@@ -676,6 +787,7 @@ test('the band and dashboard dial follow each agent', async ($, on) => {
   await clock.advance(150000);
   world.reported = undefined;
   await step($, { agentId: 'child' });
+  await clock.advance(30000);
   expect(await dial($)).toBe('◑');
   expect(await dial($, 'child')).toBe('◌');
   const contents = await dashboard($);
@@ -758,6 +870,82 @@ test('warmcomp counts down the keepalives left before it compacts', async ($, on
   expect((await dashboard($)).includes('compact next')).toBe(true);
 });
 
+test('warming stops at the keepalive limit, and a real request starts the count again', { options: { keepalive_limit: '3' } }, async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 100, oneHour: 0 };
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(2000);
+  expect(text(await $.ui.render(band())).includes('· ↻3 ·')).toBe(true);
+  expect((await dashboard($)).includes('up to 3 keepalives after each request, whatever they cost')).toBe(true);
+  await clock.advance(273000);
+  expect(world.forks.length).toBe(1);
+  expect(text(await $.ui.render(band())).includes('· ↻2 ·')).toBe(true);
+  for (let i = 0; i < 8; i++) await clock.advance(270000);
+  expect(world.forks.length).toBe(3);
+  expect(world.logs.some(log => log.includes('keepalive limit of 3'))).toBe(true);
+  await step($, { index: 1 });
+  await clock.advance(270000);
+  expect(world.forks.length).toBe(4);
+});
+
+test('warmcomp compacts once the keepalive limit is reached', { options: { keepalive_limit: '2' } }, async ($, on) => {
+  response(on, 120000, 1000, 100);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 1000, oneHour: 0 };
+  world.forkUsage = { input_tokens: 10, output_tokens: 2, cache_read_input_tokens: 121000, cache_creation_input_tokens: 0 };
+  await cycleTo($, 'warmcomp');
+  await step($);
+  await clock.advance(2000);
+  expect(text(await $.ui.render(band())).includes('· ↻2 ➜ cmpt ·')).toBe(true);
+  for (let i = 0; i < 4; i++) await clock.advance(270000);
+  expect(world.forks.length).toBe(2);
+  expect(world.compactions).toEqual(['default']);
+});
+
+test('the default keepalive limit leaves warming to the cost rule', { options: { keepalive_limit: 'default' } }, async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 100, oneHour: 0 };
+  await cycleTo($, 'warm');
+  await step($);
+  for (let i = 0; i < 15; i++) await clock.advance(270000);
+  expect(world.forks.length).toBe(9);
+  expect((await dashboard($)).includes('while keepalives cost less than rewriting the cache')).toBe(true);
+});
+
+test('an infinite keepalive limit warms until the next request, and warmcomp never compacts', { options: { keepalive_limit: 'infinite' } }, async ($, on) => {
+  response(on, 120000, 1000, 100);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 1000, oneHour: 0 };
+  world.forkUsage = { input_tokens: 10, output_tokens: 2, cache_read_input_tokens: 121000, cache_creation_input_tokens: 0 };
+  await cycleTo($, 'warmcomp');
+  await step($);
+  await clock.advance(2000);
+  const shown = text(await $.ui.render(band()));
+  expect(shown.includes('· ↻∞ ·')).toBe(true);
+  expect(shown.includes('cmpt')).toBe(false);
+  for (let i = 0; i < 20; i++) await clock.advance(270000);
+  expect(world.forks.length).toBe(20);
+  expect(world.compactions.length).toBe(0);
+  const contents = await dashboard($);
+  expect(contents.includes('keepalives until your next request')).toBe(true);
+  expect(contents.includes('so it never compacts')).toBe(true);
+});
+
+test('a number of keepalives needs no price, so an unpriced model is warmed too', { options: { keepalive_limit: '2' } }, async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 100, oneHour: 0 };
+  world.prices = {};
+  await cycleTo($, 'warm');
+  await step($, { model: 'gateway/alias-code' });
+  for (let i = 0; i < 6; i++) await clock.advance(270000);
+  expect(world.forks.length).toBe(2);
+  expect(world.priceLookups).toEqual([]);
+});
+
 test('modes that send no keepalives show no count', async ($, on) => {
   response(on, 120000, 1000, 100);
   const { world, clock } = await setup($, on);
@@ -788,7 +976,7 @@ test('viewing an agent that cannot be warmed shows a dash in place of the mode b
   await step($, { agentId: 'child' });
   const child = await $.ui.render(band('child'));
   expect(button(child, 'agent-cache-upkeep')).toBe(undefined);
-  expect(/◌ – TTL 5m █/.test(text(child))).toBe(true);
+  expect(/● – TTL 5m █/.test(text(child))).toBe(true);
   expect(button(await $.ui.render(band()), 'agent-cache-upkeep')?.label).toBe('warm');
 });
 
@@ -825,6 +1013,28 @@ test('the dashboard draws every agent as a tree with its kind and upkeep mode', 
   const lines = treeLines(await $.ui.render(pane));
   const scout = lines.findIndex(line => line.includes('(scout1)'));
   expect(lines[scout + 1].startsWith('│  ')).toBe(true);
+});
+
+test('the dashboard names what cannot be kept warm only when the tree shows such an agent', async ($, on) => {
+  response(on);
+  const { world } = await setup($, on, undefined, { 'cache-upkeep': [['pane-session', 'warm']] });
+  world.reported = { fiveMinute: 100, oneHour: 0 };
+  await step($);
+  expect((await dashboard($)).includes('kept warm')).toBe(false);
+  world.linked = [applyCacheCreation({ sessionId: 'pane-session', agentId: null, turnId: 'pane-turn', index: 0, model: 'vendor/main',
+    startedAt: 0, completedAt: 0, read: 800, write: 100, fresh: 100, output: 20, ttlMs: null, ttlSource: 'response cache_creation', disabled: false },
+    { fiveMinute: 100, oneHour: 0 })];
+  expect((await dashboard($)).includes('kept warm')).toBe(false);
+  world.roster = [{ id: 'scout1', type: 'agent-router:scout', description: 'Search', status: 'running' }];
+  await step($, { agentId: 'scout1' });
+  expect((await dashboard($)).includes('– can\'t be kept warm: Claude Code has no keepalive or compaction for subagents.')).toBe(true);
+  world.roster.push({ id: 'mate1', type: 'teammate', description: 'Probe', status: 'running', name: 'probe' });
+  await step($, { agentId: 'mate1' });
+  expect((await dashboard($)).includes('for subagents and in-process teammates.')).toBe(true);
+  await $.ui.press({ plugin: 'agent-router', key: 'cache-agents:main', requestId: 'agent-cache' });
+  expect(text(await $.ui.render(pane)).includes('kept warm')).toBe(false);
+  await $.ui.press({ plugin: 'agent-router', key: 'cache-agents:teammates', requestId: 'agent-cache' });
+  expect(text(await $.ui.render(pane)).includes('– can\'t be kept warm: Claude Code has no keepalive or compaction for in-process teammates.')).toBe(true);
 });
 
 function treeLines(node: RenderNode): string[] {
