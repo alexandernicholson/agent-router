@@ -7,7 +7,7 @@ Each release explains what changed for you, in 120 words or less.
 - **Teammates keep their models.** A teammate started with a role now runs on the teammate model, and on the teammate TTL, as set in `/agent-models` → Teammates.
 - **Split-pane teammates show their cache.** Their bar and the lead's dashboard now fill in from the first request, and each teammate appears once.
 - **Teammate keepalives hit the cache.** A split-pane teammate whose role sets an effort sends keepalives and compactions at that effort, so they reuse its cache instead of rewriting it.
-- **The cache note is shorter.** The dashboard only says what can't be kept warm when it shows such an agent.
+- **A tidier miss chip.** `✕` now has a space after it.
 
 ## 0.16.0
 
