@@ -82,6 +82,11 @@ export function routeTeammate(policy, input) {
   return effort === undefined ? routed : { ...routed, effort };
 }
 
+/** @param {{id: string, type: string, teammateId?: string} | undefined} agent */
+export const isTeammate = agent => !!agent && (agent.type === 'teammate' || typeof agent.teammateId === 'string');
+/** @param {{id: string, type: string, teammateId?: string} | undefined} agent */
+export const isPaneTeammate = agent => !!agent && typeof agent.teammateId === 'string' && agent.id === agent.teammateId;
+
 export function isTruthy(value) {
   return typeof value === 'string' && !['', '0', 'false', 'no', 'off'].includes(value.toLowerCase());
 }

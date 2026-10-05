@@ -14,9 +14,13 @@ const roles = {
 const policy = { version: 1, roles };
 const withMate = { ...policy, teammate: { model: 'vendor/mate-v1', effort: 'high' } };
 
-type World = { calls: Record<string, any>[]; env: Array<{ name: string; value?: string }>; roster: AgentInfo[]; logs: string[]; applied?: Record<string, unknown>; redraws: number; backend?: 'tmux'; clock?: MockClock };
+type World = { calls: Record<string, any>[]; env: Array<{ name: string; value?: string }>; roster: AgentInfo[]; logs: string[]; applied?: Record<string, unknown>; redraws: number; backend?: 'tmux'; clock?: MockClock;
+  spawnTeammates?: boolean; starting?: Promise<void>; started?: Promise<unknown> };
 
-async function lead($: Engine, on: On, snapshot: Record<string, unknown> = { active: true, policy }, world: World = { calls: [], env: [], roster: [], logs: [], redraws: 0 }): Promise<World> {
+const fresh = (extra: Partial<World> = {}): World => ({ calls: [], env: [], roster: [], logs: [], redraws: 0, ...extra });
+
+async function lead($: Engine, on: On, snapshot: Record<string, unknown> = { active: true, policy }, world: World = fresh()): Promise<World> {
+  const engine = $;
   mock.store(on);
   world.clock = mock.clock(on);
   on('session.end', ($, e) => ({ sessionId: e.sessionId }));
@@ -32,24 +36,29 @@ async function lead($: Engine, on: On, snapshot: Record<string, unknown> = { act
   on('agent.spawn', ($, e) => ({ model: e.model!, agentId: `sub-${e.tool_use_id}` }));
   on('ui.render', { component: 'AbovePrompt' }, ($, e) => $.ui.resolve(e).Box({ children: [] }));
   on('turn.complete', ($, e) => ({ text: e.answer }));
-  on('process.run', ($, e) => {
+  on('process.run', async ($, e) => {
     const input = JSON.parse(e.init?.stdin || '{}');
     world.calls.push(input);
+    if (input.action === 'bootstrap' && world.starting) await world.starting;
     return { value: { isStdoutTruncated: false, isStderrTruncated: false, exitCode: 0, stderr: '', stdout: JSON.stringify(input.action === 'bootstrap'
       ? { sessionId: 'lead-session', gateway: 'https://gateway.example', digest: 'pinned', agents: [], ...snapshot }
       : input.action === 'apply' ? { active: true, policy: world.applied } : {}) } };
   });
   // Stands in for the Agent tool: reports a teammate launch for named calls.
-  on('tool.call', ($, e) => {
+  on('tool.call', async ($, e) => {
     const input = e as Record<string, any>;
     const model = world.env.filter(item => item.name === 'CLAUDE_CODE_SUBAGENT_MODEL').at(-1)?.value;
-    world.calls.push({ action: 'launch', input, model });
+    const spawned = world.spawnTeammates ? await engine.agent.spawn({ tool_use_id: input.tool_use_id, description: 'Team', prompt: 'Work',
+      subagentType: input.subagent_type ?? 'teammate', provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5',
+      background: true, fork: false, isTeammate: true, name: input.name }) : undefined;
+    world.calls.push({ action: 'launch', input, model, spawned: spawned?.model });
     const backend = world.backend ?? 'in-process';
     return { result: { status: 'teammate_spawned', teammate_id: `${input.name}@session-lead`, agent_id: `${input.name}@session-lead`,
       agent_type: input.subagent_type ?? 'general-purpose', model: model ?? 'claude-opus-5-5', name: input.name,
       tmux_pane_id: backend === 'in-process' ? 'in-process' : '%9', is_splitpane: backend !== 'in-process', team_name: 'session-lead' } } as any;
   });
-  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true });
+  world.started = $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true });
+  if (!world.starting) await world.started;
   return world;
 }
 
@@ -327,4 +336,57 @@ test('a split-pane teammate starts its own conversation in the teammate TTL, and
 test('a lead session leaves the main conversation TTL to Claude Code by default', async ($, on) => {
   const world = await lead($, on);
   expect(world.env.some(item => item.name === 'CLAUDE_CODE_PROMPT_CACHE_TTL' && item.value !== undefined)).toBe(false);
+});
+
+test('a teammate keeps its teammate model through the spawn the Agent tool raises for it', async ($, on) => {
+  const world = await lead($, on, { active: true, policy: withMate }, fresh({ spawnTeammates: true }));
+  await $.tool.call(call({ name: 'probe', subagent_type: 'Explore' }));
+  const launch = world.calls.find(item => item.action === 'launch')!;
+  expect(launch.spawned).toBe('vendor/mate-v1');
+  expect(world.calls.filter(item => item.action === 'route').map(item => item.kind)).toEqual(['teammate']);
+  expect(world.logs.some(line => line.includes('mismatch'))).toBe(false);
+});
+
+test('an in-process teammate launched with a role steps on the teammate model, found by its team address', async ($, on) => {
+  echo(on);
+  const world = await lead($, on, { active: true, policy: withMate });
+  await $.tool.call(call({ name: 'probe', subagent_type: 'Explore' }));
+  world.roster = [{ id: 'aprobe-1', description: 'Work', type: 'agent-router:scout', teammateId: 'probe@session-lead', status: 'running', name: 'probe' }];
+  expect(await steps($, { agentId: 'aprobe-1', model: 'claude-opus-5-5', effort: 'low' }))
+    .toEqual([{ kind: 'text', index: 0, text: 'vendor/mate-v1|high' }]);
+});
+
+test('a split-pane teammate request sent while its session is still starting waits, so it is pinned and measured', async ($, on) => {
+  on('turn.step', async function* ($, e) {
+    yield { kind: 'text' as const, index: 0, text: `${e.model}|${e.effort ?? 'none'}` };
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn' as const,
+      usage: { model: e.model, cache_read_input_tokens: 0, cache_creation_input_tokens: 4000, input_tokens: 10, output_tokens: 2 } };
+  });
+  let release!: () => void;
+  const self = { role: 'scout', type: 'agent-router:scout', model: 'vendor/mate-v1', effort: 'high' };
+  const world = await lead($, on, { active: true, policy: withMate, leadSessionId: 'lead-of-mate', self, teammate: { agentId: 'worker@session-lead' } },
+    fresh({ starting: new Promise<void>(resolve => { release = resolve; }) }));
+  const first = steps($, { model: 'claude-opus-5-5', effort: 'low' });
+  await Promise.resolve();
+  release();
+  expect(await first).toEqual([{ kind: 'text', index: 0, text: 'vendor/mate-v1|high' }]);
+  await world.started;
+  expect(world.calls.filter(item => item.action === 'cache-sample').length).toBe(1);
+});
+
+test('a split-pane teammate session runs at its pinned effort, so keepalives and compactions match its requests', async ($, on) => {
+  const self = { role: 'scout', type: 'agent-router:scout', model: 'vendor/mate-v1', effort: 'high' };
+  const world = await lead($, on, { active: true, policy: withMate, leadSessionId: 'lead-of-mate', self, teammate: { agentId: 'worker@session-lead' } });
+  expect(world.env.filter(item => item.name === 'CLAUDE_CODE_EFFORT_LEVEL').at(-1)?.value).toBe('high');
+});
+
+test('a teammate without a pinned effort and a lead leave the session effort alone', async ($, on) => {
+  const self = { role: 'task', type: 'agent-router:task', model: 'vendor/task-v1' };
+  const mate = await lead($, on, { active: true, policy, leadSessionId: 'lead-of-mate', self, teammate: { agentId: 'worker@session-lead' } });
+  expect(mate.env.some(item => item.name === 'CLAUDE_CODE_EFFORT_LEVEL')).toBe(false);
+});
+
+test('a lead never sets the session effort', async ($, on) => {
+  const world = await lead($, on, { active: true, policy: withMate });
+  expect(world.env.some(item => item.name === 'CLAUDE_CODE_EFFORT_LEVEL')).toBe(false);
 });

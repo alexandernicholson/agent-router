@@ -504,6 +504,13 @@ test('a cache rewritten while it was still warm is labelled a prefix change', as
   expect(contents.includes('· expired ·')).toBe(true);
 });
 
+function flatBand(node: RenderNode): string {
+  if (typeof node === 'string') return node;
+  if (node.type === 'Button') return node.props.label ?? '';
+  const kids = 'children' in node && Array.isArray(node.children) ? node.children.map(flatBand) : [];
+  return kids.join('props' in node && (node.props as { gap?: number })?.gap ? ' ' : '');
+}
+
 function missWorld(on: On) {
   const usage = { read: 300000, write: 5000, fresh: 2 };
   on('turn.step', async function* ($, e) {
@@ -528,6 +535,7 @@ test('a cache miss leaves a short chip that dims after 5 minutes and clears afte
   expect(button(rendered, 'agent-cache-misses')?.label).toBe('1 prefix');
   expect(colorOf(rendered, /^✕$/)).toBe(DARK.fair);
   expect(text(rendered).includes('prefix changed')).toBe(false);
+  expect(flatBand(rendered).includes('% ✕ 1 prefix ·')).toBe(true);
   Object.assign(usage, { read: 305000, write: 0 });
   await clock.advance(200000);
   await step($, { index: 2 });
@@ -1203,6 +1211,37 @@ test('in-process teammates start in the teammate TTL setting, subagents in the s
   expect(seen('step', 'mate')).toEqual(['1h']);
   expect(seen('step', 'child')).toEqual([undefined]);
   expect((await dashboard($)).includes('TTL 1h · teammate TTL in /agent-models')).toBe(true);
+});
+
+test('an in-process teammate launched with a role is still a teammate, by its team address', async ($, on) => {
+  response(on);
+  const { world } = await setup($, on);
+  world.roster = [{ id: 'amate-1', type: 'agent-router:scout', teammateId: 'probe@session-lead', description: 'Probe', status: 'running', name: 'probe' }];
+  expect(await ttlButton($, 'amate-1')).toBe('TTL 1h');
+  await step($, { agentId: 'amate-1' });
+  expect(seen('step', 'amate-1')).toEqual(['1h']);
+  const contents = await dashboard($);
+  expect(contents.includes('probe (amate-1) · in-process teammate')).toBe(true);
+  expect(contents.includes('TTL 1h · teammate TTL in /agent-models')).toBe(true);
+  expect(contents.includes('for in-process teammates.')).toBe(true);
+});
+
+test('a split-pane teammate in the lead roster is drawn once, from its own session', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  await step($);
+  world.roster = [{ id: 'worker@session-lead', type: 'agent-router:task', teammateId: 'worker@session-lead', description: 'Work', status: 'idle', name: 'worker' }];
+  let contents = await dashboard($);
+  expect(contents.includes('worker (worker@session-lead) · split-pane teammate')).toBe(true);
+  expect(contents.includes('kept warm')).toBe(false);
+  const now = clock.now();
+  world.linked = [applyCacheCreation({ sessionId: 'pane-session', agentId: null, turnId: 'pane-turn', index: 0, model: 'vendor/main',
+    startedAt: now, completedAt: now, read: 800, write: 100, fresh: 100, output: 20, ttlMs: null, ttlSource: 'response cache_creation', disabled: false },
+    { fiveMinute: 100, oneHour: 0 })];
+  world.labels = [[loopKey('pane-session', null), 'worker (worker@session-lead)']];
+  contents = await dashboard($);
+  expect(contents.split('worker (worker@session-lead)').length - 1).toBe(1);
+  expect(contents.includes('worker (worker@session-lead) · split-pane teammate')).toBe(true);
 });
 
 test('keepalives and compaction use the main conversation TTL, and a different reported TTL shows', async ($, on) => {

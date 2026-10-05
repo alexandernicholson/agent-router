@@ -4,7 +4,7 @@ import { validPrices } from '../lib/cache.js';
 import type { CachePrices, CacheRow, CacheSample, CacheReset, CacheStatus } from '../lib/cache.js';
 import { CACHE_COLORS, themeFamily } from '../lib/cache-colors.js';
 import { displayText } from '../lib/catalog.js';
-import { sameModel } from '../lib/routing.js';
+import { isPaneTeammate, isTeammate, sameModel } from '../lib/routing.js';
 import { createTtlGate, isTtl, resolveDefaultTtl } from '../lib/cache-ttl.js';
 import type { Ttl, TtlAuth, TtlDefault } from '../lib/cache-ttl.js';
 
@@ -32,7 +32,7 @@ const INTRO = [
   '  TTL 5m: this conversation\'s cache lifetime; click to switch between 5m and 1h. ETA ~3:44 is the time left.',
   '  Mode button: click to cycle what happens 30 seconds before an idle main conversation\'s cache expires:',
   '    off (default) sends nothing.',
-  '    warm sends a cheap keepalive request while that costs less than rewriting the cache; ↻ shows how many are left.',
+  '    warm sends cheap keepalive requests, by default while they cost less than rewriting the cache; ↻ shows how many are left.',
   '    compact summarises a conversation of 100k+ tokens while it is still cached.',
   '    warmcomp warms first, then compacts.',
   '  Keepalives and compactions are billed. Set how many under /agent-models → Prompt cache; teammates\' mode is under Teammates.',
@@ -149,7 +149,9 @@ export function createCachePanel() {
       labels.set(loopKey(current.sessionId, agent.id), `${agent.name || agent.type} (${agent.id})`);
     }
     const result = cacheRows([...current.samples.values()], current.resets, labels);
-    for (const agentId of [null, ...current.roster.map(agent => agent.id)]) {
+    const linked = new Set(result.filter(row => row.sessionId !== current.sessionId && row.agentId === null).map(row => row.label));
+    const placed = current.roster.filter(agent => !(isPaneTeammate(agent) && linked.has(labels.get(loopKey(current.sessionId, agent.id)) ?? '')));
+    for (const agentId of [null, ...placed.map(agent => agent.id)]) {
       if (!result.some(row => row.sessionId === current.sessionId && row.agentId === agentId)) {
         result.push({ sessionId: current.sessionId, agentId, label: labels.get(loopKey(current.sessionId, agentId)) ?? 'Main',
           samples: [], keepalives: [], totals: { requests: 0, read: 0, write: 0, fresh: 0, output: 0 } });
@@ -167,7 +169,7 @@ export function createCachePanel() {
   function kindOf(current: Context, row: CacheRow): Kind {
     if (row.agentId === null) return row.sessionId === current.sessionId ? 'main' : 'split-pane teammate';
     const agent = row.sessionId === current.sessionId ? current.roster.find(item => item.id === row.agentId) : undefined;
-    return agent?.type === 'teammate' ? 'in-process teammate' : 'subagent';
+    return isPaneTeammate(agent) ? 'split-pane teammate' : isTeammate(agent) ? 'in-process teammate' : 'subagent';
   }
 
   function tree(current: Context): Node[] {
@@ -189,7 +191,7 @@ export function createCachePanel() {
     const visit = (row: CacheRow, depth: number, lead: string, last: boolean) => {
       const key = loopKey(row.sessionId, row.agentId);
       const kind = kindOf(current, row);
-      const upkeep = kind === 'main' ? current.upkeep : kind === 'split-pane teammate' ? paneModes.get(row.sessionId) ?? 'off' : undefined;
+      const upkeep = kind === 'main' ? current.upkeep : kind === 'split-pane teammate' && row.sessionId !== current.sessionId ? paneModes.get(row.sessionId) ?? 'off' : undefined;
       nodes.push({ row, kind, depth, upkeep, prefix: depth ? `${lead}${last ? '└─ ' : '├─ '}` : '', body: depth ? `${lead}${last ? '   ' : '│  '}` : '' });
       const kids = children.get(key) ?? [];
       kids.forEach((kid, index) => visit(kid, depth + 1, depth ? `${lead}${last ? '   ' : '│  '}` : '', index === kids.length - 1));
@@ -298,7 +300,7 @@ export function createCachePanel() {
     if (agentId === null) return 'main';
     const known = current.kinds.get(agentId);
     if (known) return known;
-    return current.roster.find(agent => agent.id === agentId)?.type === 'teammate' ? 'teammate' : 'subagent';
+    return isTeammate(current.roster.find(agent => agent.id === agentId)) ? 'teammate' : 'subagent';
   }
 
   async function learnKind(current: Context, agentId: string) {
@@ -308,7 +310,7 @@ export function createCachePanel() {
       const roster = await current.host.agent.list().catch(() => undefined);
       if (roster) { current.roster = roster; agent = roster.find(item => item.id === agentId); }
     }
-    if (agent) current.kinds.set(agentId, agent.type === 'teammate' ? 'teammate' : 'subagent');
+    if (agent) current.kinds.set(agentId, isTeammate(agent) ? 'teammate' : 'subagent');
   }
 
   function ttlChoice(current: Context, agentId: string | null): TtlChoice {
@@ -660,7 +662,7 @@ export function createCachePanel() {
     const stale = current.now - (found.latest ?? current.now) > MISS_FRESH_MS;
     const label = `${found.total} ${found.causes.slice(0, 2).map(([cause]) => MISS_WORDS[cause] ?? cause).join('·')}${found.causes.length > 2 ? '…' : ''}`;
     return [elements.Text({ children: [' '] }), elements.Text(stale ? { dimColor: true, children: ['✕'] } : { color: palette(current).fair, children: ['✕'] }),
-      elements.Button({ key: 'agent-cache-misses', label, plain: true, ...(stale ? { dimColor: true } : {}),
+      elements.Text({ children: [' '] }), elements.Button({ key: 'agent-cache-misses', label, plain: true, ...(stale ? { dimColor: true } : {}),
         onPress: async () => { requestFilter = 'misses'; historyScope = agentId === null ? 'all' : 'agent'; selected = agentId === null ? undefined : loopKey(current.sessionId, agentId); await show(); } })];
   }
 

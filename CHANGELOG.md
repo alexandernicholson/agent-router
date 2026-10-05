@@ -2,6 +2,13 @@
 
 Each release explains what changed for you, in 120 words or less.
 
+## 0.16.1
+
+- **Teammates keep their models.** A teammate started with a role now runs on the teammate model, and on the teammate TTL, as set in `/agent-models` → Teammates.
+- **Split-pane teammates show their cache.** Their bar and the lead's dashboard now fill in from the first request, and each teammate appears once.
+- **Teammate keepalives hit the cache.** A split-pane teammate whose role sets an effort sends keepalives and compactions at that effort, so they reuse its cache instead of rewriting it.
+- **The cache note is shorter.** The dashboard only says what can't be kept warm when it shows such an agent.
+
 ## 0.16.0
 
 - **Choose how many keepalives to send.** `/agent-models` → Prompt cache has a keepalive limit: `default` warms while it costs less than rewriting the cache, a number sends exactly that many, and `infinite` warms until you're back.

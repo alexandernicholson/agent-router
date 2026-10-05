@@ -1,5 +1,5 @@
 import type { AgentInfo, On, PluginOptions, Timer, TurnStepInput, StreamNext } from 'claude-code';
-import { routeAgent, routeTeammate, validatePolicy, sameModel, isTruthy } from '../lib/routing.js';
+import { routeAgent, routeTeammate, validatePolicy, sameModel, isTruthy, isTeammate } from '../lib/routing.js';
 import { createModelPicker, type ModelPickerHost } from './model-picker';
 import { createStatsPanel } from './stats-panel';
 import { agentBadge, sameSent, type Sent } from './agent-badge';
@@ -46,6 +46,8 @@ export function register(on: On, options: PluginOptions = {}) {
   const launching = new Set<Promise<unknown>>();
   let launchQueue: Promise<unknown> = Promise.resolve();
   const toolUsesSpawned = new Set<string>();
+  const teammateCalls = new Map<string, Route>();
+  let started: Promise<void> = Promise.resolve();
   // What each loop's latest model request carried, for the band's agent line.
   // The main loop is keyed '' (in a pane teammate session, that is the teammate).
   const sent = new Map<string, Sent>();
@@ -105,9 +107,10 @@ export function register(on: On, options: PluginOptions = {}) {
     const launch = launchQueue.then(async () => {
       const previous = await $.env.get('CLAUDE_CODE_SUBAGENT_MODEL');
       teammates.set(call.name!, assignment);
+      teammateCalls.set(call.tool_use_id, route);
       await $.env.set('CLAUDE_CODE_SUBAGENT_MODEL', route.model);
       try { return await next(rewritten); }
-      finally { await $.env.set('CLAUDE_CODE_SUBAGENT_MODEL', previous); }
+      finally { teammateCalls.delete(call.tool_use_id); await $.env.set('CLAUDE_CODE_SUBAGENT_MODEL', previous); }
     });
     launchQueue = launch.catch(() => undefined);
     launching.add(launch);
@@ -143,148 +146,153 @@ export function register(on: On, options: PluginOptions = {}) {
   }).catch(($, e, next) => next.called ? next(e) : { deny: 'Agent Router guard failed before tool dispatch.' });
 
   on('session.start', async ($, e, next) => {
-    activityTimer?.cancel();
-    cacheTimer?.cancel();
-    interactive = e.isInteractive;
-    ready = (async () => {
-      snapshot = undefined;
-      const root = $.plugin.root;
-      const sessionId = await $.session.id();
-      bridge = async request => {
-        const result = await $.process.run(['node', `${root}/scripts/bridge.mjs`], {
-          stdin: JSON.stringify({ ...request, options, session_id: request.session_id ?? sessionId }), timeoutMs: 20_000,
-        });
-        if (result.exitCode !== 0) throw new Error(result.stderr.trim() || 'Agent Router bridge failed.');
-        return JSON.parse(result.stdout);
-      };
-      const loaded = await bridge({ action: 'bootstrap' });
-      if (typeof loaded.active !== 'boolean') throw new Error('Invalid Agent Router bootstrap response.');
-      if (loaded.active) validatePolicy(loaded.policy);
-      snapshot = loaded;
-      agents.clear();
-      sent.clear();
-      teammates.clear();
-      paneTeammates.clear();
-      for (const saved of loaded.agents || []) {
-        if (!loaded.active || typeof saved.agentId !== 'string') continue;
-        if (saved.kind === 'teammate') {
-          if (typeof saved.name === 'string' && typeof saved.effectiveModel === 'string') {
-            teammates.set(saved.name, { model: saved.effectiveModel, effort: saved.effectiveEffort });
+    let finish!: () => void;
+    started = new Promise(resolve => { finish = resolve; });
+    try {
+      activityTimer?.cancel();
+      cacheTimer?.cancel();
+      interactive = e.isInteractive;
+      ready = (async () => {
+        snapshot = undefined;
+        const root = $.plugin.root;
+        const sessionId = await $.session.id();
+        bridge = async request => {
+          const result = await $.process.run(['node', `${root}/scripts/bridge.mjs`], {
+            stdin: JSON.stringify({ ...request, options, session_id: request.session_id ?? sessionId }), timeoutMs: 20_000,
+          });
+          if (result.exitCode !== 0) throw new Error(result.stderr.trim() || 'Agent Router bridge failed.');
+          return JSON.parse(result.stdout);
+        };
+        const loaded = await bridge({ action: 'bootstrap' });
+        if (typeof loaded.active !== 'boolean') throw new Error('Invalid Agent Router bootstrap response.');
+        if (loaded.active) validatePolicy(loaded.policy);
+        snapshot = loaded;
+        if (loaded.active && loaded.self?.effort) await $.env.set('CLAUDE_CODE_EFFORT_LEVEL', loaded.self.effort);
+        agents.clear();
+        sent.clear();
+        teammates.clear();
+        paneTeammates.clear();
+        for (const saved of loaded.agents || []) {
+          if (!loaded.active || typeof saved.agentId !== 'string') continue;
+          if (saved.kind === 'teammate') {
+            if (typeof saved.name === 'string' && typeof saved.effectiveModel === 'string') {
+              teammates.set(saved.name, { model: saved.effectiveModel, effort: saved.effectiveEffort });
+            }
+            if (saved.backend === 'tmux') paneTeammates.add(saved.agentId);
+            continue;
           }
-          if (saved.backend === 'tmux') paneTeammates.add(saved.agentId);
-          continue;
+          const role = loaded.policy.roles[saved.role];
+          if (role && role.model === saved.effectiveModel) {
+            agents.set(saved.agentId, { model: role.model, effort: role.effort });
+          }
         }
-        const role = loaded.policy.roles[saved.role];
-        if (role && role.model === saved.effectiveModel) {
-          agents.set(saved.agentId, { model: role.model, effort: role.effort });
-        }
-      }
-      if (typeof loaded.teammateNotice === 'string') $.ui.log(loaded.teammateNotice, { to: 'debug' });
-      failure = '';
-      $.ui.status(undefined);
-    })().catch(error => {
-      failure = error instanceof Error ? error.message : 'Agent Router initialization failed.';
-      $.ui.status('Routing setup needs attention · /agent-models');
-    });
-    await ready;
-    $.ui.invalidate('ui.render');
-    const cacheEnv = {
-      DISABLE_PROMPT_CACHING: await $.env.get('DISABLE_PROMPT_CACHING').catch(() => undefined),
-      DISABLE_PROMPT_CACHING_HAIKU: await $.env.get('DISABLE_PROMPT_CACHING_HAIKU').catch(() => undefined),
-      DISABLE_PROMPT_CACHING_SONNET: await $.env.get('DISABLE_PROMPT_CACHING_SONNET').catch(() => undefined),
-      DISABLE_PROMPT_CACHING_OPUS: await $.env.get('DISABLE_PROMPT_CACHING_OPUS').catch(() => undefined),
-      COLORFGBG: await $.env.get('COLORFGBG').catch(() => undefined),
-      CLAUDE_CODE_PROMPT_CACHE_TTL: await $.env.get('CLAUDE_CODE_PROMPT_CACHE_TTL').catch(() => undefined),
-      CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: await $.env.get('CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL').catch(() => undefined),
-      ENABLE_PROMPT_CACHING_1H: await $.env.get('ENABLE_PROMPT_CACHING_1H').catch(() => undefined),
-      ENABLE_PROMPT_CACHING_1H_BEDROCK: await $.env.get('ENABLE_PROMPT_CACHING_1H_BEDROCK').catch(() => undefined),
-      CLAUDE_CODE_USE_BEDROCK: await $.env.get('CLAUDE_CODE_USE_BEDROCK').catch(() => undefined),
-      FORCE_PROMPT_CACHING_5M: await $.env.get('FORCE_PROMPT_CACHING_5M').catch(() => undefined),
-    };
-    const auth = async (): Promise<TtlAuth> => {
-      const credential = await $.session.authorize().catch(() => null);
-      if (credential?.kind === 'bearer') return 'subscription';
-      return credential ? 'api-key' : 'gateway';
-    };
-    pickerHost = {
-      plugin: { name: $.plugin.name, root: $.plugin.root },
-      ui: {
-        invalidate: event => $.ui.invalidate(event),
-        open: input => $.ui.open(input),
-        close: input => $.ui.close(input),
-        log: text => $.ui.log(text),
-        resolve: input => $.ui.resolve(input),
-      },
-      store: {
-        get: key => $.store.get(key),
-        set: (key, value) => $.store.set(key, value),
-        delete: key => $.store.delete(key),
-      },
-      config: { list: () => $.config.list(), set: input => $.config.set(input) },
-      process: { run: (argv, settings) => $.process.run(argv, settings) },
-      command: { register: input => $.command.register(input) },
-      session: { id: () => $.session.id() },
-      endpoint: () => $.env.get('ANTHROPIC_BASE_URL'),
-      ttlDefaults: async () => {
-        const [settings, kind] = await Promise.all([$.settings.read().catch(() => ({})), auth().catch((): TtlAuth => 'gateway')]);
-        const resolve = (scope: 'main' | 'subagent') => resolveDefaultTtl({ scope, env: cacheEnv, settings: settings as Record<string, unknown>, auth: kind });
-        return { main: resolve('main'), subagent: resolve('subagent') };
-      },
-    };
-    await $.command.register({ name: 'agent-models-apply', immediate: true,
-      description: 'Apply saved Agent Router role models and efforts to this session now.' });
-    try { await picker.initialize(pickerHost, e); }
-    catch (error) { $.ui.log(`Agent Router models: ${error instanceof Error ? error.message : 'Open /agent-models to retry.'}`); }
-    if (bridge) {
-      await cachePanel.initialize({
-        session: { id: () => $.session.id(), compact: input => $.session.compact(input) },
-        config: { list: () => $.config.list() },
-        agent: { list: () => $.agent.list() },
-        clock: { now: () => $.clock.now() },
-        model: { fork: request => $.model.fork(request) },
-        store: { get: key => $.store.get(key), set: (key, value) => $.store.set(key, value) },
-        ui: { invalidate: event => $.ui.invalidate(event), open: input => $.ui.open(input),
-          close: input => $.ui.close(input), log: (text, settings) => $.ui.log(text, settings) },
-        command: { register: input => $.command.register(input) },
-        env: { set: (name, value) => name === 'CLAUDE_CODE_PROMPT_CACHE_TTL' ? $.env.set('CLAUDE_CODE_PROMPT_CACHE_TTL', value)
-          : $.env.set('CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL', value) },
-        settings: { read: input => $.settings.read(input) },
-        auth,
-      }, bridge, await $.session.id(), await $.env.get('ANTHROPIC_BASE_URL'),
-        snapshot?.active && snapshot.teammate ? snapshot.teammate.name ?? snapshot.teammate.agentId : undefined, {
-          env: cacheEnv,
-          ttl: snapshot?.active && (snapshot.self || snapshot.teammate)
-            ? { main: ttlOption(options.teammate_cache_ttl), subagent: ttlOption(options.subagent_cache_ttl), teammate: ttlOption(options.teammate_cache_ttl) }
-            : { main: ttlOption(options.cache_ttl), subagent: ttlOption(options.subagent_cache_ttl), teammate: ttlOption(options.teammate_cache_ttl) },
-          upkeep: snapshot?.active && (snapshot.self || snapshot.teammate) ? upkeepMode(options.teammate_cache_upkeep) : undefined,
-          limit: keepaliveLimit(options.keepalive_limit),
-        });
-      if (e.isInteractive && e.surface === 'terminal') {
-        await cachePanel.introduce();
-        cacheTicks = 0;
-        cacheTimer = $.clock.every(1000, async () => {
-          await cachePanel.tick();
-          if (++cacheTicks % 5 === 0) await cachePanel.refresh();
-        });
-      }
-    }
-    if (!failure && snapshot?.active && e.isInteractive && e.surface === 'terminal') {
-      await statsPanel.initialize({
-        stats: () => bridge!({ action: 'stats' }),
-        agents: () => $.agent.list(),
-        managed: agent => agents.has(agent.id) || (agent.type === 'teammate' && !!agent.name && teammates.has(agent.name)),
-        store: pickerHost.store,
-        redraw: () => $.ui.invalidate('ui.render'),
-      }, await $.session.id());
-      activityTicks = 0;
-      activityTimer = $.clock.every(1000, () => {
-        statsPanel.refreshActivity().catch(() => $.ui.log('Agent Router: activity statistics are unavailable.', { to: 'debug' }));
-        // Every fifth second: each refresh runs the bridge as a process.
-        if (paneTeammates.size && ++activityTicks % 5 === 0) {
-          statsPanel.refreshStats().catch(() => $.ui.log('Agent Router: usage statistics are unavailable.', { to: 'debug' }));
-        }
+        if (typeof loaded.teammateNotice === 'string') $.ui.log(loaded.teammateNotice, { to: 'debug' });
+        failure = '';
+        $.ui.status(undefined);
+      })().catch(error => {
+        failure = error instanceof Error ? error.message : 'Agent Router initialization failed.';
+        $.ui.status('Routing setup needs attention · /agent-models');
       });
-    }
+      await ready;
+      $.ui.invalidate('ui.render');
+      const cacheEnv = {
+        DISABLE_PROMPT_CACHING: await $.env.get('DISABLE_PROMPT_CACHING').catch(() => undefined),
+        DISABLE_PROMPT_CACHING_HAIKU: await $.env.get('DISABLE_PROMPT_CACHING_HAIKU').catch(() => undefined),
+        DISABLE_PROMPT_CACHING_SONNET: await $.env.get('DISABLE_PROMPT_CACHING_SONNET').catch(() => undefined),
+        DISABLE_PROMPT_CACHING_OPUS: await $.env.get('DISABLE_PROMPT_CACHING_OPUS').catch(() => undefined),
+        COLORFGBG: await $.env.get('COLORFGBG').catch(() => undefined),
+        CLAUDE_CODE_PROMPT_CACHE_TTL: await $.env.get('CLAUDE_CODE_PROMPT_CACHE_TTL').catch(() => undefined),
+        CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: await $.env.get('CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL').catch(() => undefined),
+        ENABLE_PROMPT_CACHING_1H: await $.env.get('ENABLE_PROMPT_CACHING_1H').catch(() => undefined),
+        ENABLE_PROMPT_CACHING_1H_BEDROCK: await $.env.get('ENABLE_PROMPT_CACHING_1H_BEDROCK').catch(() => undefined),
+        CLAUDE_CODE_USE_BEDROCK: await $.env.get('CLAUDE_CODE_USE_BEDROCK').catch(() => undefined),
+        FORCE_PROMPT_CACHING_5M: await $.env.get('FORCE_PROMPT_CACHING_5M').catch(() => undefined),
+      };
+      const auth = async (): Promise<TtlAuth> => {
+        const credential = await $.session.authorize().catch(() => null);
+        if (credential?.kind === 'bearer') return 'subscription';
+        return credential ? 'api-key' : 'gateway';
+      };
+      pickerHost = {
+        plugin: { name: $.plugin.name, root: $.plugin.root },
+        ui: {
+          invalidate: event => $.ui.invalidate(event),
+          open: input => $.ui.open(input),
+          close: input => $.ui.close(input),
+          log: text => $.ui.log(text),
+          resolve: input => $.ui.resolve(input),
+        },
+        store: {
+          get: key => $.store.get(key),
+          set: (key, value) => $.store.set(key, value),
+          delete: key => $.store.delete(key),
+        },
+        config: { list: () => $.config.list(), set: input => $.config.set(input) },
+        process: { run: (argv, settings) => $.process.run(argv, settings) },
+        command: { register: input => $.command.register(input) },
+        session: { id: () => $.session.id() },
+        endpoint: () => $.env.get('ANTHROPIC_BASE_URL'),
+        ttlDefaults: async () => {
+          const [settings, kind] = await Promise.all([$.settings.read().catch(() => ({})), auth().catch((): TtlAuth => 'gateway')]);
+          const resolve = (scope: 'main' | 'subagent') => resolveDefaultTtl({ scope, env: cacheEnv, settings: settings as Record<string, unknown>, auth: kind });
+          return { main: resolve('main'), subagent: resolve('subagent') };
+        },
+      };
+      await $.command.register({ name: 'agent-models-apply', immediate: true,
+        description: 'Apply saved Agent Router role models and efforts to this session now.' });
+      try { await picker.initialize(pickerHost, e); }
+      catch (error) { $.ui.log(`Agent Router models: ${error instanceof Error ? error.message : 'Open /agent-models to retry.'}`); }
+      if (bridge) {
+        await cachePanel.initialize({
+          session: { id: () => $.session.id(), compact: input => $.session.compact(input) },
+          config: { list: () => $.config.list() },
+          agent: { list: () => $.agent.list() },
+          clock: { now: () => $.clock.now() },
+          model: { fork: request => $.model.fork(request) },
+          store: { get: key => $.store.get(key), set: (key, value) => $.store.set(key, value) },
+          ui: { invalidate: event => $.ui.invalidate(event), open: input => $.ui.open(input),
+            close: input => $.ui.close(input), log: (text, settings) => $.ui.log(text, settings) },
+          command: { register: input => $.command.register(input) },
+          env: { set: (name, value) => name === 'CLAUDE_CODE_PROMPT_CACHE_TTL' ? $.env.set('CLAUDE_CODE_PROMPT_CACHE_TTL', value)
+            : $.env.set('CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL', value) },
+          settings: { read: input => $.settings.read(input) },
+          auth,
+        }, bridge, await $.session.id(), await $.env.get('ANTHROPIC_BASE_URL'),
+          snapshot?.active && snapshot.teammate ? snapshot.teammate.name ?? snapshot.teammate.agentId : undefined, {
+            env: cacheEnv,
+            ttl: snapshot?.active && (snapshot.self || snapshot.teammate)
+              ? { main: ttlOption(options.teammate_cache_ttl), subagent: ttlOption(options.subagent_cache_ttl), teammate: ttlOption(options.teammate_cache_ttl) }
+              : { main: ttlOption(options.cache_ttl), subagent: ttlOption(options.subagent_cache_ttl), teammate: ttlOption(options.teammate_cache_ttl) },
+            upkeep: snapshot?.active && (snapshot.self || snapshot.teammate) ? upkeepMode(options.teammate_cache_upkeep) : undefined,
+            limit: keepaliveLimit(options.keepalive_limit),
+          });
+        if (e.isInteractive && e.surface === 'terminal') {
+          await cachePanel.introduce();
+          cacheTicks = 0;
+          cacheTimer = $.clock.every(1000, async () => {
+            await cachePanel.tick();
+            if (++cacheTicks % 5 === 0) await cachePanel.refresh();
+          });
+        }
+      }
+      if (!failure && snapshot?.active && e.isInteractive && e.surface === 'terminal') {
+        await statsPanel.initialize({
+          stats: () => bridge!({ action: 'stats' }),
+          agents: () => $.agent.list(),
+          managed: agent => agents.has(agent.id) || (isTeammate(agent) && !!agent.name && teammates.has(agent.name)),
+          store: pickerHost.store,
+          redraw: () => $.ui.invalidate('ui.render'),
+        }, await $.session.id());
+        activityTicks = 0;
+        activityTimer = $.clock.every(1000, () => {
+          statsPanel.refreshActivity().catch(() => $.ui.log('Agent Router: activity statistics are unavailable.', { to: 'debug' }));
+          // Every fifth second: each refresh runs the bridge as a process.
+          if (paneTeammates.size && ++activityTicks % 5 === 0) {
+            statsPanel.refreshStats().catch(() => $.ui.log('Agent Router: usage statistics are unavailable.', { to: 'debug' }));
+          }
+        });
+      }
+    } finally { finish(); }
     return next(e);
   });
 
@@ -295,10 +303,17 @@ export function register(on: On, options: PluginOptions = {}) {
       return e.subagentType.startsWith('agent-router:')
         ? { deny: 'Configure an Anthropic-compatible endpoint before using an Agent Router role.' } : next(e);
     }
+    const launched = e.isTeammate ? teammateCalls.get(e.tool_use_id) : undefined;
+    if (launched) {
+      const result = await next({ ...e, subagentType: launched.type, model: launched.model });
+      if (result.agentId) agents.set(result.agentId, { model: launched.model, effort: launched.effort });
+      return result;
+    }
     let selected;
     try {
-      selected = routeAgent(snapshot.policy, e);
-      await bridge({ action: 'route', tool_use_id: e.tool_use_id, agent_id: e.parentAgentId,
+      selected = e.isTeammate ? routeTeammate(snapshot.policy, { subagentType: e.subagentType === 'teammate' ? undefined : e.subagentType })
+        : routeAgent(snapshot.policy, e);
+      await bridge({ action: 'route', ...(e.isTeammate ? { kind: 'teammate', name: e.name } : {}), tool_use_id: e.tool_use_id, agent_id: e.parentAgentId,
         requestedType: e.subagentType, requestedModel: e.model, effectiveType: selected.type });
     } catch (error) {
       return { deny: error instanceof Error ? error.message : 'Agent Router could not resolve this role.' };
@@ -340,6 +355,7 @@ export function register(on: On, options: PluginOptions = {}) {
   }
 
   on('turn.step', async function* ($, e, next) {
+    await started;
     if (!snapshot?.active) return yield* measured(e, next);
     // A split-pane teammate is its own session: its main loop is the teammate.
     if (!e.agentId) {
@@ -352,13 +368,13 @@ export function register(on: On, options: PluginOptions = {}) {
     if (!assignment) {
       const lookup = async () => (await $.agent.list()).find(item => item.id === e.agentId);
       let agent = await lookup();
-      if (agent?.type === 'teammate' && agent.name && !teammates.has(agent.name) && launching.size) {
+      if (isTeammate(agent) && agent!.name && !teammates.has(agent!.name) && launching.size) {
         // The teammate's first request can overtake its own launch result.
         await Promise.allSettled([...launching]);
         agent = await lookup();
       }
-      if (agent?.type === 'teammate') {
-        assignment = agent.name ? teammates.get(agent.name) : undefined;
+      if (isTeammate(agent)) {
+        assignment = agent!.name ? teammates.get(agent!.name) : undefined;
       } else if (agent) {
         try {
           const selected = routeAgent(snapshot.policy, { subagentType: agent.type });
@@ -396,7 +412,7 @@ export function register(on: On, options: PluginOptions = {}) {
     if (!snapshot?.active) return undefined;
     if (!agentId) return snapshot.self ? agentBadge(snapshot.self, sent.get('')) : undefined;
     let assigned = agents.get(agentId);
-    if (!assigned && agent?.type === 'teammate' && agent.name) assigned = teammates.get(agent.name);
+    if (!assigned && isTeammate(agent) && agent!.name) assigned = teammates.get(agent!.name);
     return agentBadge(assigned, sent.get(agentId));
   }
 
