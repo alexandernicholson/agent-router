@@ -28,7 +28,7 @@ const entryLabel = (field: string) => entries.find(item => item.value === field)
 const pageSize = 3;
 // The picker's controls need this many columns; a fullscreen dock opens this wide.
 const minimumColumns = 110;
-const message = (error: unknown) => error instanceof Error ? error.message : 'Open /agent-models again to retry.';
+const message = (error: unknown) => (error as Error).message;
 
 // Ownership comes from the actual config rows, never from a constructed write key.
 function ownedRow(rows: ConfigRow[], plugin: string, field: string, kind: ConfigRow['kind']): ConfigRow {
@@ -106,7 +106,7 @@ export function createModelPicker(options: PluginOptions) {
       catalogLoaded = true;
       page = 0;
     } catch (cause) {
-      if (request === generation && open) catalogError = message(cause);
+      catalogError = message(cause);
     } finally {
       if (request === generation) { loading = false; redraw(host); }
     }
@@ -132,7 +132,6 @@ export function createModelPicker(options: PluginOptions) {
 
   async function save(host: ModelPickerHost, field: string, id: string, renderedGeneration: number) {
     if (!open || saving || loading || renderedGeneration !== generation || field !== role) return;
-    if (!models.some(model => model.id === id)) return;
     saving = true;
     error = '';
     notice = '';
@@ -196,7 +195,7 @@ export function createModelPicker(options: PluginOptions) {
       if (!open) return;
       const row = effortRow(rows, host.plugin.name, field);
       if (row.isLocked) throw new Error('Your administrator manages this setting. Ask them to update its effort.');
-      if (!row.options?.includes(value)) return;
+      if (!row.options!.includes(value)) return;
       const result = await host.config.set({ key: row.key, value });
       if (result.deny !== undefined) throw new Error(result.deny);
       if (result.value !== value) throw new Error('The config writer returned a different value. Open /config to inspect the saved setting.');
@@ -241,7 +240,7 @@ export function createModelPicker(options: PluginOptions) {
   const uiClose = async (host: ModelPickerHost, e: Args<'ui.close'>) => {
     open = false;
     ++generation;
-    if (e.origin.kind !== 'unload') await host.store.delete(intentKey);
+    await host.store.delete(intentKey);
   };
 
   const uiRender = (host: ModelPickerHost, e: Args<'ui.render'>) => {
@@ -294,7 +293,7 @@ export function createModelPicker(options: PluginOptions) {
       {current?.isLocked ? <Text>Your administrator manages this setting. Ask them to update its model.</Text> : null}
       {rowError ? <Text>{rowError}</Text> : null}
       {effort && !effort.isLocked && !saving ? <Select key="effort" label="Effort" value={String(effort.value)}
-        options={(effort.options || []).map(value => ({ value, label: effortLabel(value) }))}
+        options={effort.options!.map(value => ({ value, label: effortLabel(value) }))}
         onSelect={value => act(() => saveEffort(host, field, value, renderedGeneration))} />
         : effort ? <Text>{`Effort: ${effortLabel(String(effort.value))}${effort.isLocked ? ' · managed by your administrator' : ''}`}</Text> : null}
       {effortError ? <Text>{effortError}</Text> : null}

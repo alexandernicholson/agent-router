@@ -2,19 +2,20 @@ import { open } from 'node:fs/promises';
 import { reportedCacheCreation } from './cache.js';
 import { sameModel } from './shared/models.js';
 
+async function tail(file) {
+  const { size } = await file.stat();
+  const offset = Math.max(0, size - 1024 * 1024);
+  const buffer = Buffer.alloc(size - offset);
+  const { bytesRead } = await file.read(buffer, 0, buffer.length, offset);
+  const text = buffer.subarray(0, bytesRead).toString('utf8');
+  return offset ? text.slice(text.indexOf('\n') + 1) : text;
+}
+
 export async function transcriptTail(path) {
   if (typeof path !== 'string' || !path.endsWith('.jsonl')) return '';
-  let file;
-  try {
-    file = await open(path, 'r');
-    const { size } = await file.stat();
-    const offset = Math.max(0, size - 1024 * 1024);
-    const buffer = Buffer.alloc(size - offset);
-    const { bytesRead } = await file.read(buffer, 0, buffer.length, offset);
-    const text = buffer.subarray(0, bytesRead).toString('utf8');
-    return offset ? text.slice(text.indexOf('\n') + 1) : text;
-  } catch { return ''; }
-  finally { await file?.close(); }
+  const file = await open(path, 'r').catch(() => null);
+  if (!file) return '';
+  return tail(file).catch(() => '').finally(() => file.close());
 }
 
 export function transcriptCreation(text, sample) {

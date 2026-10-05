@@ -82,7 +82,7 @@ async function fetchEndpointModels(env, base, gatewayDiscovery, retryMs) {
     let text = '';
     const decoder = new TextDecoder();
     try {
-      for await (const chunk of response.body || []) {
+      for await (const chunk of response.body) {
         bytes += chunk.byteLength;
         if (bytes > 8 * 1024 * 1024) throw new Error();
         text += decoder.decode(chunk, { stream: true });

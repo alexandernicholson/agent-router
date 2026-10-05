@@ -23,7 +23,7 @@ function pinned(e: { model: string; effort?: Effort | number }, assignment: Assi
     ? { model: assignment.model, effort: assignment.effort } : { model: assignment.model };
 }
 
-export function register(on: On, options: PluginOptions = {}) {
+export function register(on: On, options: PluginOptions) {
   const picker = createModelPicker(options);
   const statsPanel = createStatsPanel();
   let activityTimer: Timer | undefined;
@@ -71,7 +71,7 @@ export function register(on: On, options: PluginOptions = {}) {
       await bridge({ action: 'route', kind: 'teammate', name: call.name, tool_use_id: call.tool_use_id,
         requestedType: call.subagent_type ?? null, requestedModel: call.model, effectiveType: route.type });
     } catch (error) {
-      return { deny: error instanceof Error ? error.message : 'Agent Router could not route this teammate.' };
+      return { deny: (error as Error).message };
     }
     const assignment = { model: route.model, effort: route.effort };
     const { model: _alias, ...rest } = e as Record<string, unknown>;
@@ -157,7 +157,7 @@ export function register(on: On, options: PluginOptions = {}) {
         failure = '';
         $.ui.status(undefined);
       })().catch(error => {
-        failure = error instanceof Error ? error.message : 'Agent Router initialization failed.';
+        failure = (error as Error).message;
         $.ui.status('Routing setup needs attention · /agent-models');
       });
       await ready;
@@ -202,7 +202,7 @@ export function register(on: On, options: PluginOptions = {}) {
         } catch {}
       }
       try { await picker.initialize(pickerHost, e); }
-      catch (error) { $.ui.log(`Agent Router models: ${error instanceof Error ? error.message : 'Open /agent-models to retry.'}`); }
+      catch (error) { $.ui.log(`Agent Router models: ${(error as Error).message}`); }
       if (!failure && snapshot?.active && e.isInteractive && e.surface === 'terminal') {
         await statsPanel.initialize({
           stats: () => bridge!({ action: 'stats' }),
@@ -213,11 +213,9 @@ export function register(on: On, options: PluginOptions = {}) {
         }, await $.session.id());
         activityTicks = 0;
         activityTimer = $.clock.every(1000, () => {
-          statsPanel.refreshActivity().catch(() => $.ui.log('Agent Router: activity statistics are unavailable.', { to: 'debug' }));
+          statsPanel.refreshActivity();
           // Every fifth second: each refresh runs the bridge as a process.
-          if (paneTeammates.size && ++activityTicks % 5 === 0) {
-            statsPanel.refreshStats().catch(() => $.ui.log('Agent Router: usage statistics are unavailable.', { to: 'debug' }));
-          }
+          if (paneTeammates.size && ++activityTicks % 5 === 0) statsPanel.refreshStats();
         });
       }
     } finally { finish(); }
@@ -244,7 +242,7 @@ export function register(on: On, options: PluginOptions = {}) {
       await bridge({ action: 'route', ...(e.isTeammate ? { kind: 'teammate', name: e.name } : {}), tool_use_id: e.tool_use_id, agent_id: e.parentAgentId,
         requestedType: e.subagentType, requestedModel: e.model, effectiveType: selected.type });
     } catch (error) {
-      return { deny: error instanceof Error ? error.message : 'Agent Router could not resolve this role.' };
+      return { deny: (error as Error).message };
     }
     toolUsesSpawned.add(e.tool_use_id);
     await statsPanel.refreshStats();
@@ -324,9 +322,8 @@ export function register(on: On, options: PluginOptions = {}) {
     return next(e);
   });
 
-  function viewedBadge(agentId: string | undefined, agent: AgentInfo | undefined): string | undefined {
-    if (!snapshot?.active) return undefined;
-    if (!agentId) return snapshot.self ? agentBadge(snapshot.self, sent.get('')) : undefined;
+  function viewedBadge(self: Route | undefined, agentId: string | undefined, agent: AgentInfo | undefined): string | undefined {
+    if (!agentId) return self ? agentBadge(self, sent.get('')) : undefined;
     let assigned = agents.get(agentId);
     if (!assigned && isTeammate(agent) && agent!.name) assigned = teammates.get(agent!.name);
     return agentBadge(assigned, sent.get(agentId));
@@ -338,9 +335,10 @@ export function register(on: On, options: PluginOptions = {}) {
     const viewed = e.props.view.agentId;
     const elements = $.ui.resolve(e);
     if (failure || !snapshot?.active) return content;
+    const { self, pendingConfiguration } = snapshot;
     // Only an in-process teammate not yet stepped needs the roster to find it.
     const agent = viewed && !agents.has(viewed) && !sent.has(viewed) ? (await $.agent.list()).find(item => item.id === viewed) : undefined;
-    return statsPanel.render(elements, content, snapshot.pendingConfiguration === true, viewedBadge(viewed, agent));
+    return statsPanel.render(elements, content, pendingConfiguration === true, viewedBadge(self, viewed, agent));
   });
 
   on('session.end', async ($, e, next) => {
@@ -351,7 +349,7 @@ export function register(on: On, options: PluginOptions = {}) {
 
   on('command.run', { command: 'agent-models-apply' }, async $ => {
     await ready;
-    if (!snapshot || !bridge) return { text: `Agent Router could not apply settings: ${failure || 'session setup has not completed.'}` };
+    if (!snapshot || !bridge) return { text: `Agent Router could not apply settings: ${failure}` };
     if (!snapshot.active) return { text: 'Configure an Anthropic-compatible endpoint before applying Agent Router settings.' };
     if (!snapshot.pendingConfiguration) return { text: 'This session already uses the saved Agent Router settings.' };
     try {
@@ -359,7 +357,7 @@ export function register(on: On, options: PluginOptions = {}) {
       validatePolicy(applied.policy);
       snapshot = { active: true, policy: applied.policy, pendingConfiguration: false };
     } catch (error) {
-      return { text: `Agent Router kept this session's routing. ${error instanceof Error ? error.message : 'The saved settings could not be applied.'}` };
+      return { text: `Agent Router kept this session's routing. ${(error as Error).message}` };
     }
     $.ui.invalidate('ui.render');
     const roles = Object.entries(snapshot.policy.roles)

@@ -18,7 +18,7 @@ const FIELDS: Record<string, { field: string; kind: ConfigRow['kind']; label: st
   'keepalive-limit': { field: 'keepalive_limit', kind: 'text', label: 'Keepalive limit' },
 };
 const LIMITS = ['default', 'infinite', '1', '2', '3', '4', '6', '8', '12', '16', '24'];
-const message = (error: unknown) => error instanceof Error ? error.message : 'Open /keepalive-settings again to retry.';
+const message = (error: unknown) => (error as Error).message;
 
 export const limitValue = (value: string) => {
   const text = value.trim().toLowerCase();
@@ -39,22 +39,20 @@ function ownedRow(rows: ConfigRow[], plugin: string, key: string): ConfigRow {
 export function createSettingsPane() {
   let open = false;
   let rows: ConfigRow[] = [];
-  let loaded = false;
   let saving = false;
   let error = '';
   let notice = '';
   let defaults: { main: TtlDefault; subagent: TtlDefault } | undefined;
 
   const redraw = (host: SettingsHost) => host.ui.invalidate('ui.render');
+  const dismiss = (host: SettingsHost) => { open = false; return host.ui.close({ id: SETTINGS_PANE }); };
 
   async function load(host: SettingsHost) {
-    loaded = false;
+    defaults = undefined;
     error = '';
     redraw(host);
-    const [listed, resolved] = await Promise.allSettled([host.config.list(), host.ttlDefaults()]);
-    if (listed.status === 'fulfilled') { rows = listed.value; loaded = true; }
-    else error = `Settings unavailable: ${message(listed.reason)}`;
-    if (resolved.status === 'fulfilled') defaults = resolved.value;
+    try { [rows, defaults] = await Promise.all([host.config.list(), host.ttlDefaults()]); }
+    catch (cause) { error = `Settings unavailable: ${message(cause)}`; }
     redraw(host);
   }
 
@@ -68,7 +66,7 @@ export function createSettingsPane() {
   }
 
   async function save(host: SettingsHost, key: string, value: string) {
-    if (!open || saving || !loaded) return;
+    if (!open || saving || !defaults) return;
     saving = true;
     error = '';
     notice = '';
@@ -78,7 +76,7 @@ export function createSettingsPane() {
       if (!open) return;
       const row = ownedRow(rows, host.plugin.name, key);
       if (row.isLocked) throw new Error(`Your administrator manages this setting. Ask them to update the ${FIELDS[key].label.toLowerCase()}.`);
-      if (key === 'keepalive-limit' ? limitValue(value) !== value : !row.options?.includes(value)) return;
+      if (key === 'keepalive-limit' ? limitValue(value) !== value : !row.options!.includes(value)) return;
       const result = await host.config.set({ key: row.key, value });
       if (result.deny !== undefined) throw new Error(result.deny);
       if (result.value !== value) throw new Error('The config writer returned a different value. Open /config to inspect the saved setting.');
@@ -105,47 +103,46 @@ export function createSettingsPane() {
     if (e.surface !== 'terminal' && e.surface !== 'desktop') {
       const { Box, Text, Button } = host.ui.resolve(e);
       return <Box flexDirection="column"><Text>Open /keepalive-settings in the terminal or desktop to change these settings.</Text>
-        <Button key="close" label="Close" onPress={() => { host.ui.close({ id: SETTINGS_PANE }); }} /></Box>;
+        <Button key="close" label="Close" onPress={() => { void dismiss(host); }} /></Box>;
     }
     const { Box, Text, Button, Select, Input } = host.ui.resolve(e);
-    const act = (operation: () => Promise<void>) => { operation().catch(cause => { error = message(cause); redraw(host); }); };
     const choose = (key: string, name: (value: string) => string, values?: string[]) => {
       let row: ConfigRow;
       try { row = ownedRow(rows, host.plugin.name, key); } catch (cause) { return <Text>{message(cause)}</Text>; }
       const value = String(row.value);
       if (row.isLocked || saving) return <Text>{`${FIELDS[key].label}: ${name(value)}${row.isLocked ? ' · managed by your administrator' : ''}`}</Text>;
-      const choices = values ? (values.includes(value) ? values : [...values, value]) : row.options || [];
+      const choices = values ? (values.includes(value) ? values : [...values, value]) : row.options!;
       return <Select key={key} label={FIELDS[key].label} value={value} options={choices.map(option => ({ value: option, label: name(option) }))}
-        onSelect={(next: string) => act(() => save(host, key, next))} />;
+        onSelect={(next: string) => { void save(host, key, next); }} />;
     };
-    const ttl = (fallback?: string) => (value: string) => value === 'default' ? (fallback ? `Default (${fallback})` : 'Default (Claude Code)') : value;
-    const mates = defaults && (defaults.main.ttl === defaults.subagent.ttl ? defaults.main.ttl : `${defaults.main.ttl} split-pane, ${defaults.subagent.ttl} in-process`);
+    const ttl = (fallback: string) => (value: string) => value === 'default' ? `Default (${fallback})` : value;
     const custom = (text: string) => {
       const value = limitValue(text);
       if (!value) { error = 'Enter default, infinite, or a whole number of keepalives from 1.'; notice = ''; redraw(host); return; }
-      act(() => save(host, 'keepalive-limit', value));
+      void save(host, 'keepalive-limit', value);
     };
     let limitRow: ConfigRow | undefined;
     try { limitRow = ownedRow(rows, host.plugin.name, 'keepalive-limit'); } catch {}
+    const body = ({ main, subagent }: { main: TtlDefault; subagent: TtlDefault }) => <Box flexDirection="column">
+      <Text bold>Prompt cache TTL</Text>
+      {choose('cache-ttl', ttl(main.ttl))}
+      {choose('subagent-ttl', ttl(subagent.ttl))}
+      {choose('teammate-ttl', ttl(main.ttl === subagent.ttl ? main.ttl : `${main.ttl} split-pane, ${subagent.ttl} in-process`))}
+      <Text dimColor>Default is what Claude Code uses with your current settings and sign-in. 1h survives longer breaks; each 1h cache write costs 2× instead of 1.25×.</Text>
+      <Text bold>Upkeep</Text>
+      {choose('teammate-upkeep', value => value)}
+      <Text dimColor>The mode split-pane teammates start in. In-process teammates and subagents can't be kept warm.</Text>
+      {choose('keepalive-limit', limitLabel, LIMITS)}
+      {limitRow && !limitRow.isLocked && !saving
+        ? <Input key="keepalive-custom" label="Other number" placeholder="Any whole number, then Enter" value="" onSubmit={custom} /> : null}
+      <Text dimColor>How many keepalives warm and warmcomp send after each request; warmcomp then compacts. Default (priced) sends them while each costs less than rewriting the cache. Infinite never stops. A number sends exactly that many, whatever they cost. Each keepalive keeps an idle cache about 4½ minutes longer on a 5m TTL, or 59½ minutes on 1h.</Text>
+    </Box>;
     return <Box flexDirection="column">
       <Text>Defaults each new conversation starts in. Each conversation's own TTL and mode buttons change it for that conversation only.</Text>
       {notice ? <Text>{notice}</Text> : null}
       {error ? <Text>{error}</Text> : null}
-      <Box flexDirection="row" gap={1}><Button key="close" label="Close" onPress={() => { host.ui.close({ id: SETTINGS_PANE }); }} /></Box>
-      {!loaded ? <Text>Loading settings…</Text> : <Box flexDirection="column">
-        <Text bold>Prompt cache TTL</Text>
-        {choose('cache-ttl', ttl(defaults?.main.ttl))}
-        {choose('subagent-ttl', ttl(defaults?.subagent.ttl))}
-        {choose('teammate-ttl', ttl(mates))}
-        <Text dimColor>Default is what Claude Code uses with your current settings and sign-in. 1h survives longer breaks; each 1h cache write costs 2× instead of 1.25×.</Text>
-        <Text bold>Upkeep</Text>
-        {choose('teammate-upkeep', value => value)}
-        <Text dimColor>The mode split-pane teammates start in. In-process teammates and subagents can't be kept warm.</Text>
-        {choose('keepalive-limit', limitLabel, LIMITS)}
-        {limitRow && !limitRow.isLocked && !saving
-          ? <Input key="keepalive-custom" label="Other number" placeholder="Any whole number, then Enter" value="" onSubmit={custom} /> : null}
-        <Text dimColor>How many keepalives warm and warmcomp send after each request; warmcomp then compacts. Default (priced) sends them while each costs less than rewriting the cache. Infinite never stops. A number sends exactly that many, whatever they cost. Each keepalive keeps an idle cache about 4½ minutes longer on a 5m TTL, or 59½ minutes on 1h.</Text>
-      </Box>}
+      <Box flexDirection="row" gap={1}><Button key="close" label="Close" onPress={() => { void dismiss(host); }} /></Box>
+      {defaults ? body(defaults) : <Text>Loading settings…</Text>}
     </Box>;
   };
 

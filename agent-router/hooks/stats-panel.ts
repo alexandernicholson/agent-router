@@ -131,10 +131,8 @@ export function createStatsPanel(): StatsPanel {
         current.stats = stats;
         redraw(previous, current);
       }
-    })().finally(() => {
       current.statsRefresh = undefined;
-      if (current.statsAgain && context === current) return refreshStats();
-    });
+    })();
     return current.statsRefresh;
   }
 
@@ -150,7 +148,7 @@ export function createStatsPanel(): StatsPanel {
         try {
           if (!current.historyLoaded) {
             const saved = await current.host.store.get(current.key);
-            if (context !== current) return;
+            if (context !== current) break;
             if (saved !== undefined) {
               if (!Array.isArray(saved) || !saved.every(row => Array.isArray(row) && row.length === 2 && typeof row[0] === 'string' && terminalStatus(row[1]))) throw new Error('Invalid activity history');
               for (const [id, status] of saved) current.terminals.set(id, status);
@@ -158,7 +156,7 @@ export function createStatsPanel(): StatsPanel {
             current.historyLoaded = true;
           }
           const agents = await current.host.agents();
-          if (context !== current) return;
+          if (context !== current) break;
           const live = new Map(agents.filter(agent => current.host.managed(agent)).map(agent => [agent.id, agent]));
           let running = 0;
           for (const agent of live.values()) {
@@ -186,10 +184,8 @@ export function createStatsPanel(): StatsPanel {
         current.activity = activity;
         redraw(previous, current);
       }
-    })().finally(() => {
       current.activityRefresh = undefined;
-      if (current.activityAgain && context === current) return refreshActivity();
-    });
+    })();
     return current.activityRefresh;
   }
 
@@ -214,7 +210,6 @@ export function createStatsPanel(): StatsPanel {
       preferenceError = true;
       redraw(before, current);
     }
-    if (context !== current) return;
     if (unpersistedClick) {
       unpersistedClick = false;
       await persistView(current, view);

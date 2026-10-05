@@ -16,7 +16,7 @@ export function legacyOptions(options: PluginOptions, stored: StoredConfigs) {
   return (key: string) => LEGACY.includes(key) && !(key in own) && typeof router[key] === 'string' ? router[key] : options[key];
 }
 
-export function register(on: On, options: PluginOptions = {}) {
+export function register(on: On, options: PluginOptions) {
   const cachePanel = createCachePanel();
   const settings = createSettingsPane();
   let cacheTimer: Timer | undefined;
@@ -85,7 +85,7 @@ export function register(on: On, options: PluginOptions = {}) {
         return credential ? 'api-key' : 'gateway';
       };
       const ttlDefaults = async () => {
-        const [read, kind] = await Promise.all([$.settings.read().catch(() => ({})), auth().catch((): TtlAuth => 'gateway')]);
+        const [read, kind] = await Promise.all([$.settings.read().catch(() => ({})), auth()]);
         const resolve = (scope: 'main' | 'subagent') => resolveDefaultTtl({ scope, env: cacheEnv, settings: read as Record<string, unknown>, auth: kind });
         return { main: resolve('main'), subagent: resolve('subagent') };
       };
@@ -112,7 +112,7 @@ export function register(on: On, options: PluginOptions = {}) {
           : $.env.set('CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL', value) },
         settings: { read: input => $.settings.read(input) },
         auth,
-      }, bridge, sessionId, await $.env.get('ANTHROPIC_BASE_URL'), teammate ? teammate.agentName || teammate.agentId : undefined, {
+      }, bridge, sessionId, await $.env.get('ANTHROPIC_BASE_URL').catch(() => undefined), teammate ? teammate.agentName || teammate.agentId : undefined, {
         env: cacheEnv,
         ttl: teammate
           ? { main: ttlOption(option('teammate_cache_ttl')), subagent: ttlOption(option('subagent_cache_ttl')), teammate: ttlOption(option('teammate_cache_ttl')) }
@@ -156,9 +156,10 @@ export function register(on: On, options: PluginOptions = {}) {
   });
 
   on('session.compact', async ($, e, next) => {
+    if (e.trigger === 'precompute') return next(e);
     const startedAt = await $.clock.now();
-    const result = e.trigger === 'precompute' ? await next(e) : await cachePanel.holdTtlFor(e.agentId ?? null, () => next(e));
-    if (result.messages && e.trigger !== 'precompute') await cachePanel.compacted(e.agentId ?? null, startedAt, result).catch(() => undefined);
+    const result = await cachePanel.holdTtlFor(e.agentId ?? null, () => next(e));
+    if (result.messages) await cachePanel.compacted(e.agentId ?? null, startedAt, result).catch(() => undefined);
     return result;
   });
 

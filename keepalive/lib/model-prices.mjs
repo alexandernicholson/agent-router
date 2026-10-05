@@ -45,7 +45,7 @@ async function download(fetcher, etag) {
   let text = '';
   let bytes = 0;
   const decoder = new TextDecoder();
-  for await (const chunk of response.body || []) {
+  for await (const chunk of response.body) {
     bytes += chunk.byteLength;
     if (bytes > LIMIT) throw new Error('models.dev response exceeded its size limit');
     text += decoder.decode(chunk, { stream: true });
@@ -59,18 +59,18 @@ async function download(fetcher, etag) {
 async function refresh(root, file, cached, now, fetcher) {
   const lock = join(root, 'models-dev.lock');
   if (!await lease(lock, now)) return cached;
-  try {
+  const update = async () => {
     const result = await download(fetcher, Array.isArray(cached?.entries) ? cached.etag : undefined);
     const next = result.unchanged ? { ...cached, fetchedAt: now, failedAt: undefined } : { fetchedAt: now, etag: result.etag, entries: result.entries };
     await writeRecord(file, next);
     return next;
-  } catch {
+  };
+  const failed = async () => {
     const next = { ...(cached ?? {}), failedAt: now };
     await writeRecord(file, next).catch(() => {});
     return next;
-  } finally {
-    await unlink(lock).catch(() => {});
-  }
+  };
+  return update().catch(failed).finally(() => unlink(lock).catch(() => {}));
 }
 
 /**

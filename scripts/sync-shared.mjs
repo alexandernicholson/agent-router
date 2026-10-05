@@ -2,7 +2,7 @@ import { readdir, readFile, writeFile, mkdir, rm, stat } from 'node:fs/promises'
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const root = fileURLToPath(new URL('..', import.meta.url));
+const root = process.argv.find(arg => arg.startsWith('--root='))?.slice(7) ?? fileURLToPath(new URL('..', import.meta.url));
 const PLUGINS = ['agent-router', 'keepalive'];
 const TARGETS = [['shared/lib', 'lib/shared'], ['shared/hooks', 'hooks/shared']];
 const check = process.argv.includes('--check');

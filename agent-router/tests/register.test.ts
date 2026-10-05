@@ -101,6 +101,16 @@ test('fork dispatch cannot evade the role model assignment', async ($, on) => {
   expect(started).toBe(false);
 });
 
+test('a spawn that fails beneath Agent Router after routing is not reported as a routing failure', async ($, on) => {
+  let spawns = 0;
+  on('agent.spawn', () => { spawns++; throw new Error('native spawn failed'); });
+  await start($, on);
+  const outcome = await $.agent.spawn(agentInput({ subagentType: 'Explore', prompt: 'Find code' })).then(result => JSON.stringify(result), cause => `rejected: ${cause}`);
+  expect(outcome).toStartWith('rejected: ');
+  expect(outcome).not.toContain('failed before dispatch');
+  expect(spawns).toBe(1);
+});
+
 test('unmapped agents are refused rather than inheriting the lead model', async ($, on) => {
   let started = false;
   on('agent.spawn', () => { started = true; return { model: 'sonnet' }; });

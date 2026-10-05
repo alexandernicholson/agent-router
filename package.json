@@ -3,12 +3,26 @@
   "private": true,
   "license": "MIT",
   "type": "module",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "sync": "node scripts/sync-shared.mjs",
     "check": "node scripts/sync-shared.mjs --check",
-    "test": "npm run check && node --test shared/tests/*.test.mjs && npm --prefix agent-router test && npm --prefix keepalive test",
+    "test": "npm run check && node --test --experimental-test-module-mocks shared/tests/*.test.mjs && npm --prefix agent-router test && npm --prefix keepalive test",
     "test:mod": "npm --prefix agent-router run test:mod && npm --prefix keepalive run test:mod",
-    "typecheck": "npm --prefix agent-router run typecheck && npm --prefix keepalive run typecheck"
+    "typecheck": "npm --prefix agent-router run typecheck && npm --prefix keepalive run typecheck",
+    "coverage": "node scripts/coverage.mjs"
+  },
+  "devDependencies": {
+    "@babel/core": "8.0.6",
+    "@babel/plugin-transform-react-jsx": "8.0.1",
+    "@babel/preset-typescript": "8.0.1",
+    "babel-plugin-istanbul": "8.0.0",
+    "c8": "12.0.0",
+    "istanbul-lib-coverage": "3.2.2",
+    "istanbul-lib-instrument": "6.0.3",
+    "istanbul-lib-report": "3.0.1",
+    "istanbul-reports": "3.2.0"
   }
 }

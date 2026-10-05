@@ -25,8 +25,10 @@ let liveEnv: Record<string, string | undefined> = {};
 
 async function setup($: Engine, on: On, endpoint = 'https://gateway.example', stored?: Record<string, unknown>,
   extra: { settings?: Record<string, unknown>; env?: Record<string, string>; auth?: 'bearer' | 'api-key'; refuseEnv?: boolean;
-    teammate?: { agentId: string; agentName?: string; parentSessionId: string }; handover?: Record<string, unknown> } = {}) {
-  mock.store(on, stored);
+    teammate?: { agentId: string; agentName?: string; parentSessionId: string }; handover?: Record<string, unknown>; broken?: string[] } = {}) {
+  const faults = new Set(extra.broken);
+  if (faults.has('store')) for (const name of ['store.get', 'store.set'] as const) on(name, () => { throw new Error('store offline'); });
+  else mock.store(on, stored);
   ttlSeen.length = 0;
   const env: Record<string, string | undefined> = { ...(endpoint ? { ANTHROPIC_BASE_URL: endpoint } : {}), ...extra.env };
   const envSets: [string, string | undefined][] = [];
@@ -50,34 +52,50 @@ async function setup($: Engine, on: On, endpoint = 'https://gateway.example', st
     linked: [] as Record<string, any>[], labels: [] as [string, string][], env, envSets,
     teammate: extra.teammate ?? null as null | { agentId: string; agentName?: string; parentSessionId: string }, links: [] as Record<string, any>[],
     routes: null as null | { self: { model: string } | null; agents: { agentId: string; model: string }[] },
-    handover: (extra.handover ?? null) as Record<string, unknown> | null };
+    handover: (extra.handover ?? null) as Record<string, unknown> | null, faults,
+    before: {} as Partial<Record<'process.run' | 'model.fork' | 'session.compact', (e: any) => unknown>> };
   on('session.id', () => ({ value: world.sessionId }));
   on('session.start', ($, e) => ({ cwd: e.cwd }));
-  on('settings.read', () => ({ value: extra.settings ?? {} }));
+  on('settings.read', () => {
+    if (faults.has('settings.read')) throw new Error('settings offline');
+    return { value: extra.settings ?? {} };
+  });
   on('command.register', ($, e) => ({ value: { command: e.name } }));
-  on('ui.open', () => ({ value: { isPlaced: true } }));
+  on('ui.open', () => ({ value: faults.has('ui.open') ? { isPlaced: false as const, reason: 'terminal too narrow' } : { isPlaced: true as const } }));
   on('ui.close', () => ({ value: undefined }));
   on('ui.status', () => ({ value: undefined }));
   on('ui.invalidate', () => ({ value: undefined }));
   on('ui.log', ($, e) => { world.logs.push(e.text); return { value: undefined }; });
-  on('agent.list', () => ({ value: world.roster }));
+  on('agent.list', () => {
+    if (faults.has('agent.list')) throw new Error('roster offline');
+    return { value: world.roster };
+  });
   on('classic.SessionStart', () => ({}));
   on('classic.Stop', () => ({}));
-  on('model.fork', ($, e) => {
+  on('model.fork', async ($, e) => {
+    const early = await world.before['model.fork']?.(e);
+    if (early) return early as any;
     world.forks.push(e.prompt);
     ttlSeen.push({ at: 'keepalive', agentId: null, value: env.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL });
     return { value: { isAnswered: true as const, text: 'OK', usage: world.forkUsage } };
   });
-  on('session.compact', ($, e) => {
+  on('session.compact', async ($, e) => {
+    const early = await world.before['session.compact']?.(e);
+    if (early) return early as any;
     world.compactions.push('instructions' in e && e.instructions ? e.instructions : 'default');
     ttlSeen.push({ at: 'compaction', agentId: e.agentId ?? null, value: env.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL });
     return { messages: [{ role: 'assistant' as const, text: 'Summary', toolUses: [] }], ...world.compaction };
   });
-  on('config.list', () => ({ value: [{ key: 'theme', label: 'Theme', kind: 'enum', value: world.theme, provider: { plugin: 'engine', tier: 'core' }, isLocked: false }] as any }));
+  on('config.list', () => {
+    if (faults.has('config.list')) throw new Error('config offline');
+    return { value: [{ key: 'theme', label: 'Theme', kind: 'enum', value: world.theme, provider: { plugin: 'engine', tier: 'core' }, isLocked: false }] as any };
+  });
   on('ui.render', { component: 'AbovePrompt' }, ($, e) => $.ui.resolve(e).Text({ children: ['Existing prompt content'] }));
-  on('process.run', ($, e) => {
+  on('process.run', async ($, e) => {
     const request = JSON.parse(e.init?.stdin || '{}');
     world.calls.push(request);
+    const early = await world.before['process.run']?.(request);
+    if (early) return early as any;
     if (request.action === 'cache-sample') {
       if (world.failSave) return { value: { isStdoutTruncated: false, isStderrTruncated: false, exitCode: 1, stderr: 'storage failed', stdout: '' } };
       world.samples.push(world.reported ? applyCacheCreation(request.sample, world.reported) : request.sample);
@@ -1473,3 +1491,398 @@ test('a handover that arrives on a later start is still taken, since Keepalive m
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true });
   expect(await ttlButton($)).toBe('TTL 1h');
 });
+
+const bridgeReply = (output: unknown, exitCode = 0) => ({ value: { isStdoutTruncated: false, isStderrTruncated: false, exitCode,
+  stderr: exitCode ? 'failed' : '', stdout: exitCode ? '' : JSON.stringify(output) } });
+const clear = ($: Engine, sessionId: string) => $.session.end({ reason: 'clear', sessionId, resume: { id: sessionId } });
+const run = async ($: Engine) => JSON.stringify(await $.command.run({ command: 'keepalive', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } }));
+const start = ($: Engine) => $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true });
+
+test('before a session starts, requests, compactions and the band pass through untouched', async ($, on) => {
+  response(on);
+  mock.clock(on);
+  on('session.end', ($, e) => ({ sessionId: e.sessionId }));
+  on('session.compact', () => ({ messages: [{ role: 'assistant' as const, text: 'Summary', toolUses: [] }] }));
+  on('ui.render', { component: 'AbovePrompt' }, ($, e) => $.ui.resolve(e).Text({ children: ['Existing prompt content'] }));
+  expect((await step($)).result.answer).toBe('PRIVATE_ANSWER');
+  expect((await $.session.compact({ trigger: 'manual', messages: [{ role: 'assistant', text: 'Summary', toolUses: [] }] })).messages?.length).toBe(1);
+  expect(text(await $.ui.render(band()))).toBe('Existing prompt content');
+  expect((await run($)).includes('Keepalive dashboard is unavailable')).toBe(true);
+  await $.session.end({ reason: 'other', sessionId: 'none', resume: { id: 'none' } });
+});
+
+test('clearing a conversation while its bar is still loading leaves nothing behind', async ($, on) => {
+  response(on);
+  on('session.end', ($, e) => ({ sessionId: e.sessionId }));
+  const { world, clock } = await setup($, on);
+  await step($);
+  await $.ui.render(band());
+  for (const fail of [false, true]) {
+    world.before['process.run'] = async request => {
+      if (request.action !== 'cache-snapshot') return undefined;
+      world.before['process.run'] = undefined;
+      await clock.sleep(5000);
+      return fail ? bridgeReply(null, 1) : undefined;
+    };
+    const starting = start($);
+    await clock.settle();
+    await clear($, world.sessionId);
+    await clear($, world.sessionId);
+    await clock.advance(5000);
+    await starting;
+  }
+  await clock.advance(6000);
+  await $.ui.press({ plugin: 'keepalive', key: 'agent-cache-ttl', requestId: 'cache-band' });
+  await $.ui.press({ plugin: 'keepalive', key: 'agent-cache-upkeep', requestId: 'cache-band' });
+  expect(text(await $.ui.render(band()))).toBe('Existing prompt content');
+  expect(world.env.CLAUDE_CODE_PROMPT_CACHE_TTL).toBe(undefined);
+  await step($, { index: 1 });
+  expect(text(await $.ui.render(band())).includes('TTL 5m')).toBe(true);
+});
+
+test('opening the dashboard twice while it loads waits for the one load', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  await step($);
+  let hits = 0;
+  world.before['process.run'] = async request => {
+    if (request.action !== 'cache-snapshot') return undefined;
+    world.before['process.run'] = undefined;
+    hits++;
+    await clock.sleep(3000);
+    return undefined;
+  };
+  const first = dashboard($);
+  const second = dashboard($);
+  await clock.advance(3000);
+  for (const contents of await Promise.all([first, second])) expect(contents.includes('Prompt cache')).toBe(true);
+  expect(hits).toBe(1);
+});
+
+test('a theme or cache record that cannot be read leaves the last known observations on show', async ($, on) => {
+  response(on);
+  const { world } = await setup($, on);
+  await step($);
+  world.faults.add('config.list');
+  let snapshot: unknown = { samples: [{ bogus: true }], resets: [], labels: [] };
+  world.before['process.run'] = request => request.action === 'cache-snapshot' ? bridgeReply(snapshot) : undefined;
+  const contents = await dashboard($);
+  expect(contents.includes('80%')).toBe(true);
+  expect(contents.includes('Storage unavailable')).toBe(false);
+  expect(colorOf(await $.ui.render(pane), /80%/)).toBe(DARK.good);
+  snapshot = { samples: [] };
+  expect((await dashboard($)).includes('Storage unavailable')).toBe(true);
+});
+
+test('settings and a store that cannot be read or written still draw the bar and keep choices for the session', async ($, on) => {
+  response(on);
+  const { world } = await setup($, on, undefined, undefined, { broken: ['store', 'settings.read'] });
+  expect(intro(world).length).toBe(0);
+  expect(await mode($)).toBe('off');
+  await upkeep($);
+  expect(await mode($)).toBe('warm');
+  await pressTtl($);
+  expect(await ttlButton($)).toBe('TTL 1h');
+  expect(world.logs.some(log => log.includes('cache upkeep choice could not be saved'))).toBe(true);
+  expect(world.logs.some(log => log.includes('cache TTL choice could not be saved'))).toBe(true);
+});
+
+test('an agent the roster cannot list is still measured as a subagent', async ($, on) => {
+  response(on);
+  const { world } = await setup($, on);
+  world.faults.add('agent.list');
+  await step($, { agentId: 'ghost' });
+  expect(world.samples.map(sample => sample.agentId)).toEqual(['ghost']);
+  expect(seen('step', 'ghost')).toEqual([undefined]);
+});
+
+test('subagent transcripts are found beside the main one, and other sessions and odd answers are ignored', async ($, on) => {
+  response(on);
+  on('classic.SubagentStop', () => ({}));
+  const { world, clock } = await setup($, on);
+  await $.classic.SessionStart({ source: 'startup', session_id: world.sessionId });
+  await clock.advance(1000);
+  expect(enrichments(world)).toBe(0);
+  await $.classic.SessionStart({ source: 'startup', session_id: world.sessionId, transcript_path: transcript });
+  world.roster = [{ id: 'child', type: 'agent-router:scout', description: 'Search', status: 'running' }];
+  await step($, { agentId: 'child' });
+  await clock.advance(1000);
+  const paths = () => world.calls.filter(call => call.action === 'cache-enrich').map(call => call.transcript_path);
+  expect(paths().includes('/transcripts/cache-session/subagents/agent-child.jsonl')).toBe(true);
+  const before = enrichments(world);
+  await $.classic.Stop({ stop_hook_active: false, session_id: 'other-session', transcript_path: '/transcripts/other-session.jsonl' });
+  expect(enrichments(world)).toBe(before);
+  await $.classic.SubagentStop({ stop_hook_active: false, session_id: world.sessionId, agent_id: 'helper', agent_type: 'scout',
+    agent_transcript_path: '/elsewhere/agent-helper.jsonl' });
+  expect(paths().at(-1)).toBe('/elsewhere/agent-helper.jsonl');
+  for (const answer of [{ samples: [{ bogus: true }] }, {}]) {
+    world.before['process.run'] = request => request.action === 'cache-enrich' ? bridgeReply(answer) : undefined;
+    await $.classic.Stop({ stop_hook_active: false, session_id: world.sessionId, transcript_path: transcript });
+  }
+  expect(text(await $.ui.render(band('child'))).includes('80%')).toBe(true);
+});
+
+test('a slow transcript check is never started twice at once', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  const flight = { now: 0, most: 0 };
+  world.before['process.run'] = async request => {
+    if (request.action !== 'cache-enrich') return undefined;
+    flight.now++;
+    flight.most = Math.max(flight.most, flight.now);
+    await clock.sleep(3000);
+    flight.now--;
+    return undefined;
+  };
+  await $.classic.SessionStart({ source: 'startup', session_id: world.sessionId, transcript_path: transcript });
+  await step($);
+  await clock.advance(12000);
+  expect(enrichments(world) > 1).toBe(true);
+  expect(flight.most).toBe(1);
+});
+
+test('a request still running when its conversation is cleared records nothing', async ($, on) => {
+  response(on);
+  on('session.end', ($, e) => ({ sessionId: e.sessionId }));
+  const { world } = await setup($, on);
+  const stream = $.turn.step({ turnId: 'same-turn', index: 0, messageCount: 1, model: 'vendor/main' });
+  await stream.next();
+  await clear($, world.sessionId);
+  while (!(await stream.next()).done);
+  expect(world.samples.length).toBe(0);
+});
+
+test('a keepalive that fails, goes unanswered or reports no usage is not recorded', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 100, oneHour: 0 };
+  world.forkUsage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+  await cycleTo($, 'warm');
+  const answers = [() => { throw new Error('fork failed'); }, () => ({ value: { isAnswered: false, reason: 'nothing-to-fork' } }), () => undefined];
+  for (const [index, answer] of answers.entries()) {
+    world.before['model.fork'] = answer;
+    await step($, { index });
+    await clock.advance(275000);
+  }
+  expect(world.forks.length).toBe(1);
+  expect(world.samples.some(sample => sample.turnId.startsWith('keepalive:'))).toBe(false);
+  expect(world.logs.some(log => log.includes('cache keepalive did not answer (nothing-to-fork)'))).toBe(true);
+});
+
+test('clearing the conversation during a keepalive or compaction records nothing for it', async ($, on) => {
+  response(on, 120000, 1000, 100);
+  on('session.end', ($, e) => ({ sessionId: e.sessionId }));
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 1000, oneHour: 0 };
+  world.before['model.fork'] = world.before['session.compact'] = async () => { await clear($, world.sessionId); return undefined; };
+  for (const [index, wanted] of ['warm', 'compact'].entries()) {
+    await step($, { index });
+    await cycleTo($, wanted);
+    await clock.advance(275000);
+  }
+  expect(world.forks.length).toBe(1);
+  expect(world.compactions.length).toBe(1);
+  expect(world.samples.some(sample => /^(keepalive|compaction):/.test(sample.turnId))).toBe(false);
+});
+
+test('a compaction that is skipped or fails is logged and leaves the bar as it was', async ($, on) => {
+  response(on, 120000, 1000, 100);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 1000, oneHour: 0 };
+  await cycleTo($, 'compact');
+  for (const [index, answer] of [() => ({ skip: 'a hook blocked it' }), () => { throw new Error('turn running'); }].entries()) {
+    world.before['session.compact'] = answer;
+    await step($, { index });
+    await clock.advance(275000);
+  }
+  expect(world.logs.some(log => log.includes('cache compaction skipped: a hook blocked it'))).toBe(true);
+  expect(world.logs.some(log => log.includes('cache compaction could not run during a turn'))).toBe(true);
+  expect(text(await $.ui.render(band())).includes('cmpt')).toBe(false);
+});
+
+test('each compaction restarts the bar once, before any request and when its reset cannot be saved', async ($, on) => {
+  response(on);
+  const { world } = await setup($, on);
+  const summary = { trigger: 'manual' as const, messages: [{ role: 'assistant' as const, text: 'Summary', toolUses: [] }] };
+  await $.session.compact(summary);
+  expect(world.samples.at(-1)?.model).toBe('unknown');
+  await step($);
+  world.before['process.run'] = request => request.action === 'cache-reset' ? bridgeReply(null, 1) : undefined;
+  await $.session.compact(summary);
+  expect(world.resets.length).toBe(1);
+  const shown = text(await $.ui.render(band()));
+  expect(shown.includes('cmpt ✓')).toBe(true);
+  expect(shown.includes('storage unavailable')).toBe(true);
+});
+
+test('usage reports are measured as the response gave them, and impossible ones are ignored', async ($, on) => {
+  const usage: Record<string, unknown> = { model: '', cache_read_input_tokens: 800, cache_creation_input_tokens: 100, input_tokens: 100, output_tokens: 20 };
+  on('turn.step', async function* ($, e) {
+    yield { kind: 'text' as const, index: 0, text: 'answer' };
+    return { turnId: e.turnId, index: e.index, answer: 'answer', toolUses: [], stopReason: 'end_turn' as const, usage: usage as any };
+  });
+  const { world } = await setup($, on);
+  await step($);
+  expect(world.samples[0].model).toBe('vendor/main');
+  Object.assign(usage, { model: 'vendor/main', cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 100 } });
+  await step($, { index: 1 });
+  expect(world.samples[1].cacheCreation).toEqual({ fiveMinute: 0, oneHour: 100 });
+  world.before['process.run'] = request => request.action === 'cache-sample' ? bridgeReply({ sample: null }) : undefined;
+  await step($, { index: 1 });
+  Object.assign(usage, { cache_read_input_tokens: -1 });
+  await step($, { index: 2 });
+  expect(world.calls.filter(call => call.action === 'cache-sample').length).toBe(3);
+  const shown = text(await $.ui.render(band()));
+  expect(shown.includes('ETA ~60:00')).toBe(true);
+  expect(shown.includes('storage unavailable')).toBe(false);
+});
+
+test('two requests in flight on one conversation each settle on their own', async ($, on) => {
+  response(on);
+  const { world } = await setup($, on);
+  const first = $.turn.step({ turnId: 'same-turn', index: 1, messageCount: 1, model: 'vendor/main' });
+  await first.next();
+  const second = $.turn.step({ turnId: 'same-turn', index: 2, messageCount: 1, model: 'vendor/main' });
+  await second.next();
+  while (!(await first.next()).done);
+  expect(await dial($)).toBe('●');
+  while (!(await second.next()).done);
+  expect(world.samples.length).toBe(2);
+});
+
+test('after a reload, a request for a different model is still marked as a model change', async ($, on) => {
+  labelled(on, model => model);
+  await setup($, on);
+  await step($);
+  await start($);
+  expect((await inFlight($, 'vendor/other')).includes('model changed · awaiting usage')).toBe(true);
+});
+
+test('a dashboard the terminal cannot place says why, and an unopened pane draws nothing', async ($, on) => {
+  on('ui.render', { component: 'Pane' }, ($, e) => $.ui.resolve(e).Text({ children: ['No pane'] }));
+  const { world } = await setup($, on, undefined, undefined, { broken: ['ui.open'] });
+  expect((await run($)).includes('Keepalive dashboard is unavailable')).toBe(true);
+  expect(world.logs.includes('Agent cache pane: terminal too narrow')).toBe(true);
+  expect(text(await $.ui.render(pane))).toBe('No pane');
+});
+
+test('a teammate TTL button switches away from the teammate default, and a locked TTL ignores a stale press', async ($, on) => {
+  response(on);
+  const { world } = await setup($, on);
+  world.roster = [{ id: 'mate', type: 'teammate', description: 'Probe', status: 'running', name: 'probe' }];
+  expect(await ttlButton($, 'mate')).toBe('TTL 1h');
+  await pressTtl($, 'mate');
+  expect(await ttlButton($, 'mate')).toBe('TTL 5m');
+  await $.ui.render(band());
+  world.env.FORCE_PROMPT_CACHING_5M = '1';
+  await start($);
+  await $.ui.press({ plugin: 'keepalive', key: 'agent-cache-ttl', requestId: 'cache-band' });
+  expect(world.env.CLAUDE_CODE_PROMPT_CACHE_TTL).toBe(undefined);
+});
+
+test('the keepalive count hides while a request is in flight or when keepalives cost nothing to judge', async ($, on) => {
+  response(on, 120000, 1000, 100);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 1000, oneHour: 0 };
+  world.forkUsage = { input_tokens: 10, output_tokens: 2, cache_read_input_tokens: 121000, cache_creation_input_tokens: 0 };
+  await cycleTo($, 'warmcomp');
+  await step($);
+  await clock.advance(2000);
+  expect((await dashboard($)).includes('11 keepalives, then compact')).toBe(true);
+  expect((await inFlight($, 'vendor/main')).includes('↻')).toBe(false);
+  world.prices['vendor/free'] = { read: 0, output: 0 };
+  await step($, { index: 2, model: 'vendor/free' });
+  await clock.advance(2000);
+  expect(text(await $.ui.render(band())).includes('↻')).toBe(false);
+});
+
+test('a price listing without a source names models.dev, and a failed recheck keeps the last price', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 100, oneHour: 0 };
+  world.prices['vendor/main'] = { read: 0.1, fiveMinute: 1.25, output: 5 };
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(2000);
+  const priced = (contents: string) => contents.includes('priced by models.dev') && !contents.includes('priced by models.dev (');
+  expect(priced(await dashboard($))).toBe(true);
+  world.pricesFail = true;
+  await clock.advance(3700000);
+  await step($, { index: 1 });
+  await clock.advance(2000);
+  expect(world.priceLookups.length > 1).toBe(true);
+  expect(priced(await dashboard($))).toBe(true);
+});
+
+test('the dashboard draws agents from other sessions, orphans and lost parents, and filters requests by kind', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 100, oneHour: 0 };
+  world.roster = [{ id: 'kid', type: 'agent-router:task', description: 'Dig', status: 'running', parentId: 'ghost' }];
+  await step($);
+  await step($, { agentId: 'kid' });
+  await $.session.compact({ trigger: 'manual', messages: [{ role: 'assistant', text: 'Summary', toolUses: [] }] });
+  const now = clock.now();
+  const linked = (sessionId: string, agentId: string | null, index: number) => ({ sessionId, agentId, turnId: 'pane-turn', index, model: 'vendor/main',
+    startedAt: now, completedAt: now, read: 800, write: 100, fresh: 100, output: 20, ttlMs: null, ttlSource: 'response TTL metadata absent', disabled: false });
+  world.linked = [linked('pane-a', null, 0), linked('pane-a', null, 1), linked('pane-b', null, 0), linked('pane-c', 'stray', 0)];
+  await dashboard($);
+  const lines = treeLines(await $.ui.render(pane));
+  expect(lines.filter(line => /^[├└]─\s+Main · split-pane teammate$/.test(line)).length).toBe(2);
+  expect(lines.some(line => /^[├└]─\s+agent-router:task \(kid\)$/.test(line))).toBe(true);
+  expect(lines.some(line => /^└─\s+stray$/.test(line))).toBe(true);
+  await press($, `cache-agent:${loopKey('cache-session', 'kid')}`);
+  expect(text(await $.ui.render(pane)).includes('Recent requests · agent-router:task (kid)')).toBe(true);
+  await press($, 'cache-history:all');
+  expect(treeLines(await $.ui.render(pane)).some(line => /pane-turn:\d+\s+\S+\s+\S+\s+–\s/.test(line))).toBe(true);
+  await press($, 'cache-requests:compactions');
+  let drawn = treeLines(await $.ui.render(pane));
+  expect(drawn.some(line => /^\S+\s+compaction\s/.test(line))).toBe(true);
+  expect(drawn.some(line => line.includes('same-turn:0'))).toBe(false);
+  await press($, 'cache-requests:real');
+  drawn = treeLines(await $.ui.render(pane));
+  expect(drawn.some(line => line.includes('same-turn:0'))).toBe(true);
+  expect(drawn.some(line => /^\S+\s+compaction\s/.test(line))).toBe(false);
+});
+
+test('a narrow dashboard keeps only the latest dots and counts the earlier ones', async ($, on) => {
+  const { world } = await setup($, on);
+  world.linked = Array.from({ length: 100 }, (_, index) => ({ sessionId: `pane-${index % 4}`, agentId: null, turnId: 'pane-turn', index, model: 'vendor/main',
+    startedAt: index, completedAt: index, read: 800, write: 100, fresh: 100, output: 20, ttlMs: null, ttlSource: 'response TTL metadata absent', disabled: false }));
+  await dashboard($);
+  const lines = treeLines(await $.ui.render({ ...pane, props: { ...pane.props, bodyColumns: 22 } }));
+  expect(lines.includes('… 20 earlier')).toBe(true);
+  expect(lines.filter(line => /^●{20}$/.test(line)).length).toBe(4);
+});
+
+test('an agent with nothing selected and no history shows no request list', async ($, on) => {
+  response(on);
+  await setup($, on);
+  await step($);
+  await dashboard($);
+  expect(text(await $.ui.render({ ...pane, props: { ...pane.props, view: { agentId: 'missing' } } })).includes('Recent requests')).toBe(false);
+});
+
+test('a subagent miss chip opens its own history, and more than two causes are cut short', async ($, on) => {
+  const usage = missWorld(on);
+  const { world, clock } = await setup($, on);
+  world.roster = [{ id: 'child', type: 'agent-router:scout', description: 'Search', status: 'running' }];
+  world.reported = { fiveMinute: 5000, oneHour: 0 };
+  await step($);
+  Object.assign(usage, { read: 48648, write: 257000 });
+  world.reported = { fiveMinute: 257000, oneHour: 0 };
+  await clock.advance(26000);
+  await step($, { index: 1 });
+  Object.assign(usage, { read: 0, write: 306000 });
+  await step($, { index: 2, model: 'vendor/other' });
+  world.reported = undefined;
+  Object.assign(usage, { read: 300000, write: 5000 });
+  await step($, { agentId: 'child' });
+  Object.assign(usage, { read: 0, write: 305000 });
+  await step($, { agentId: 'child', index: 1 });
+  expect(button(await $.ui.render(band()), 'agent-cache-misses')?.label?.endsWith('…')).toBe(true);
+  expect(button(await $.ui.render(band('child')), 'agent-cache-misses')?.label).toBe('1 unknown');
+  await $.ui.press({ plugin: 'keepalive', key: 'agent-cache-misses', requestId: 'cache-band' });
+  expect(text(await $.ui.render(pane)).includes('Recent requests · agent-router:scout (child) (last 30 misses)')).toBe(true);
+});
+

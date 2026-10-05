@@ -36,6 +36,7 @@ shared/                           Code both plugins use, and its tests
 agent-router/                     The Agent Router plugin
 keepalive/                        The Keepalive plugin
 scripts/sync-shared.mjs           Copies shared/ into each plugin
+scripts/coverage.mjs              Coverage of the Node code and of both hooks modules
 ```
 
 Claude Code only loads a plugin's own files, so each plugin carries a copy of `shared/` in `lib/shared/` and `hooks/shared/`. Edit `shared/`, then run `npm run sync`. `npm test` fails if a copy differs.
@@ -44,10 +45,13 @@ Claude Code only loads a plugin's own files, so each plugin carries a copy of `s
 npm test             # shared library, copies, and each plugin's Node tests
 npm run test:mod     # each plugin's function-hook tests, through claude plugin test
 npm run typecheck
+npm run coverage     # every suite with coverage; fails below 100%
 npm --prefix keepalive run test:cache-live   # Keepalive and Agent Router against the real claude binary
 ```
 
 Set `CLAUDE_BINARY` to test a particular Claude executable.
+
+`npm run coverage` measures the Node tests with c8 and the function-hook tests by instrumenting each hooks module before `claude plugin test` runs it, then writes one report to `coverage/`. Name `node`, `agent-router` or `keepalive` to run only those, add `--gaps` (with `--file=<part of a path>`) to list what is not covered, or `--html` for a browsable report.
 
 ## License
 

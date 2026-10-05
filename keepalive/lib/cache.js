@@ -64,7 +64,7 @@ function missOf(s, prior, touchedAt, creation) {
   if (s.requested === '1h' && (prior.requested ?? '5m') !== '1h') return 'TTL changed';
   if (!creation) return 'cache miss';
   const ttlMs = creation.oneHour ? 3600000 : 300000;
-  return s.startedAt - (touchedAt ?? prior.startedAt) > ttlMs ? 'expired' : 'prefix changed';
+  return s.startedAt - touchedAt > ttlMs ? 'expired' : 'prefix changed';
 }
 
 /** @typedef {{read: number, output: number, fiveMinute?: number, oneHour?: number, provider?: string, id?: string, source?: string}} CachePrices */
@@ -171,7 +171,7 @@ export function cacheRows(samples, resets = [], labels = new Map()) {
     if (s.read + s.write > 0) row.touchedAt = s.startedAt;
     if (isKeepalive(s)) { row.keepalives.push(s); continue; }
     row.last = s;
-    row.recent = [...(row.recent ?? []), s].slice(-RATE_REQUESTS);
+    row.recent = [...row.recent, s].slice(-RATE_REQUESTS);
     row.keepalives = [];
     if (s.write > 0) row.creation = s.cacheCreation ?? null;
   }
@@ -199,7 +199,7 @@ export function cacheStatus(row, now, pendingAt, unreported) {
   if (sample.read + sample.write === 0) return without('uncached');
   const creation = row.creation ?? (unreported?.has(modelName(sample.model)) ? null : awaitedCreation(row, sample, now));
   if (!creation) return without('TTL not reported');
-  const anchor = Math.max(row.touchedAt ?? sample.startedAt, pendingAt ?? 0);
+  const anchor = Math.max(row.touchedAt, pendingAt ?? 0);
   /** @type {CacheLifetime[]} */
   const lifetimes = [{ ttl: '5m', ttlMs: 300000, tokens: creation.fiveMinute }, { ttl: '1h', ttlMs: 3600000, tokens: creation.oneHour }]
     .filter(part => part.tokens > 0).map(part => ({ ...part, leftMs: Math.max(0, Math.min(part.ttlMs, anchor + part.ttlMs - now)) }));
@@ -257,7 +257,7 @@ const DIAL = ['○', '◔', '◑', '◕', '●'];
 export function cacheDial(status) {
   if (!status?.ttl || status.leftMs === null) return '◌';
   const part = status.lifetimes.find(lifetime => lifetime.leftMs === status.leftMs);
-  return DIAL[part ? Math.min(4, Math.ceil(part.leftMs * 4 / part.ttlMs)) : 0];
+  return DIAL[Math.min(4, Math.ceil(part.leftMs * 4 / part.ttlMs))];
 }
 
 export function cachePercent(sample) {

@@ -1,4 +1,4 @@
-import type { AgentInfo, Elements, EngineInterface, RenderElement, RenderSurface, SessionCompactResult, TurnStepInput, TurnUsage } from 'claude-code';
+import type { AgentInfo, Elements, EngineInterface, RenderElement, RenderSurface, SessionCompacted, TurnStepInput, TurnUsage } from 'claude-code';
 import { applyCacheCreation, reportedCacheCreation, cacheBar, cacheBarParts, cacheClock, cacheDial, cacheGrade, cachePercent, cachePolicy, cacheRows, cacheStatus, cacheTokens, isCompaction, isKeepalive, keepaliveWorthwhile, keepalivesLeft, lifeGrade, loopKey, recentMisses, recentUsage, sampleKey, sampleTtl, unreportedModels, validSample, sessionMatrix, sessionUsage, cacheGap, MISS_WINDOW_MS, RATE_REQUESTS } from '../lib/cache.js';
 import { validPrices } from '../lib/cache.js';
 import type { CachePrices, CacheRow, CacheSample, CacheReset, CacheStatus } from '../lib/cache.js';
@@ -41,7 +41,7 @@ const INTRO = [
 type Upkeep = typeof UPKEEP[number];
 export const upkeepMode = (value: unknown): Upkeep | undefined => UPKEEP.find(mode => mode === value);
 export const keepaliveLimit = (value: unknown): number | undefined => {
-  const text = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  const text = String(value).trim().toLowerCase();
   if (text === 'infinite') return Infinity;
   return /^[1-9]\d*$/.test(text) && Number.isSafeInteger(Number(text)) ? Number(text) : undefined;
 };
@@ -153,7 +153,7 @@ export function createCachePanel() {
     }
     const result = cacheRows([...current.samples.values()], current.resets, labels);
     const linked = new Set(result.filter(row => row.sessionId !== current.sessionId && row.agentId === null).map(row => row.label));
-    const placed = current.roster.filter(agent => !(isPaneTeammate(agent) && linked.has(labels.get(loopKey(current.sessionId, agent.id)) ?? '')));
+    const placed = current.roster.filter(agent => !(isPaneTeammate(agent) && linked.has(labels.get(loopKey(current.sessionId, agent.id))!)));
     for (const agentId of [null, ...placed.map(agent => agent.id)]) {
       if (!result.some(row => row.sessionId === current.sessionId && row.agentId === agentId)) {
         result.push({ sessionId: current.sessionId, agentId, label: labels.get(loopKey(current.sessionId, agentId)) ?? 'Main',
@@ -199,8 +199,7 @@ export function createCachePanel() {
       const kids = children.get(key) ?? [];
       kids.forEach((kid, index) => visit(kid, depth + 1, depth ? `${lead}${last ? '   ' : '│  '}` : '', index === kids.length - 1));
     };
-    const main = all.find(row => row.sessionId === current.sessionId && row.agentId === null);
-    if (main) visit(main, 0, '', true);
+    visit(all.find(row => row.sessionId === current.sessionId && row.agentId === null)!, 0, '', true);
     for (const row of all) if (!nodes.some(node => node.row === row)) visit(row, 1, '', true);
     return nodes;
   }
@@ -241,7 +240,7 @@ export function createCachePanel() {
     const status = state(current, row);
     const result = rate(current, status.state === 'compacted' ? status.sample : recentUsage(row) ?? status.sample);
     if (status.state === 'compacted') {
-      const { before, after } = status.compacted ?? {};
+      const { before, after } = status.compacted!;
       return [...result, { text: ` · cmpt ✓${before !== undefined && after !== undefined ? ` ${cacheTokens(before)} → ${cacheTokens(after)}` : ''}` }];
     }
     if (!status.ttl) return [...result, { text: ` · ${status.state}` }];
@@ -391,16 +390,16 @@ export function createCachePanel() {
     for (const line of INTRO) host.ui.log(line);
   }
 
-  async function initialize(host: CachePanelHost, bridge: Bridge, sessionId: string, endpoint?: string, selfLabel?: string,
-    configuration: { env: Record<string, string | undefined>; upkeep?: Upkeep; ttl?: TtlDefaults; limit?: number } = { env: {} }) {
+  async function initialize(host: CachePanelHost, bridge: Bridge, sessionId: string, endpoint: string | undefined, selfLabel: string | undefined,
+    configuration: { env: Record<string, string | undefined>; upkeep?: Upkeep; ttl: TtlDefaults; limit?: number }) {
     const saved = (await savedUpkeep(host)).find(([id]) => id === sessionId)?.[1];
-    const [settings, auth] = await Promise.all([host.settings.read().catch(() => ({})), host.auth().catch((): TtlAuth => 'gateway')]);
+    const [settings, auth] = await Promise.all([host.settings.read().catch(() => ({})), host.auth()]);
     const resolve = (scope: TtlScope) => resolveDefaultTtl({ scope, env: configuration.env, settings: settings as Record<string, unknown>, auth });
     const subagent = resolve('subagent');
     const current: Context = { host, bridge, sessionId, endpoint, selfLabel, env: configuration.env, upkeep: saved ?? configuration.upkeep ?? 'off',
       limit: configuration.limit, family: themeFamily(undefined, configuration.env.COLORFGBG),
       samples: new Map(), resets: [], labels: new Map(), roster: [], routes: null, now: 0, pending: new Map(), requested: new Map(), rechecks: new Map(), prices: new Map(), available: true,
-      defaults: { main: resolve('main'), subagent }, ttlDefaults: configuration.ttl ?? {},
+      defaults: { main: resolve('main'), subagent }, ttlDefaults: configuration.ttl,
       ttls: new Map((await savedTtls(host)).filter(([id]) => id === sessionId).map(([, key, ttl]) => [key, ttl])), kinds: new Map(),
       gate: createTtlGate(value => setTtlEnv(host, TTL_ENV.subagent, value ?? configuration.env[TTL_ENV.subagent])),
       mainApplied: configuration.env[TTL_ENV.main] };
@@ -472,7 +471,7 @@ export function createCachePanel() {
       let sample: CacheSample = { sessionId: current.sessionId, agentId: request.agentId ?? null, turnId: request.turnId,
         index: request.index, model, startedAt, read: usage.cache_read_input_tokens, write: usage.cache_creation_input_tokens,
         completedAt: await current.host.clock.now(), fresh: usage.input_tokens, output: usage.output_tokens,
-        ...cachePolicy(current.env, model), ...(ticket.ttl ? { requested: ticket.ttl } : {}) };
+        ...cachePolicy(current.env, model), requested: ticket.ttl };
       const reported = reportedCacheCreation(usage);
       if (reported) sample = applyCacheCreation(sample, reported);
       await observe(current, sample, transcript(current, sample.agentId));
@@ -481,10 +480,7 @@ export function createCachePanel() {
     if (usage || ticket.changed) redraw(current);
   }
 
-  async function reset(agentId: string | null = null, at?: number) {
-    const current = context;
-    if (!current) return;
-    const resetAt = at ?? await current.host.clock.now();
+  async function reset(current: Context, agentId: string | null, resetAt: number) {
     current.resets = current.resets.filter(r => r.sessionId !== current.sessionId || r.agentId !== agentId);
     current.resets.push({ sessionId: current.sessionId, agentId, resetAt });
     try { await send(current, { action: 'cache-reset', agent_id: agentId, reset_at: resetAt }); }
@@ -526,13 +522,13 @@ export function createCachePanel() {
     redraw(current);
   }
 
-  async function compacted(agentId: string | null, startedAt: number, result: SessionCompactResult) {
+  async function compacted(agentId: string | null, startedAt: number, result: SessionCompacted) {
     const current = context;
-    if (!current || !result.messages) return;
+    if (!current) return;
     const key = loopKey(current.sessionId, agentId);
     const model = rows(current).find(row => loopKey(row.sessionId, row.agentId) === key)?.last?.model ?? 'unknown';
     const usage = result.usage;
-    await reset(agentId, startedAt);
+    await reset(current, agentId, startedAt);
     await observe(current, { sessionId: current.sessionId, agentId, turnId: `compaction:${startedAt}`, index: 0, model, startedAt,
       completedAt: Math.max(startedAt, await current.host.clock.now()), read: usage?.cache_read_input_tokens ?? 0,
       write: usage?.cache_creation_input_tokens ?? 0, fresh: usage?.input_tokens ?? 0, output: usage?.output_tokens ?? 0,
@@ -671,8 +667,8 @@ export function createCachePanel() {
   function missChip(elements: Elements[RenderSurface], current: Context, agentId: string | null): RenderElement[] {
     const found = misses(current, agentId);
     if (!found.total) return [];
-    const stale = current.now - (found.latest ?? current.now) > MISS_FRESH_MS;
-    const label = `${found.total} ${found.causes.slice(0, 2).map(([cause]) => MISS_WORDS[cause] ?? cause).join('·')}${found.causes.length > 2 ? '…' : ''}`;
+    const stale = current.now - found.latest! > MISS_FRESH_MS;
+    const label = `${found.total} ${found.causes.slice(0, 2).map(([cause]) => MISS_WORDS[cause]).join('·')}${found.causes.length > 2 ? '…' : ''}`;
     return [elements.Text({ children: [' '] }), elements.Text(stale ? { dimColor: true, children: ['✕'] } : { color: palette(current).fair, children: ['✕'] }),
       elements.Text({ children: [' '] }), elements.Button({ key: 'agent-cache-misses', label, plain: true, ...(stale ? { dimColor: true } : {}),
         onPress: async () => { requestFilter = 'misses'; historyScope = agentId === null ? 'all' : 'agent'; selected = agentId === null ? undefined : loopKey(current.sessionId, agentId); await show(); } })];
@@ -682,7 +678,7 @@ export function createCachePanel() {
     const found = misses(current, null);
     if (!found.total) return undefined;
     const causes = found.causes.map(([cause, count]) => `${count} ${cause}`).join(', ');
-    return `✕ ${found.total} cache ${found.total === 1 ? 'miss' : 'misses'} in the last ${MISS_WINDOW_MS / 60000} min: ${causes} · latest ${cacheClock(current.now - (found.latest ?? current.now))} ago`;
+    return `✕ ${found.total} cache ${found.total === 1 ? 'miss' : 'misses'} in the last ${MISS_WINDOW_MS / 60000} min: ${causes} · latest ${cacheClock(current.now - found.latest!)} ago`;
   }
 
   function warmRule(limit: number | undefined) {
@@ -823,7 +819,7 @@ export function createCachePanel() {
     const samples = scope.flatMap(row => row.samples).filter(wanted).sort((a, b) => b.startedAt - a.startedAt || b.index - a.index).slice(0, 30);
     const lines: RenderElement[] = [Text({ bold: true, children: [`Recent requests · ${title} (last 30${requestFilter === 'all' ? '' : ` ${requestFilter}`})`] })];
     if (!samples.length) return Box({ flexDirection: 'column', children: [...lines, Text({ dimColor: true, children: ['No requests match these filters.'] })] });
-    const owners = samples.map(sample => labels.get(loopKey(sample.sessionId, sample.agentId)) ?? '');
+    const owners = samples.map(sample => labels.get(loopKey(sample.sessionId, sample.agentId))!);
     const widest = (values: string[], least: number) => Math.max(least, ...values.map(value => value.length)) + 2;
     const widths: Widths = { owner: all ? widest(owners, 5) : 0, name: widest(samples.map(requestName), 7),
       ttl: widest(samples.map(sample => sampleTtl(sample) ?? '–'), 3), miss: widest(samples.map(sample => sample.miss ?? ''), 4) };
@@ -841,7 +837,7 @@ export function createCachePanel() {
     return [elements.Text({ dimColor: true, children: [`– can't be kept warm: Claude Code has no keepalive or compaction for ${kinds.map(kind => `${kind}s`).join(' and ')}.`] })];
   }
 
-  function renderPane(elements: Elements[RenderSurface], agentId?: string, columns = 100): RenderElement | undefined {
+  function renderPane(elements: Elements[RenderSurface], agentId: string | undefined, columns: number): RenderElement | undefined {
     const current = context;
     if (!current || !open) return undefined;
     const { Box, Button, Text } = elements;
@@ -894,10 +890,10 @@ export function createCachePanel() {
 
   async function settle() {
     const current = context;
-    if (current) await recheck(current, true).catch(() => undefined);
+    if (current) await recheck(current, true);
   }
 
-  return { initialize, begin, finish, reset, compacted, refresh, tick, show, settle, renderBand, renderPane, setTranscript, enrich, holdTtlFor, view,
+  return { initialize, begin, finish, compacted, refresh, tick, show, settle, renderBand, renderPane, setTranscript, enrich, holdTtlFor, view,
     introduce: () => context ? introduce(context.host) : Promise.resolve(), close: () => { open = false; },
     clear: () => { previous = context ?? previous; context = undefined; open = false; selected = undefined; } };
 }
