@@ -48,8 +48,6 @@ export function register(on: On, options: PluginOptions = {}) {
   // The main loop is keyed '' (in a pane teammate session, that is the teammate).
   const sent = new Map<string, Sent>();
 
-  // The normalized turn.step usage omits cache_creation. Classic hooks name
-  // the transcripts preserving that API metadata, including subagent paths.
   on('classic.SessionStart', ($, e, next) => {
     cachePanel.setTranscript(e.session_id, null, e.transcript_path);
     return next(e);
@@ -215,6 +213,7 @@ export function register(on: On, options: PluginOptions = {}) {
     if (bridge) {
       await cachePanel.initialize({
         session: { id: () => $.session.id(), compact: input => $.session.compact(input) },
+        config: { list: () => $.config.list() },
         agent: { list: () => $.agent.list() },
         clock: { now: () => $.clock.now() },
         model: { fork: request => $.model.fork(request) },
@@ -229,6 +228,7 @@ export function register(on: On, options: PluginOptions = {}) {
             DISABLE_PROMPT_CACHING_HAIKU: await $.env.get('DISABLE_PROMPT_CACHING_HAIKU').catch(() => undefined),
             DISABLE_PROMPT_CACHING_SONNET: await $.env.get('DISABLE_PROMPT_CACHING_SONNET').catch(() => undefined),
             DISABLE_PROMPT_CACHING_OPUS: await $.env.get('DISABLE_PROMPT_CACHING_OPUS').catch(() => undefined),
+            COLORFGBG: await $.env.get('COLORFGBG').catch(() => undefined),
           },
         });
       if (e.isInteractive && e.surface === 'terminal') {
@@ -299,8 +299,6 @@ export function register(on: On, options: PluginOptions = {}) {
   }
 
   async function* measured(e: TurnStepInput, next: StreamNext<'turn.step'>) {
-    // Preserve the entire native stream and return value. Bookkeeping must never
-    // change a model response or prevent the next request from being dispatched.
     const ticket = await cachePanel.begin(e).catch(() => undefined);
     let usage;
     try {
@@ -385,8 +383,9 @@ export function register(on: On, options: PluginOptions = {}) {
   });
 
   on('session.compact', async ($, e, next) => {
+    const startedAt = await $.clock.now();
     const result = await next(e);
-    if ('messages' in result && e.trigger !== 'precompute') await cachePanel.reset(e.agentId ?? null).catch(() => undefined);
+    if (result.messages && e.trigger !== 'precompute') await cachePanel.compacted(e.agentId ?? null, startedAt, result).catch(() => undefined);
     return result;
   });
 

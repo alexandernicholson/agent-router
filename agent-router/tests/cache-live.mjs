@@ -1,5 +1,3 @@
-// A real Claude process against an in-process third-party Messages API.
-// No inference service or real credentials are used.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, cp, readFile, writeFile, rm, readdir } from 'node:fs/promises';

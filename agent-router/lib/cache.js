@@ -1,13 +1,15 @@
-/** Per-request evidence only. A gateway's retention policy is not inferred from token counts. */
-/** @typedef {{sessionId: string, agentId: string | null, turnId: string, index: number, model: string, startedAt: number, completedAt?: number, read: number, write: number, fresh: number, output: number, ttlMs: number | null, ttlSource: string, disabled: boolean, cacheCreation?: {fiveMinute: number, oneHour: number}}} CacheSample */
+/** @typedef {{sessionId: string, agentId: string | null, turnId: string, index: number, model: string, startedAt: number, completedAt?: number, read: number, write: number, fresh: number, output: number, ttlMs: number | null, ttlSource: string, disabled: boolean, cacheCreation?: {fiveMinute: number, oneHour: number}, tokensBefore?: number, tokensAfter?: number, miss?: string}} CacheSample */
 /** @typedef {{sessionId: string, agentId: string | null, resetAt: number}} CacheReset */
 /** @typedef {{fiveMinute: number, oneHour: number}} CacheCreation */
-/** @typedef {{sessionId: string, agentId: string | null, label: string, samples: CacheSample[], last?: CacheSample, touchedAt?: number, creation?: CacheCreation | null, keepalives: CacheSample[], totals: {requests: number, read: number, write: number, fresh: number, output: number}}} CacheRow */
+/** @typedef {{sessionId: string, agentId: string | null, label: string, samples: CacheSample[], last?: CacheSample, compaction?: CacheSample, touchedAt?: number, creation?: CacheCreation | null, keepalives: CacheSample[], totals: {requests: number, read: number, write: number, fresh: number, output: number}}} CacheRow */
 /** @typedef {{ttl: '5m' | '1h', ttlMs: number, tokens: number, leftMs: number}} CacheLifetime */
-/** @typedef {{state: string, ratio: number | null, leftMs: number | null, lifetimes: CacheLifetime[], ttl?: string}} CacheStatus */
+/** @typedef {{state: string, ratio: number | null, leftMs: number | null, lifetimes: CacheLifetime[], ttl?: string, sample?: CacheSample, compacted?: {before?: number, after?: number}}} CacheStatus */
 /** @typedef {'good' | 'fair' | 'poor'} CacheGrade */
 
+import { sameModel } from './routing.js';
+
 const on = value => value === '1' || value?.toLowerCase() === 'true';
+const count = value => value === undefined || Number.isSafeInteger(value) && value >= 0;
 export const loopKey = (sessionId, agentId) => JSON.stringify([sessionId, agentId ?? null]);
 export const sampleKey = sample => JSON.stringify([sample.sessionId, sample.agentId, sample.turnId, sample.index]);
 
@@ -19,7 +21,8 @@ export function validSample(s) {
     (s.ttlMs === null || s.ttlMs === 300000 || s.ttlMs === 3600000) &&
     typeof s.ttlSource === 'string' && typeof s.disabled === 'boolean' &&
     (s.completedAt === undefined || Number.isSafeInteger(s.completedAt) && s.completedAt >= s.startedAt) &&
-    (s.cacheCreation === undefined || validCreation(s.cacheCreation, s.write));
+    (s.cacheCreation === undefined || validCreation(s.cacheCreation, s.write)) &&
+    count(s.tokensBefore) && count(s.tokensAfter);
 }
 
 export function validCreation(value, writes) {
@@ -27,7 +30,6 @@ export function validCreation(value, writes) {
     value.fiveMinute + value.oneHour === writes && writes > 0;
 }
 
-/** Write buckets are response evidence, independent of endpoint or requested TTL. */
 export function reportedCacheCreation(usage) {
   const value = usage?.cache_creation;
   if (!value || typeof value !== 'object') return undefined;
@@ -42,50 +44,54 @@ export function applyCacheCreation(sample, creation) {
     ttlSource: 'response cache_creation', disabled: false };
 }
 
-// Keepalives are requests Agent Router sends itself; they refresh a cache
-// without being the conversation's own last request.
 export const isKeepalive = sample => typeof sample?.turnId === 'string' && sample.turnId.startsWith('keepalive:');
+export const isCompaction = sample => typeof sample?.turnId === 'string' && sample.turnId.startsWith('compaction:');
 
-// List prices as multiples of a model's base input price: cache reads are
-// 0.1x except where a model prices them lower; output is 5x on current models.
-const READ_PRICES = [[/fable-5-1|mythos-5-1/i, 0.025], [/opus-5-5/i, 0.05]];
-export function cachePrices(model) {
-  return { read: READ_PRICES.find(([pattern]) => pattern.test(model))?.[1] ?? 0.1, fiveMinute: 1.25, oneHour: 2, output: 5 };
+/**
+ * @param {CacheSample} s
+ * @param {CacheSample | undefined} prior
+ * @param {number | undefined} touchedAt
+ * @param {CacheCreation | null | undefined} creation
+ */
+function missOf(s, prior, touchedAt, creation) {
+  const expected = prior ? prior.read + prior.write : 0;
+  if (!prior || !expected || expected - s.read < Math.max(2000, expected * 0.05)) return undefined;
+  if (!sameModel(prior.model, s.model)) return 'model changed';
+  if (!creation) return 'cache miss';
+  const ttlMs = creation.oneHour ? 3600000 : 300000;
+  return s.startedAt - (touchedAt ?? prior.startedAt) > ttlMs ? 'expired' : 'prefix changed';
+}
+
+/** @typedef {{read: number, output: number, fiveMinute?: number, provider?: string, id?: string}} CachePrices */
+
+const multiple = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+/** @param {unknown} value */
+export function validPrices(value) {
+  return !!value && typeof value === 'object' && multiple(value.read) && multiple(value.output) &&
+    (value.fiveMinute === undefined || multiple(value.fiveMinute));
 }
 
 /**
- * A keepalive is worth sending while the keepalives since the loop's last
- * request, this one included, cost less than the cache rewrite they prevent:
- * the cached prefix written again instead of read. Each keepalive's measured
- * tokens are priced; the next is assumed to cost what the last one did.
  * @param {CacheRow | undefined} row
- * @param {number} ttlMs the TTL whose write a lapse would repeat
+ * @param {CachePrices | null | undefined} prices
  */
-export function keepaliveWorthwhile(row, ttlMs) {
+export function keepaliveWorthwhile(row, prices) {
   const last = row?.last;
   const prefix = last ? last.read + last.write : 0;
-  if (!last || !prefix) return false;
-  const prices = cachePrices(last.model);
-  const write = ttlMs === 3600000 ? prices.oneHour : prices.fiveMinute;
+  if (!last || !prefix || !validPrices(prices)) return false;
+  const write = Math.max(1, prices.fiveMinute ?? 1);
   const cost = s => s.read * prices.read + s.write * write + s.fresh + s.output * prices.output;
   const spent = row.keepalives.reduce((sum, s) => sum + cost(s), 0);
   const next = row.keepalives.length ? cost(row.keepalives.at(-1)) : prefix * prices.read;
   return spent + next <= prefix * (write - prices.read);
 }
 
-/** Local flags describe disabling; only response metadata can establish a TTL. */
 export function cachePolicy(env = {}, model = '') {
   const family = /haiku/i.test(model) ? 'HAIKU' : /sonnet/i.test(model) ? 'SONNET' : /opus/i.test(model) ? 'OPUS' : '';
   const disabled = on(env.DISABLE_PROMPT_CACHING) || !!family && on(env[`DISABLE_PROMPT_CACHING_${family}`]);
   return { ttlMs: null, ttlSource: 'response TTL metadata absent', disabled };
 }
 
-/**
- * Dedupe identities and keep lifetime totals while bounding the visible request history.
- * Each request that reads or writes a loop's cache refreshes its entry, so the
- * countdown runs from the latest such request; its TTL is the one the latest
- * write reported, since read tokens keep the TTL they were written with.
- */
 export function cacheRows(samples, resets = [], labels = new Map()) {
   const cutoffs = new Map(resets.map(r => [loopKey(r.sessionId, r.agentId), r.resetAt]));
   /** @type {Map<string, CacheRow>} */
@@ -100,9 +106,11 @@ export function cacheRows(samples, resets = [], labels = new Map()) {
     }
     row.samples.push(s);
     if (row.samples.length > 30) row.samples.shift();
-    row.totals.requests++;
+    if (!isCompaction(s) || s.read + s.write + s.fresh + s.output > 0) row.totals.requests++;
     for (const field of ['read', 'write', 'fresh', 'output']) row.totals[field] += s[field];
     if (s.startedAt < (cutoffs.get(key) ?? 0)) continue;
+    if (isCompaction(s)) { row.compaction = s; continue; }
+    if (!isKeepalive(s)) s.miss = missOf(s, row.last, row.touchedAt, row.creation);
     if (s.read + s.write > 0) row.touchedAt = s.startedAt;
     if (isKeepalive(s)) { row.keepalives.push(s); continue; }
     row.last = s;
@@ -113,20 +121,21 @@ export function cacheRows(samples, resets = [], labels = new Map()) {
 }
 
 /**
- * A request in flight (`pendingAt`, its dispatch) reads or rewrites the entry,
- * so it restarts the countdown. Mixed writes keep two lifetimes; the time left
- * is the sooner one still running.
  * @param {CacheRow | undefined} row
  * @param {number} now
  * @param {number} [pendingAt]
  * @returns {CacheStatus}
  */
 export function cacheStatus(row, now, pendingAt) {
-  const sample = row?.last;
+  const compaction = row?.compaction && (!row.last || row.compaction.startedAt >= row.last.startedAt) ? row.compaction : undefined;
+  const sample = compaction ?? row?.last;
   if (!row || !sample) return { state: 'no observation', leftMs: null, ratio: null, lifetimes: [] };
   const total = sample.read + sample.write + sample.fresh;
   const ratio = total ? sample.read / total : null;
-  const without = state => ({ state, leftMs: null, ratio, lifetimes: [] });
+  if (compaction) {
+    return { state: 'compacted', leftMs: null, ratio, lifetimes: [], sample, compacted: { before: sample.tokensBefore, after: sample.tokensAfter } };
+  }
+  const without = state => ({ state, leftMs: null, ratio, lifetimes: [], sample });
   if (sample.disabled) return without('caching disabled');
   if (sample.read + sample.write === 0) return without('uncached');
   if (!row.creation) return without('TTL unknown');
@@ -136,14 +145,11 @@ export function cacheStatus(row, now, pendingAt) {
     .filter(part => part.tokens > 0).map(part => ({ ...part, leftMs: Math.max(0, Math.min(part.ttlMs, anchor + part.ttlMs - now)) }));
   const running = lifetimes.filter(part => part.leftMs > 0).map(part => part.leftMs);
   const leftMs = running.length ? Math.min(...running) : 0;
-  return { state: leftMs ? 'warm' : 'expired', leftMs, ratio, lifetimes, ttl: lifetimes.map(part => part.ttl).join('+') };
+  return { state: leftMs ? 'warm' : 'expired', leftMs, ratio, lifetimes, ttl: lifetimes.map(part => part.ttl).join('+'), sample };
 }
 
 const DIAL = ['○', '◔', '◑', '◕', '●'];
 /**
- * The time left as quarters of a circle: full when the entry was just read or
- * written, one quarter gone per quarter of the TTL, empty once it expired.
- * Dotted while there is no reported TTL to count down.
  * @param {CacheStatus | undefined} status
  */
 export function cacheDial(status) {
@@ -152,17 +158,12 @@ export function cacheDial(status) {
   return DIAL[part ? Math.min(4, Math.ceil(part.leftMs * 4 / part.ttlMs)) : 0];
 }
 
-/** A whole percentage that reads 100 only for a complete hit. */
 export function cachePercent(sample) {
   const total = sample ? sample.read + sample.write + sample.fresh : 0;
   return total ? Math.floor(sample.read * 100 / total) : null;
 }
 
 /**
- * A miss costs its uncached tokens, so a hit rate is graded against the
- * context it was served over: the budgets for uncached input (written plus
- * new) are a share of the context, within fixed bounds. Between 40k and 400k
- * tokens, good is a 95% hit rate; a 1M-token context needs 98%.
  * @returns {CacheGrade | null}
  */
 export function cacheGrade(sample) {
@@ -174,7 +175,6 @@ export function cacheGrade(sample) {
 }
 
 /**
- * Time left, graded so the last half minute, when upkeep acts, reads poor.
  * @returns {CacheGrade | null}
  */
 export function lifeGrade(leftMs) {
@@ -182,9 +182,19 @@ export function lifeGrade(leftMs) {
   return leftMs > 120000 ? 'good' : leftMs > 30000 ? 'fair' : 'poor';
 }
 
-export function cacheBar(ratio, width = 10) {
+const FILLS = { good: '█', fair: '▓', poor: '▒' };
+/**
+ * @param {number | null} ratio
+ * @param {number} [width]
+ * @param {CacheGrade | null} [grade]
+ */
+export function cacheBarParts(ratio, width = 10, grade = null) {
   const fill = ratio === null ? 0 : Math.round(Math.max(0, Math.min(1, ratio)) * width);
-  return '█'.repeat(fill) + '░'.repeat(width - fill);
+  return { fill: (grade ? FILLS[grade] : '█').repeat(fill), empty: '░'.repeat(width - fill) };
+}
+export function cacheBar(ratio, width = 10, grade = null) {
+  const { fill, empty } = cacheBarParts(ratio, width, grade);
+  return fill + empty;
 }
 export function cacheClock(ms) {
   const seconds = Math.max(0, Math.ceil(ms / 1000));

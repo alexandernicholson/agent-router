@@ -36,7 +36,6 @@ test('mixed reported writes retain two token counts and two independent lifetime
   assert.equal(mixed.ttlMs, null);
   const status = cacheStatus(cacheRows([mixed])[0], 401000);
   assert.deepEqual(status.lifetimes.map(p => [p.ttl, p.tokens, p.leftMs]), [['5m', 40, 0], ['1h', 60, 3200000]]);
-  // The 1h portion stays warm after the 5m portion expires.
   assert.equal(status.state, 'warm');
   assert.equal(status.leftMs, 3200000);
 });

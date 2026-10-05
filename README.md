@@ -162,7 +162,7 @@ Usage and routing refresh when their records change. A view shows `unavailable` 
 The cache bar beneath the developer panel follows the conversation in view: the main conversation, or the subagent or teammate whose transcript you are viewing.
 
 ```text
-[ ◕ ] off ██████████ 96% · TTL 5m · ETA ~3:44 · read 148.1k · write 5.7k · new 2
+[ ◕ ] ⬦ off ██████████ 96% · TTL 5m · ETA ~3:44 · read 148.1k · write 5.7k · new 2
 ```
 
 It shows the last request's cache hit rate, the TTL its cache writes reported, the time left before the entry expires, and the tokens read, written, and sent uncached.
@@ -171,17 +171,19 @@ The dial button shows the time left in quarters of the TTL: `●` for a cache ju
 
 The hit rate is `cache_read_input_tokens / (cache_read_input_tokens + cache_creation_input_tokens + input_tokens)`, rounded down so that 100% means a complete hit. Output tokens are shown separately.
 
-The bar and percentage are coloured by the uncached tokens a request cost relative to its context (read, write, and new tokens), since a miss on a large context costs more than the same rate on a small one:
+The bar and percentage are graded by the uncached tokens a request cost relative to its context (read, write, and new tokens), since a miss on a large context costs more than the same rate on a small one. Each grade has a colour and a bar shading, so it never rests on colour alone:
 
-| Colour | Uncached tokens (write + new) | Hit rate this means |
-| --- | --- | --- |
-| Green | Up to 5% of the context, at least 2k and at most 20k | 95% from 40k to 400k tokens; 98% at 1M; lower on small contexts |
-| Yellow | Up to 20% of the context, at least 5k and at most 50k | 80% from 25k to 250k tokens; 95% at 1M |
-| Red | More | |
+| Grade | Colour | Bar | Uncached tokens (write + new) | Hit rate this means |
+| --- | --- | --- | --- | --- |
+| Good | Blue | `█` | Up to 5% of the context, at least 2k and at most 20k | 95% from 40k to 400k tokens; 98% at 1M; lower on small contexts |
+| Fair | Yellow | `▓` | Up to 20% of the context, at least 5k and at most 50k | 80% from 25k to 250k tokens; 95% at 1M |
+| Poor | Red | `▒` | More | |
 
-For example, a 90% hit rate on a 10k context is green, and the same rate on a 990k context is red. The time left is green above two minutes, yellow above 30 seconds, and red in the last 30 seconds, when upkeep acts. Counts come from every native `turn.step` response, including intermediate tool steps, rather than from completed-turn totals. Separate agent and session identities keep nested agents, parallel requests, and split-pane teammate main loops distinct. Agents in the live roster without usage show **no observation**, not zero usage.
+For example, a 90% hit rate on a 10k context is good, and the same rate on a 990k context is poor. The time left uses the same colours: good above two minutes, fair above 30 seconds, and poor in the last 30 seconds, when upkeep acts. The dial repeats it without colour.
 
-Request records persist across resume. Repeated request identities count once. The dashboard retains totals for all recorded requests; the 30-request limit applies only to the displayed history. The lead polls linked split-pane teammates every five seconds. Successful compaction clears the compacted loop's countdown while preserving its historical counts; `/clear` starts a separate cache ledger on the next request.
+When a request rewrites much of what the loop's previous request cached, the bar names the likely cause: **prefix changed** when the cache was still warm, so something early in the prompt changed (in Claude Code, a reloaded skill list, a working-directory notice, or a reminder can do this); **expired** when it outlived the reported TTL; **model changed**, since caches are per model; or **cache miss** when no TTL was reported. Growth at the end of the conversation and small partial misses are not labelled. Counts come from every native `turn.step` response, including intermediate tool steps, rather than from completed-turn totals. Separate agent and session identities keep nested agents, parallel requests, and split-pane teammate main loops distinct. Agents in the live roster without usage show **no observation**, not zero usage.
+
+Request records persist across resume. Repeated request identities count once. The dashboard retains totals for all recorded requests; the 30-request limit applies only to the displayed history. The lead polls linked split-pane teammates every five seconds. A compaction of a loop, by `/compact`, by Claude Code, or by upkeep, shows as `cmpt ✓` with the conversation's size before and after (`cmpt ✓ 343k → 18k`) until the loop's next request; the bar shows the compaction request's own hit rate. The compaction request joins the history and totals, and the countdown clears, since its cache went with the conversation. Historical counts are kept; `/clear` starts a separate cache ledger on the next request.
 
 TTLs come exclusively from response metadata for **every provider**, including third-party gateways. When `usage.cache_creation` contains `ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens`, the dashboard shows the reported write counts and a lifetime bar for each nonzero bucket. Mixed five-minute and one-hour writes remain separate. This metadata describes newly written tokens. A request that only reads the cache keeps the TTL of the loop's latest reported write, since read tokens keep the TTL they were written with.
 
@@ -191,21 +193,49 @@ If response TTL metadata is absent, invalid, or ambiguous, the dashboard shows *
 
 The time left uses the reported TTL and the dispatch time of the loop's latest request that read or wrote its cache: an entry's lifetime runs from the start of the request that writes or reads it, and every read refreshes it. A request in flight restarts the countdown when it is dispatched. Mixed five-minute and one-hour writes count down separately, and the bar shows the sooner one still running. Responses carry no expiry timestamp, so the countdown is timed by Claude Code's clock; a bar can show a past cache hit after its entry has expired. The plugin does not set API `cache_control`.
 
-The dashboard distinguishes caching disabled by `DISABLE_PROMPT_CACHING*`, a response with no cached tokens, missing usage, unknown TTL, and an expired entry. It does not attribute a miss to a particular prompt change or claim authoritative upstream billing.
+The dashboard distinguishes caching disabled by `DISABLE_PROMPT_CACHING*`, a response with no cached tokens, missing usage, unknown TTL, and an expired entry. It does not name the prompt change behind a miss or claim authoritative upstream billing.
+
+#### Colours and accessibility
+
+Every colour is text or a mark on the terminal's own background; nothing is drawn as text on a coloured fill, whose contrast a plugin cannot control. Agent Router picks a dark or light palette from Claude Code's `theme` setting (`auto` follows `COLORFGBG` where the terminal sets it, otherwise dark), and checks every value in its tests:
+
+| Colour | Dark | Light |
+| --- | --- | --- |
+| Good | `#19affe` | `#0268d0` |
+| Fair | `#fadf27` | `#9d580c` |
+| Poor | `#fe626c` | `#7a0d3f` |
+| `warm` marker | `#12efc6` | `#0b8a6c` |
+| `compact` marker | `#8a74ff` | `#5d05a4` |
+
+- The grades colour text, and reach WCAG contrast of 4.5:1 on black, `#1e1e1e` and `#282c34`, or on white, `#f0f0f0` and `#fdf6e3`. The mode markers reach the 3:1 that non-text marks need.
+- Grades differ from each other, and markers from each other, by at least ΔE 15 (OKLab ×100) under normal vision and ΔE 8 under simulated protanopia, deuteranopia and tritanopia (Machado 2009). No marker comes within ΔE 15 of a grade.
+- Blue, yellow and red stay apart for every kind of colour vision, the reason good is blue rather than green. Shading repeats each grade, the dial repeats the time left, and words name each mode and miss.
 
 ### Cache upkeep
 
-The mode button next to the dial shows the current upkeep mode for the main conversation; click it, or focus it and press Enter, to switch to the next mode: `off` → `warm` → `compact` → `off`. Each mode has its own background colour (grey for `off`, teal for `warm`, purple for `compact`, as the active theme draws them), chosen to stay distinct from the green, yellow, and red of the hit rate and time left. The choice lasts for the session, including after a reload or `/clear`; a new session starts with **off**.
+The mode button next to the dial shows the current upkeep mode for the main conversation; click it, or focus it and press Enter, to switch to the next mode: `off` → `warm` → `compact` → `warmcomp` → `off`. A marker before the mode shows its colour: teal `⬥` for `warm`, violet `⬥` for `compact`, both for `warmcomp`, and a dim `⬦` for `off`, which sends nothing. The choice lasts for the session, including after a reload or `/clear`; a new session starts with **off**.
 
 | Mode | What happens 30 seconds before the main conversation's TTL ends |
 | --- | --- |
 | `off` (default) | Nothing. No requests are sent. |
 | `warm` | A keepalive request: one tool-less request over the conversation as last sent, asking for `OK`. Its prompt-cache read refreshes the entry. |
 | `compact` | The conversation is compacted, as `/compact` does, while its cache is still warm, if its context is 100k tokens or larger. |
+| `warmcomp` | Keepalives as in `warm`. When the next keepalive would no longer pay for itself, the conversation is compacted as in `compact` instead; a conversation under 100k tokens is left to expire. |
 
-Upkeep acts only while no main-conversation request is in flight, and at most once per countdown. Subagents and split-pane teammates are left alone. Upkeep needs a reported TTL, so it does nothing while the TTL is unknown.
+Upkeep acts only while no main-conversation request is in flight, and at most once per countdown. After a compaction there is no countdown until your next request, so each mode compacts at most once per idle stretch. Subagents and split-pane teammates are left alone. Upkeep needs a reported TTL, so it does nothing while the TTL is unknown.
 
-Keepalives are billed: each reads the cached context at the cache-read rate and adds a few uncached and output tokens. Warming pauses once the keepalives since the last request, plus one more, would cost more than letting the entry expire and writing the cached context again at the reported TTL's write price. Each keepalive's measured tokens are priced at list multiples of the model's base input price: cache reads 0.1× (0.05× for Claude Opus 5.5, 0.025× for Claude Fable 5.1 and Claude Mythos 5.1), writes 1.25× for 5 minutes and 2× for 1 hour, output 5×. At standard prices that is about 11 keepalives on a 5-minute TTL, roughly 55 minutes of idle time. A gateway's own pricing may differ. A real request resets the count. Keepalives only pay off if you return to the conversation; if you don't, they are spent for nothing. Keepalives appear in the dashboard's request history and totals, but the bar keeps the hit rate of the last real request. Compaction runs only between turns; if it is refused, the debug log says why.
+Keepalives are billed: each reads the cached context at the cache-read rate and adds a few uncached and output tokens. Warming pauses once the keepalives since the last request, plus one more, would cost more than letting the entry expire and writing the cached context again. Each keepalive's measured tokens are priced as multiples of the model's input price, taken from [models.dev](https://models.dev): the cache-read, cache-write, and output prices (see **Model prices** below). With Claude Opus 5.5's listed prices that is about 23 keepalives on a 5-minute TTL, roughly an hour and 50 minutes of idle time; with the more common 0.1× cache reads, about 11, roughly 55 minutes. That point is when `warmcomp` compacts: until then each keepalive costs less than the rewrite it prevents, and past it only a shorter conversation makes your return cheaper. Your gateway's own pricing may differ from the public listing. A real request resets the count. Keepalives only pay off if you return to the conversation; if you don't, they are spent for nothing. Keepalives appear in the dashboard's request history and totals, but the bar keeps the hit rate of the last real request. A keepalive sent after a compaction would replay the summary without a cache breakpoint on it, so no mode warms a compacted conversation. Compaction runs only between turns; if it is refused, the debug log says why.
+
+#### Model prices
+
+Keepalive costs come from the public [models.dev](https://models.dev) catalog, not from prices built into Agent Router. In `warm` and `warmcomp`, the panel looks up the main conversation's model once an hour.
+
+- **One download for every window.** The catalog is stored as a small price file in the plugin's data directory and refreshed once a day, with its `ETag`, so an unchanged catalog costs a short `304` response. When several Claude Code windows refresh at once, one fetches while the rest keep using the stored file. A refresh lease left by a window that exits expires after two minutes, and a failed refresh is retried an hour later while the old prices stay in use. With `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` set, Agent Router never downloads the catalog and only uses a file that already exists.
+- **Matching a model name.** Names are reduced to their family words and version numbers, ignoring case, provider and region prefixes (`anthropic/`, `us.anthropic.`), `[1m]`, `@default`, `-v1:0` and the word `claude`. So `claude-opus-5-5[1m]`, `us.anthropic.claude-opus-5-5-v1:0`, `claude-opus-5-5@default` and `anthropic/claude-opus-5.5` all match Claude Opus 5.5. A name matches only when every word and number agrees, so `claude-opus-5-6` never borrows Opus 5.5's prices, and a variant such as `-fast` matches only its own listing. A dated snapshot uses its own listing when there is one.
+- **Which listing.** When the model's maker lists it, that listing is used; otherwise the listings from resellers and clouds must agree, at least two thirds of them within 3% on the cache-read multiple, or the model counts as unpriced. Prices are used as multiples of the listing's own input price, so regional and reseller markups cancel out.
+- **Unpriced models.** A name without both a family word and a version, such as a gateway's own alias, is never matched. Its row in the dashboard says **no models.dev price**, and no keepalives are sent for it; `warmcomp` goes straight to compacting. The dashboard names the listing a priced model matched.
+
+Checked against the current catalog (8,389 listings across 226 providers): 128 spellings of the 16 first-party Claude models all matched their own prices; 51 unreleased versions and variants of them matched nothing; all 13 Claude models a gateway advertised matched, and none of its 6 custom aliases did. Across the whole catalog, removing a listing and matching its name against the rest found the same model in 93% of the matches where both listings name one. Each of the other 7% matched a listing whose name reads the same but which models.dev files under a different canonical model (for example, `deepseek/deepseek-v4-flash` is filed under `deepseek-v4.1-flash`); a name alone cannot tell those apart, and none of them is a Claude model.
 
 The [prompt-cache-control reference mod](https://github.com/davila7/claude-code-templates/tree/main/cli-tool/components/mods/observability/prompt-cache-control), installed with `npx claude-code-templates@latest --mod observability/prompt-cache-control`, monitors the main conversation. Agent Router implements its own per-agent dashboard; that mod is not required. The `/agent-cache` command remains distinct from its `/cache` command.
 

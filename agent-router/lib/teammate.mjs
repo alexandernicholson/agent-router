@@ -27,8 +27,6 @@ export function parseTeammateArgs(argv) {
 export function readTeammateIdentity(pid = process.ppid, run = execFileSync) {
   for (let depth = 0; depth < 4 && pid > 1; depth++) {
     let line;
-    // The ancestry probe is optional. Explicitly pipe stderr so execFileSync
-    // does not forward a failed `ps` probe into the bridge's diagnostics.
     try { line = run('ps', ['-o', 'ppid=,args=', '-p', String(pid)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(); }
     catch { return null; }
     const match = line.match(/^(\d+)\s+(.*)$/s);

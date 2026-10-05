@@ -4,6 +4,7 @@ import { teamMember } from './teammate.mjs';
 import { fetchModels, normalizeBaseUrl } from './connection.mjs';
 import { normalizeCatalog } from './catalog.js';
 import { recordCacheSample, enrichCacheSamples, resetCache, cacheSnapshot } from './cache-state.mjs';
+import { modelPrices } from './model-prices.mjs';
 import { stateDirectory, recordPath, readRecord, writeRecord, agentAssignments, sessionStats, idKey, linkTeammate, USAGE_KEYS } from './state.mjs';
 
 
@@ -201,9 +202,16 @@ async function observe(input, env) {
   return {};
 }
 
-export async function handleRequest(input, env = process.env, discover = fetchModels, timing = { confirmMs: 5000, stepMs: 250 }) {
+export async function handleRequest(input, env = process.env, discover = fetchModels, timing = { confirmMs: 5000, stepMs: 250 }, pricesFetch = fetch) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Expected a bridge JSON object.');
-  if (!['bootstrap', 'catalog', 'route', 'result', 'observe', 'stats', 'apply', 'cache-sample', 'cache-snapshot', 'cache-reset', 'cache-enrich'].includes(input.action)) throw new Error('Unknown Agent Router bridge action.');
+  if (!['bootstrap', 'catalog', 'route', 'result', 'observe', 'stats', 'apply', 'cache-sample', 'cache-snapshot', 'cache-reset', 'cache-enrich', 'cache-prices'].includes(input.action)) throw new Error('Unknown Agent Router bridge action.');
+  if (input.action === 'cache-prices') {
+    const { models } = input;
+    if (!Array.isArray(models) || models.length > 16 || models.some(model => typeof model !== 'string' || !model || model.length > 200)) {
+      throw new Error('cache-prices takes up to 16 model names in models.');
+    }
+    return modelPrices(stateDirectory(env), models, env, pricesFetch);
+  }
   if (input.action === 'catalog') return catalog(env, discover);
   if (input.action === 'stats') return sessionStats(stateDirectory(env), input.session_id);
   if (input.action === 'cache-snapshot') return cacheSnapshot(stateDirectory(env), input.session_id);

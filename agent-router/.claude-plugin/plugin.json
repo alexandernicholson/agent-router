@@ -1,6 +1,6 @@
 {
   "name": "agent-router",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "license": "MIT",
   "description": "Choose subagent models with /agent-models and inspect activity, routing, and per-agent prompt cache bars with /agent-cache. Requires Claude Code Mod function hooks enabled.",
   "author": {

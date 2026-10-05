@@ -3,10 +3,9 @@ import { validSample, validCreation, loopKey, applyCacheCreation } from './cache
 import { transcriptTail, transcriptCreation } from './cache-transcript.mjs';
 
 export async function recordCacheSample(root, sessionId, input, transcriptPath) {
-  // Whitelist fields: never persist an answer, prompt, credentials or arbitrary payload.
   let sample = Object.fromEntries(['agentId', 'turnId', 'index', 'model', 'startedAt', 'read', 'write', 'fresh', 'output', 'ttlMs', 'ttlSource', 'disabled'].map(k => [k, input?.[k]]));
   sample.sessionId = sessionId;
-  if (input?.completedAt !== undefined) sample.completedAt = input.completedAt;
+  for (const key of ['completedAt', 'tokensBefore', 'tokensAfter']) if (input?.[key] !== undefined) sample[key] = input[key];
   if (validCreation(input?.cacheCreation, sample.write)) sample = applyCacheCreation(sample, input.cacheCreation);
   if (!validSample(sample)) throw new Error('Invalid cache sample.');
   if (!sample.cacheCreation) sample = { ...sample, ttlMs: null, ttlSource: 'response TTL metadata absent' };
@@ -26,8 +25,6 @@ export async function recordCacheSample(root, sessionId, input, transcriptPath) 
   return { sample: saved };
 }
 
-// Transcripts can flush after turn.step returns. Stop/PostToolUse provide a
-// second opportunity to enrich the same immutable request identities.
 export async function enrichCacheSamples(root, sessionId, agentId, transcriptPath) {
   idKey(sessionId);
   if (agentId !== null) idKey(agentId);
@@ -66,7 +63,6 @@ export async function cacheSnapshot(root, sessionId) {
   for (const { id, agents } of data) {
     for (const agent of agents) labels.set(loopKey(id, agent.agentId), `${agent.name || agent.role} (${agent.agentId})`);
   }
-  // Split-pane main loops use their own session identity. Join only by the confirmed link.
   const leadAgents = data[0].agents;
   for (const id of sessions.slice(1)) {
     const records = await listRecords(root, 'sessions', id);

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { cachePolicy, cacheRows, cacheStatus, cacheBar, cacheClock, loopKey, applyCacheCreation, cacheGrade, cachePercent, lifeGrade, isKeepalive, keepaliveWorthwhile, cachePrices, cacheDial } from '../lib/cache.js';
+import { cachePolicy, cacheRows, cacheStatus, cacheBar, cacheClock, loopKey, applyCacheCreation, cacheGrade, cachePercent, lifeGrade, isKeepalive, keepaliveWorthwhile, cacheDial, cacheBarParts, isCompaction } from '../lib/cache.js';
 import { recordCacheSample, resetCache, cacheSnapshot } from '../lib/cache-state.mjs';
 import { recordPath, writeRecord, linkTeammate } from '../lib/state.mjs';
 import { handleRequest } from '../lib/bridge.mjs';
@@ -21,7 +21,6 @@ test('missing response metadata stays unknown and local flags only indicate disa
   assert.equal(cachePolicy({ ENABLE_PROMPT_CACHING_1H: '1', FORCE_PROMPT_CACHING_5M: 'true',
     CLAUDE_CODE_PROMPT_CACHE_TTL: '1h', CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: '1h' }, 'claude-opus-5').ttlMs, null);
   assert.equal(cachePolicy({ DISABLE_PROMPT_CACHING_OPUS: '1' }, 'claude-opus-5').disabled, true);
-  // Persisted estimates from an older version cannot produce a warm/expiry bar.
   assert.equal(cacheStatus(cacheRows([sample()])[0], 1000).state, 'TTL unknown');
   assert.equal(cacheStatus(cacheRows([sample()])[0], 9999999).leftMs, null);
   const old = cacheRows([sample()])[0].last;
@@ -137,7 +136,6 @@ test('hit-rate grades tighten with context size so uncached tokens stay within b
   assert.equal(at(0.50, 100000), 'poor');
   assert.equal(cacheGrade(sample({ read: 0, write: 0, fresh: 0 })), null);
   assert.equal(cacheGrade(undefined), null);
-  // A rate shown as 100% must be a whole hit.
   assert.equal(cachePercent(sample({ read: 996, write: 4, fresh: 0 })), 99);
   assert.equal(cachePercent(sample({ read: 0, write: 0, fresh: 0 })), null);
 });
@@ -160,7 +158,6 @@ test('each request refreshes its loop cache and keeps the TTL its latest breakdo
   assert.deepEqual(status.lifetimes.map(l => l.ttl), ['5m']);
   assert.equal(status.leftMs, 200000);
   assert.equal(status.ratio, 0.9);
-  // A request in flight has refreshed or rewritten the entry at its dispatch.
   assert.equal(cacheStatus(row, 450000, 400000).leftMs, 250000);
   assert.equal(cacheStatus(row, 500000).state, 'expired');
   assert.equal(cacheStatus(row, 500000).leftMs, 0);
@@ -178,31 +175,26 @@ test('keepalives refresh the lifetime without replacing the last request hit rat
   assert.equal(cacheStatus(row, 301000).leftMs, 270000);
   assert.equal(cacheStatus(row, 301000).ratio, 0.8);
   assert.equal(cacheRows([written, keepalive, sample({ index: 1, startedAt: 400000, read: 1000, write: 0 })])[0].keepalives.length, 0);
-  // A keepalive the cache served nothing to refreshed nothing.
   assert.equal(cacheStatus(cacheRows([written, { ...keepalive, read: 0 }])[0], 301000).state, 'expired');
 });
 
 test('warming continues while measured keepalive cost stays below the rewrite it prevents', () => {
-  assert.deepEqual(cachePrices('vendor/model'), { read: 0.1, fiveMinute: 1.25, oneHour: 2, output: 5 });
-  assert.equal(cachePrices('claude-opus-5-5[1m]').read, 0.05);
-  assert.equal(cachePrices('claude-fable-5-1').read, 0.025);
-  // A 10k prefix; each keepalive reads it and adds 10 new and 2 output tokens.
-  const allowed = (model, ttlMs) => {
-    const samples = [applyCacheCreation(sample({ model, read: 9000, write: 1000, fresh: 0 }), ttlMs === 3600000 ? { fiveMinute: 0, oneHour: 1000 } : { fiveMinute: 1000, oneHour: 0 })];
+  const standard = { read: 0.1, fiveMinute: 1.25, output: 5 };
+  const allowed = prices => {
+    const samples = [applyCacheCreation(sample({ read: 9000, write: 1000, fresh: 0 }), { fiveMinute: 1000, oneHour: 0 })];
     for (let i = 1; i < 100; i++) {
-      const row = cacheRows(samples)[0];
-      if (!keepaliveWorthwhile(row, ttlMs)) return i - 1;
-      samples.push(sample({ model, turnId: `keepalive:${i}`, startedAt: 1000 + i, read: 10000, write: 0, fresh: 10, output: 2 }));
+      if (!keepaliveWorthwhile(cacheRows(samples)[0], prices)) return i - 1;
+      samples.push(sample({ turnId: `keepalive:${i}`, startedAt: 1000 + i, read: 10000, write: 0, fresh: 10, output: 2 }));
     }
     return Infinity;
   };
-  // (1.25 - 0.1) * 10000 / (0.1 * 10000 + 10 + 2 * 5)
-  assert.equal(allowed('vendor/model', 300000), 11);
-  assert.equal(allowed('vendor/model', 3600000), 18);
-  // Cheaper reads justify more keepalives: (1.25 - 0.05) * 10000 / 520.
-  assert.equal(allowed('claude-opus-5-5', 300000), 23);
-  assert.equal(keepaliveWorthwhile(cacheRows([sample({ read: 0, write: 0 })])[0], 300000), false);
-  assert.equal(keepaliveWorthwhile(undefined, 300000), false);
+  assert.equal(allowed(standard), 11);
+  assert.equal(allowed({ ...standard, read: 0.05 }), 23);
+  assert.equal(allowed({ read: 0.1, output: 4 }), 8);
+  assert.equal(allowed(null), 0);
+  assert.equal(allowed(undefined), 0);
+  assert.equal(keepaliveWorthwhile(cacheRows([sample({ read: 0, write: 0 })])[0], standard), false);
+  assert.equal(keepaliveWorthwhile(undefined, standard), false);
 });
 
 test('the dial shows the time left in quarters of the TTL, dotted while unknown', () => {
@@ -215,11 +207,70 @@ test('the dial shows the time left in quarters of the TTL, dotted while unknown'
   assert.equal(dial(225000), '◔');
   assert.equal(dial(299000), '◔');
   assert.equal(dial(300000), '○');
-  // Mixed writes follow the sooner lifetime still running.
   const mixed = applyCacheCreation(sample({ startedAt: 0 }), { fiveMinute: 40, oneHour: 60 });
   assert.equal(cacheDial(cacheStatus(cacheRows([mixed])[0], 2000000)), '◑');
   for (const unknown of [sample(), sample({ read: 0, write: 0 }), sample({ disabled: true })]) {
     assert.equal(cacheDial(cacheStatus(cacheRows([unknown])[0], 1000)), '◌');
   }
   assert.equal(cacheDial(cacheStatus(undefined, 1000)), '◌');
+});
+
+test("a compaction shows its own request and sizes until the loop's next request", () => {
+  const before = applyCacheCreation(sample({ startedAt: 1000, read: 300000, write: 5000 }), { fiveMinute: 5000, oneHour: 0 });
+  const compaction = sample({ turnId: 'compaction:2000', startedAt: 2000, read: 305000, write: 0, fresh: 10, output: 9000,
+    tokensBefore: 305010, tokensAfter: 18000 });
+  assert.equal(isCompaction(compaction), true);
+  const resets = [{ sessionId: 'lead', agentId: null, resetAt: 2000 }];
+  const row = cacheRows([before, compaction], resets)[0];
+  assert.equal(row.last, undefined);
+  assert.equal(row.totals.requests, 2);
+  const status = cacheStatus(row, 3000);
+  assert.equal(status.state, 'compacted');
+  assert.equal(status.sample.turnId, 'compaction:2000');
+  assert.equal(status.ratio > 0.99, true);
+  assert.deepEqual(status.compacted, { before: 305010, after: 18000 });
+  assert.equal(status.leftMs, null);
+  const after = sample({ turnId: 'next', startedAt: 9000, read: 48000, write: 20000, fresh: 2 });
+  const next = cacheRows([before, compaction, after], resets)[0];
+  assert.equal(cacheStatus(next, 9500).state, 'TTL unknown');
+  assert.equal(next.last.miss, undefined);
+  const bare = sample({ turnId: 'compaction:2000', startedAt: 2000, read: 0, write: 0, fresh: 0, output: 0 });
+  const quiet = cacheRows([before, bare], resets)[0];
+  assert.equal(quiet.totals.requests, 1);
+  assert.equal(cacheStatus(quiet, 3000).state, 'compacted');
+  assert.equal(cacheStatus(quiet, 3000).ratio, null);
+});
+
+test('a request that rewrites a cache its predecessor made is labelled with the likely cause', () => {
+  const warm = applyCacheCreation(sample({ startedAt: 0, read: 340000, write: 3000 }), { fiveMinute: 3000, oneHour: 0 });
+  const label = (next, extra = []) => cacheRows([warm, ...extra, sample({ turnId: 'next', ...next })])[0].last.miss;
+  assert.equal(label({ startedAt: 26000, read: 48648, write: 337074 }), 'prefix changed');
+  assert.equal(label({ startedAt: 301000, read: 0, write: 345000 }), 'expired');
+  const keepalive = sample({ turnId: 'keepalive:270000', startedAt: 270000, read: 343000, write: 0, fresh: 10 });
+  assert.equal(label({ startedAt: 400000, read: 48648, write: 300000 }, [keepalive]), 'prefix changed');
+  assert.equal(label({ startedAt: 26000, read: 0, write: 345000, model: 'vendor/other' }), 'model changed');
+  assert.equal(label({ startedAt: 26000, read: 48648, write: 337074 }, []), 'prefix changed');
+  assert.equal(label({ startedAt: 26000, read: 343000, write: 2000 }), undefined);
+  assert.equal(label({ startedAt: 26000, read: 341500, write: 3500 }), undefined);
+  const unknown = sample({ startedAt: 0, read: 340000, write: 3000 });
+  assert.equal(cacheRows([unknown, sample({ turnId: 'next', startedAt: 26000, read: 0, write: 343000 })])[0].last.miss, 'cache miss');
+  assert.equal(cacheRows([sample({ read: 0, write: 343000 })])[0].last.miss, undefined);
+});
+
+test("the bar's fill texture repeats its grade for readers who cannot tell the colours apart", () => {
+  assert.deepEqual(cacheBarParts(0.96, 10, 'good'), { fill: '██████████', empty: '' });
+  assert.deepEqual(cacheBarParts(0.5, 10, 'fair'), { fill: '▓▓▓▓▓', empty: '░░░░░' });
+  assert.deepEqual(cacheBarParts(0.14, 10, 'poor'), { fill: '▒', empty: '░░░░░░░░░' });
+  assert.deepEqual(cacheBarParts(null, 4), { fill: '', empty: '░░░░' });
+  assert.equal(cacheBar(0.5, 4), '██░░');
+});
+
+test('a compaction record keeps its sizes and nothing else', async t => {
+  const root = await fixture(t);
+  const compaction = sample({ turnId: 'compaction:2000', startedAt: 2000, tokensBefore: 305010, tokensAfter: 18000, summary: 'PRIVATE_SUMMARY' });
+  const { sample: saved } = await recordCacheSample(root, 'lead', compaction);
+  assert.equal(saved.tokensBefore, 305010);
+  assert.equal(saved.tokensAfter, 18000);
+  assert.equal(JSON.stringify(saved).includes('PRIVATE'), false);
+  await assert.rejects(recordCacheSample(root, 'lead', sample({ turnId: 'compaction:3000', tokensAfter: -1 })), /Invalid/);
 });

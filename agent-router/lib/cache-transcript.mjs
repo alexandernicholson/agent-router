@@ -2,8 +2,6 @@ import { open } from 'node:fs/promises';
 import { reportedCacheCreation } from './cache.js';
 import { sameModel } from './routing.js';
 
-// Transcript paths come from classic hooks. Read only a bounded tail, and
-// return usage metadata only; no transcript text crosses the bridge or enters records.
 export async function transcriptTail(path) {
   if (typeof path !== 'string' || !path.endsWith('.jsonl')) return '';
   let file;
@@ -37,8 +35,6 @@ export function transcriptCreation(text, sample) {
     if (!creation) continue;
     const key = row.message.id;
     const prior = matches.get(key);
-    // One API response may have several transcript blocks. Conflicting copies
-    // or two matching API responses are ambiguous, so leave the TTL unknown.
     if (prior && JSON.stringify(prior) !== JSON.stringify(creation)) return undefined;
     matches.set(key, creation);
   }

@@ -3,8 +3,10 @@ import type { Engine } from 'claude-code/testing';
 import type { AgentInfo, On, RenderInput, RenderNode, TurnStepInput } from 'claude-code';
 import { ROLES } from '../lib/routing.js';
 import { applyCacheCreation } from '../lib/cache.js';
+import { CACHE_COLORS } from '../lib/cache-colors.js';
 
 tier('user');
+const DARK = CACHE_COLORS.dark;
 
 const pane: RenderInput<'Pane', 'terminal'> = { component: 'Pane', surface: 'terminal', requestId: 'agent-cache',
   props: { title: 'Agent cache', isFocused: true, bodyColumns: 110, placement: 'dock', scroll: { offset: 0, bodyRows: 24 }, view: {} } };
@@ -26,9 +28,12 @@ async function setup($: Engine, on: On, endpoint = 'https://gateway.example') {
   const world = { samples: [] as Record<string, any>[], resets: [] as Record<string, any>[], calls: [] as Record<string, any>[],
     roster: [] as AgentInfo[], sessionId: 'cache-session', failSave: false, failRead: false, logs: [] as string[],
     reported: undefined as { fiveMinute: number; oneHour: number } | undefined,
-    // TTL buckets the transcript holds once Claude flushes it; undefined until then.
     flushed: undefined as { fiveMinute: number; oneHour: number } | undefined,
-    forks: [] as string[], compactions: [] as string[] };
+    forks: [] as string[], compactions: [] as string[], theme: 'dark',
+    forkUsage: { input_tokens: 10, output_tokens: 2, cache_read_input_tokens: 900, cache_creation_input_tokens: 0 },
+    compaction: {} as Record<string, unknown>,
+    prices: { 'vendor/main': { read: 0.1, fiveMinute: 1.25, output: 5, provider: 'example', id: 'main-1' } } as Record<string, unknown>,
+    priceLookups: [] as string[][], pricesFail: false };
   const policy = { version: 1, roles: Object.fromEntries(ROLES.map(role => [role, { model: `vendor/${role}`, aliases: [role] }])) };
   on('session.id', () => ({ value: world.sessionId }));
   on('session.start', ($, e) => ({ cwd: e.cwd }));
@@ -44,12 +49,13 @@ async function setup($: Engine, on: On, endpoint = 'https://gateway.example') {
   on('classic.Stop', () => ({}));
   on('model.fork', ($, e) => {
     world.forks.push(e.prompt);
-    return { value: { isAnswered: true as const, text: 'OK', usage: { input_tokens: 10, output_tokens: 2, cache_read_input_tokens: 900, cache_creation_input_tokens: 0 } } };
+    return { value: { isAnswered: true as const, text: 'OK', usage: world.forkUsage } };
   });
   on('session.compact', ($, e) => {
     world.compactions.push('instructions' in e && e.instructions ? e.instructions : 'default');
-    return { messages: [{ role: 'assistant' as const, text: 'Summary', toolUses: [] }] };
+    return { messages: [{ role: 'assistant' as const, text: 'Summary', toolUses: [] }], ...world.compaction };
   });
+  on('config.list', () => ({ value: [{ key: 'theme', label: 'Theme', kind: 'enum', value: world.theme, provider: { plugin: 'engine', tier: 'core' }, isLocked: false }] as any }));
   on('agent.spawn', ($, e) => ({ model: e.model!, agentId: 'child' }));
   on('ui.render', { component: 'AbovePrompt' }, ($, e) => $.ui.resolve(e).Text({ children: ['Existing prompt content'] }));
   on('process.run', ($, e) => {
@@ -67,6 +73,12 @@ async function setup($: Engine, on: On, endpoint = 'https://gateway.example') {
         enriched.push(world.samples[i]);
       }
       return { value: { exitCode: 0, stderr: '', stdout: JSON.stringify({ samples: enriched }) } };
+    }
+    if (request.action === 'cache-prices') {
+      world.priceLookups.push(request.models);
+      if (world.pricesFail) return { value: { exitCode: 1, stderr: 'offline', stdout: '' } };
+      const prices = Object.fromEntries(request.models.map((model: string) => [model, world.prices[model] ?? null]));
+      return { value: { exitCode: 0, stderr: '', stdout: JSON.stringify({ catalog: 'fresh', prices }) } };
     }
     if (request.action === 'cache-reset') world.resets.push({ sessionId: request.session_id, agentId: request.agent_id ?? null, resetAt: request.reset_at });
     if (request.action === 'cache-snapshot' && world.failRead) return { value: { exitCode: 1, stderr: 'storage failed', stdout: '' } };
@@ -137,7 +149,7 @@ test('native countdown expires from dispatch and compaction clears only the affe
   expect(text(await $.ui.render(band())).includes('expired')).toBe(true);
   await $.session.compact({ trigger: 'manual', messages: [{ role: 'assistant', text: 'Summary', toolUses: [] }], instructions: 'Keep essentials' });
   expect(world.resets.length).toBe(1);
-  expect(text(await $.ui.render(band())).includes('no observation')).toBe(true);
+  expect(text(await $.ui.render(band())).includes('cmpt ✓')).toBe(true);
   expect(text(await $.ui.render(band('unmanaged'))).includes('expired')).toBe(true);
   const contents = await dashboard($);
   expect(contents.includes('read 800')).toBe(true);
@@ -225,7 +237,6 @@ test('a final response flushed to the transcript after Stop still gets its repor
   const { world, clock } = await setup($, on);
   await $.classic.SessionStart({ source: 'startup', session_id: world.sessionId, transcript_path: transcript });
   await step($);
-  // Stop runs before Claude writes the final response to the transcript.
   await $.classic.Stop({ stop_hook_active: false, session_id: world.sessionId, transcript_path: transcript });
   expect(text(await $.ui.render(band())).includes('TTL unknown')).toBe(true);
   world.flushed = { fiveMinute: 100, oneHour: 0 };
@@ -296,22 +307,23 @@ function colors(node: RenderNode, found: [string, string][] = []): [string, stri
 }
 const colorOf = (node: RenderNode, pattern: RegExp) => colors(node).find(([value]) => pattern.test(value))?.[1];
 const upkeep = ($: Engine) => $.ui.press({ plugin: 'agent-router', key: 'agent-cache-upkeep', requestId: 'cache-band' });
-// The upkeep button and the background of the chip that holds it.
-function chip(node: RenderNode, parent?: RenderNode): { label?: string; color?: string } | undefined {
-  if (typeof node === 'string') return undefined;
-  if (node.type === 'Button' && node.props.key === 'agent-cache-upkeep') {
-    const props = parent && typeof parent !== 'string' && 'props' in parent ? parent.props as { backgroundColor?: string } | undefined : undefined;
-    return { label: node.props.label, color: props?.backgroundColor };
-  }
-  if ('children' in node && Array.isArray(node.children)) for (const child of node.children) {
-    const found = chip(child, node);
-    if (found) return found;
-  }
-  return undefined;
+function markers(node: RenderNode, found: { glyph: string; color?: string; dim?: boolean }[] = []) {
+  if (typeof node === 'string' || !('props' in node)) return found;
+  const props = node.props as { color?: string; dimColor?: boolean };
+  if (node.type === 'Text' && /^[⬥⬦]$/.test(text(node))) found.push({ glyph: text(node), color: props.color, dim: props.dimColor });
+  if ('children' in node && Array.isArray(node.children)) for (const child of node.children) markers(child, found);
+  return found;
 }
-const mode = async ($: Engine) => chip(await $.ui.render(band()))?.label;
+function backgrounds(node: RenderNode, found: string[] = []): string[] {
+  if (typeof node === 'string' || !('props' in node)) return found;
+  const background = (node.props as { backgroundColor?: string } | undefined)?.backgroundColor;
+  if (background) found.push(background);
+  if ('children' in node && Array.isArray(node.children)) for (const child of node.children) backgrounds(child, found);
+  return found;
+}
+const mode = async ($: Engine) => button(await $.ui.render(band()), 'agent-cache-upkeep')?.label;
 async function cycleTo($: Engine, wanted: string) {
-  for (let i = 0; i < 3 && await mode($) !== wanted; i++) await upkeep($);
+  for (let i = 0; i < 4 && await mode($) !== wanted; i++) await upkeep($);
   expect(await mode($)).toBe(wanted);
 }
 
@@ -323,17 +335,17 @@ test('the band shows the hit rate, reported TTL and time left in its colours', a
   let rendered = await $.ui.render(band());
   for (const part of ['96%', 'TTL 5m', 'ETA ~5:00', 'read 144k', 'write 5k', 'new 1k']) expect(text(rendered).includes(part)).toBe(true);
   expect(text(rendered).includes('estimated')).toBe(false);
-  expect(colorOf(rendered, /█/)).toBe('success');
-  expect(colorOf(rendered, /96%/)).toBe('success');
-  expect(colorOf(rendered, /ETA/)).toBe('success');
+  expect(colorOf(rendered, /█/)).toBe(DARK.good);
+  expect(colorOf(rendered, /96%/)).toBe(DARK.good);
+  expect(colorOf(rendered, /ETA/)).toBe(DARK.good);
   await clock.advance(180000);
-  expect(colorOf(await $.ui.render(band()), /ETA/)).toBe('warning');
+  expect(colorOf(await $.ui.render(band()), /ETA/)).toBe(DARK.fair);
   await clock.advance(91000);
-  expect(colorOf(await $.ui.render(band()), /ETA/)).toBe('error');
+  expect(colorOf(await $.ui.render(band()), /ETA/)).toBe(DARK.poor);
   await clock.advance(30000);
   rendered = await $.ui.render(band());
   expect(text(rendered).includes('ETA')).toBe(false);
-  expect(colorOf(rendered, /expired/)).toBe('error');
+  expect(colorOf(rendered, /expired/)).toBe(DARK.poor);
 });
 
 test('a hit rate that is fine on a small context is graded poor on a large one', async ($, on) => {
@@ -342,14 +354,14 @@ test('a hit rate that is fine on a small context is graded poor on a large one',
   await step($);
   const rendered = await $.ui.render(band());
   expect(text(rendered).includes('90%')).toBe(true);
-  expect(colorOf(rendered, /90%/)).toBe('error');
+  expect(colorOf(rendered, /90%/)).toBe(DARK.poor);
 });
 
 test('a small context with the same hit rate is graded good', async ($, on) => {
   response(on, 9000, 900, 100);
   await setup($, on);
   await step($);
-  expect(colorOf(await $.ui.render(band()), /90%/)).toBe('success');
+  expect(colorOf(await $.ui.render(band()), /90%/)).toBe(DARK.good);
 });
 
 test('a read-only request keeps the reported TTL and a request in flight restarts the countdown', async ($, on) => {
@@ -372,11 +384,11 @@ test('a read-only request keeps the reported TTL and a request in flight restart
   expect((await inFlight($, 'vendor/main', 2)).includes('ETA ~5:00')).toBe(true);
 });
 
-test('the upkeep button cycles off, warm and compact and keeps the choice for the session', async ($, on) => {
+test('the upkeep button cycles off, warm, compact and warmcomp and keeps the choice for the session', async ($, on) => {
   response(on);
   const { world } = await setup($, on);
   expect(await mode($)).toBe('off');
-  for (const next of ['warm', 'compact', 'off', 'warm']) {
+  for (const next of ['warm', 'compact', 'warmcomp', 'off', 'warm']) {
     await upkeep($);
     expect(await mode($)).toBe(next);
   }
@@ -406,30 +418,73 @@ test('the band opens with a bordered dial and the bare upkeep mode', async ($, o
   const shown = text(rendered);
   expect(shown.includes('Cache')).toBe(false);
   expect(shown.includes('ttl')).toBe(false);
-  // Without a reported TTL the dial is dotted.
-  expect(shown.includes('◌ off ████████░░ 80%')).toBe(true);
+  expect(/◌ ⬦ off █{8} ░{2}\s+80%/.test(shown)).toBe(true);
   expect(button(rendered, 'agent-cache-open')?.plain).toBe(undefined);
   await $.ui.press({ plugin: 'agent-router', key: 'agent-cache-open', requestId: 'cache-band' });
   expect(text(await $.ui.render(pane)).includes('Prompt cache')).toBe(true);
 });
 
-test('each upkeep mode has its own colour, none used elsewhere in the band', async ($, on) => {
+test('each upkeep mode has its own marker colour, none used elsewhere in the band', async ($, on) => {
   response(on, 144000, 5000, 1000);
   const { world, clock } = await setup($, on);
   world.reported = { fiveMinute: 5000, oneHour: 0 };
   await step($);
-  const chips = new Set<string | undefined>();
-  const others = new Set(['success', 'warning', 'error']);
-  for (let i = 0; i < 3; i++) {
+  const seen: Record<string, { glyph: string; color?: string; dim?: boolean }[]> = {};
+  const others = new Set<string>();
+  for (let i = 0; i < 4; i++) {
     const rendered = await $.ui.render(band());
-    chips.add(chip(rendered)?.color);
-    for (const [, color] of colors(rendered)) others.add(color);
+    const marks = markers(rendered);
+    seen[(await mode($))!] = marks;
+    const own = new Set(marks.map(mark => mark.color));
+    for (const [, color] of colors(rendered)) if (!own.has(color)) others.add(color);
+    expect(backgrounds(rendered)).toEqual([]);
     await upkeep($);
     await clock.advance(100000);
   }
-  expect([...chips].every(color => typeof color === 'string')).toBe(true);
-  expect(chips.size).toBe(3);
-  expect([...chips].some(color => others.has(color!))).toBe(false);
+  expect(seen.off).toEqual([{ glyph: '⬦', color: undefined, dim: true }]);
+  expect(seen.warm.map(mark => mark.color)).toEqual([DARK.warm]);
+  expect(seen.compact.map(mark => mark.color)).toEqual([DARK.compact]);
+  expect(seen.warmcomp.map(mark => mark.color)).toEqual([DARK.warm, DARK.compact]);
+  expect(others.has(DARK.warm) || others.has(DARK.compact)).toBe(false);
+});
+
+test('a light theme draws every colour from the light palette', async ($, on) => {
+  response(on, 144000, 5000, 1000);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 5000, oneHour: 0 };
+  world.theme = 'light-daltonized';
+  await clock.advance(5000);
+  await step($);
+  await cycleTo($, 'warm');
+  const rendered = await $.ui.render(band());
+  expect(colorOf(rendered, /96%/)).toBe(CACHE_COLORS.light.good);
+  expect(colorOf(rendered, /ETA/)).toBe(CACHE_COLORS.light.good);
+  expect(markers(rendered).map(mark => mark.color)).toEqual([CACHE_COLORS.light.warm]);
+});
+
+test('a cache rewritten while it was still warm is labelled a prefix change', async ($, on) => {
+  const usage = { read: 300000, write: 5000, fresh: 2 };
+  on('turn.step', async function* ($, e) {
+    yield { kind: 'text' as const, index: 0, text: 'answer' };
+    return { turnId: e.turnId, index: e.index, answer: 'answer', toolUses: [], stopReason: 'end_turn' as const,
+      usage: { model: e.model, cache_read_input_tokens: usage.read, cache_creation_input_tokens: usage.write, input_tokens: usage.fresh, output_tokens: 20 } };
+  });
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 5000, oneHour: 0 };
+  await step($);
+  Object.assign(usage, { read: 48648, write: 257000 });
+  world.reported = { fiveMinute: 257000, oneHour: 0 };
+  await clock.advance(26000);
+  await step($, { index: 1 });
+  expect(text(await $.ui.render(band())).includes('prefix changed')).toBe(true);
+  Object.assign(usage, { read: 0, write: 306000 });
+  world.reported = { fiveMinute: 306000, oneHour: 0 };
+  await clock.advance(400000);
+  await step($, { index: 2 });
+  expect(text(await $.ui.render(band())).includes('expired ·')).toBe(false);
+  expect(/\d+%\s+·\s+expired/.test(text(await $.ui.render(band())))).toBe(true);
+  const contents = await dashboard($);
+  expect(contents.includes('prefix changed')).toBe(true);
 });
 
 test('nothing is the default upkeep and sends no request', async ($, on) => {
@@ -456,7 +511,6 @@ test('warm mode forks the main conversation shortly before its reported TTL ends
   expect(keepalive?.read).toBe(900);
   expect(keepalive?.agentId).toBe(null);
   const shown = text(await $.ui.render(band()));
-  // The bar keeps the last real request's rate; the keepalive restarted the countdown.
   expect(shown.includes('80%')).toBe(true);
   expect(shown.includes('ETA ~4:55')).toBe(true);
   expect((await dashboard($)).includes('keepalive')).toBe(true);
@@ -469,10 +523,7 @@ test('warming stops once more keepalives would cost more than rewriting the cach
   await cycleTo($, 'warm');
   await step($);
   for (let i = 0; i < 15; i++) await clock.advance(270000);
-  // A 900-token prefix: rewriting costs 1035 base tokens more than reading;
-  // each keepalive costs 90 read + 10 new + 2 output at 5x.
   expect(world.forks.length).toBe(9);
-  // A real request starts a new allowance.
   await step($, { index: 1 });
   await clock.advance(270000);
   expect(world.forks.length).toBe(10);
@@ -491,10 +542,28 @@ test('warm mode leaves a request in flight to refresh the cache itself', async (
   while (!(await stream.next()).done);
 });
 
-test('compact mode compacts a large idle conversation before its cache expires', async ($, on) => {
+test('compaction waits for a response to finish, then still runs before the cache expires', async ($, on) => {
   response(on, 120000, 1000, 100);
   const { world, clock } = await setup($, on);
   world.reported = { fiveMinute: 1000, oneHour: 0 };
+  await cycleTo($, 'compact');
+  await step($);
+  const stream = $.turn.step({ turnId: 'same-turn', index: 1, messageCount: 1, model: 'vendor/main' });
+  await stream.next();
+  await clock.advance(285000);
+  expect(world.compactions.length).toBe(0);
+  expect(world.forks.length).toBe(0);
+  while (!(await stream.next()).done);
+  await clock.advance(2000);
+  expect(world.compactions).toEqual(['default']);
+});
+
+test('compact mode compacts a large idle conversation once, then marks it compacted', async ($, on) => {
+  response(on, 120000, 1000, 100);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 1000, oneHour: 0 };
+  world.compaction = { tokensBefore: 121100, tokensAfter: 18000,
+    usage: { input_tokens: 10, output_tokens: 9000, cache_read_input_tokens: 121000, cache_creation_input_tokens: 0 } };
   await cycleTo($, 'compact');
   await step($);
   await clock.advance(260000);
@@ -502,9 +571,45 @@ test('compact mode compacts a large idle conversation before its cache expires',
   await clock.advance(15000);
   expect(world.compactions).toEqual(['default']);
   expect(world.forks.length).toBe(0);
-  expect(text(await $.ui.render(band())).includes('no observation')).toBe(true);
+  const shown = text(await $.ui.render(band()));
+  expect(shown.includes('cmpt ✓ 121.1k → 18k')).toBe(true);
+  expect(shown.includes('99%')).toBe(true);
+  expect(await dial($)).toBe('◌');
   await clock.advance(400000);
   expect(world.compactions.length).toBe(1);
+  expect((await dashboard($)).includes('compaction')).toBe(true);
+  await step($, { index: 1 });
+  expect(text(await $.ui.render(band())).includes('cmpt')).toBe(false);
+});
+
+test('warmcomp keeps the cache warm while that pays, then compacts before it expires', async ($, on) => {
+  response(on, 120000, 1000, 100);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 1000, oneHour: 0 };
+  world.forkUsage = { input_tokens: 10, output_tokens: 2, cache_read_input_tokens: 121000, cache_creation_input_tokens: 0 };
+  await cycleTo($, 'warmcomp');
+  await step($);
+  for (let i = 0; i < 11; i++) await clock.advance(270000);
+  expect(world.forks.length).toBe(11);
+  expect(world.compactions.length).toBe(0);
+  await clock.advance(270000);
+  expect(world.forks.length).toBe(11);
+  expect(world.compactions).toEqual(['default']);
+  expect(text(await $.ui.render(band())).includes('cmpt ✓')).toBe(true);
+  for (let i = 0; i < 4; i++) await clock.advance(270000);
+  expect(world.forks.length).toBe(11);
+  expect(world.compactions.length).toBe(1);
+});
+
+test('warmcomp lets a small conversation expire after warming', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 100, oneHour: 0 };
+  await cycleTo($, 'warmcomp');
+  await step($);
+  for (let i = 0; i < 15; i++) await clock.advance(270000);
+  expect(world.forks.length).toBe(9);
+  expect(world.compactions.length).toBe(0);
 });
 
 test('compact mode leaves a small conversation alone', async ($, on) => {
@@ -559,4 +664,49 @@ test('the band and dashboard dial follow each agent', async ($, on) => {
   const contents = await dashboard($);
   expect(/Main ◑\s+█/.test(contents)).toBe(true);
   expect(/\(child\) ◌\s+█/.test(contents)).toBe(true);
+});
+
+test('keepalives are priced from the models.dev listing matched to the model', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 100, oneHour: 0 };
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(2000);
+  expect(world.priceLookups).toEqual([['vendor/main']]);
+  expect((await dashboard($)).includes('prices from models.dev example/main-1')).toBe(true);
+  await step($, { index: 1 });
+  await clock.advance(2000);
+  expect(world.priceLookups.length).toBe(1);
+});
+
+test('a model models.dev does not list gets no keepalives, and warmcomp compacts instead', async ($, on) => {
+  response(on, 120000, 1000, 100);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 1000, oneHour: 0 };
+  world.prices = {};
+  await cycleTo($, 'warm');
+  await step($, { model: 'gateway/alias-code' });
+  await clock.advance(400000);
+  expect(world.forks.length).toBe(0);
+  expect(world.logs.some(log => log.includes('no models.dev price for gateway/alias-code'))).toBe(true);
+  expect((await dashboard($)).includes('no models.dev price')).toBe(true);
+  await cycleTo($, 'warmcomp');
+  await step($, { model: 'gateway/alias-code', index: 1 });
+  await clock.advance(280000);
+  expect(world.forks.length).toBe(0);
+  expect(world.compactions).toEqual(['default']);
+});
+
+test('upkeep waits for a price lookup rather than deciding without one', async ($, on) => {
+  response(on, 120000, 1000, 100);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 1000, oneHour: 0 };
+  await cycleTo($, 'warmcomp');
+  world.pricesFail = true;
+  await step($);
+  await clock.advance(280000);
+  expect(world.forks.length).toBe(0);
+  expect(world.compactions).toEqual(['default']);
+  expect(world.priceLookups.length > 1).toBe(true);
 });
