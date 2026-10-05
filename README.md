@@ -124,7 +124,7 @@ With `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, Claude launches a teammate when i
 
 `Plan` and unmapped agent types are refused as teammates. A named call that Claude Code runs as a subagent, such as one with `isolation` or `cwd`, keeps the subagent routing.
 
-The optional **Teammates** entry in `/agent-models` sets `teammate_model` and `teammate_effort`. When set, they replace the role's model and effort for every teammate. Leave them on the default to use each role's model and effort.
+The optional **Teammates** entry in `/agent-models` sets `teammate_model` and `teammate_effort`. When set, they replace the role's model and effort for every teammate. Leave them on the default to use each role's model and effort. The same entry sets `teammate_cache_upkeep`, the [cache upkeep](#cache-upkeep) mode that split-pane teammates start in; it defaults to `off`.
 
 Both display modes follow the lead session's pinned routing:
 
@@ -167,7 +167,26 @@ The cache bar beneath the developer panel follows the conversation in view: the 
 
 It shows the last request's cache hit rate, the TTL its cache writes reported, the time left before the entry expires, and the tokens read, written, and sent uncached.
 
-The dial button shows the time left in quarters of the TTL: `●` for a cache just read or written, then `◕`, `◑`, `◔`, and `○` once it has expired. It refills when a request is dispatched, and shows `◌` while there is no reported TTL to count down. Click the dial, or run `/agent-cache`, to open a dashboard with a dial and bar for the main conversation and every observed agent. Select an agent to inspect its last 30 requests, including each response's model, turn, step, and token counts.
+The dial button shows the time left in quarters of the TTL: `●` for a cache just read or written, then `◕`, `◑`, `◔`, and `○` once it has expired. It refills when a request is dispatched, and shows `◌` while there is no reported TTL to count down. Click the dial, or run `/agent-cache`, to open the dashboard.
+
+#### Dashboard
+
+The dashboard draws every conversation Agent Router has seen as a tree: the main conversation, its subagents and their own subagents, in-process teammates, and linked split-pane teammates with their subagents. Each row shows its dial, upkeep mode, bar, TTL and time left, with its kind beside teammates:
+
+```text
+Main                                            ◕ ⬥ warm  ██████████ 96% · TTL 5m · ETA ~3:44
+├─ agent-router:scout (a7f3)                    ● –       ██████████ 95% · TTL 5m · ETA ~4:08
+│  └─ agent-router:task (b912)                  ◑ –       ▓▓▓▓▓▓▓▓░░ 84% · TTL 5m · ETA ~2:10
+├─ probe (c044) · in-process teammate           ◕ –       ██████████ 99% · TTL 5m · ETA ~3:51
+└─ Worker (worker@team) · split-pane teammate   ◑ ⬥ warm  ██████████ 97% · TTL 5m · ETA ~2:30
+   └─ agent-router:reviewer (d1e2)              ○ –       ▒▒▒░░░░░░░ 31% · prefix changed · expired
+```
+
+- **Agents** filters the tree to the main conversation, subagents, or teammates.
+- **Requests** filters the history to real requests, keepalives, compactions, or misses.
+- **agent / all** shows the selected agent's last 30 requests, or the last 30 across every agent in the tree, each named with its agent.
+
+Select an agent's name to see its history, including each response's model, turn, step, and token counts.
 
 The hit rate is `cache_read_input_tokens / (cache_read_input_tokens + cache_creation_input_tokens + input_tokens)`, rounded down so that 100% means a complete hit. Output tokens are shown separately.
 
@@ -222,7 +241,18 @@ The mode button next to the dial shows the current upkeep mode for the main conv
 | `compact` | The conversation is compacted, as `/compact` does, while its cache is still warm, if its context is 100k tokens or larger. |
 | `warmcomp` | Keepalives as in `warm`. When the next keepalive would no longer pay for itself, the conversation is compacted as in `compact` instead; a conversation under 100k tokens is left to expire. |
 
-Upkeep acts only while no main-conversation request is in flight, and at most once per countdown. After a compaction there is no countdown until your next request, so each mode compacts at most once per idle stretch. Subagents and split-pane teammates are left alone. Upkeep needs a reported TTL, so it does nothing while the TTL is unknown.
+Upkeep acts only while no main-conversation request is in flight, and at most once per countdown. After a compaction there is no countdown until your next request, so each mode compacts at most once per idle stretch. Upkeep needs a reported TTL, so it does nothing while the TTL is unknown.
+
+Upkeep reaches only conversations that are their own Claude Code session:
+
+| Conversation | Bar and dashboard | Upkeep |
+| --- | --- | --- |
+| The main conversation | Yes | Its mode button |
+| A split-pane teammate | Yes, in its pane and on the lead's dashboard | Its own mode button; starts in `teammate_cache_upkeep` |
+| Subagents, at any depth | Yes | None, shown as `–` |
+| In-process teammates | Yes | None, shown as `–` |
+
+Claude Code's keepalive and compaction calls act on a session's main conversation only, with no way to name a subagent or an in-process teammate, so those rows show `–` instead of a mode. Viewing one of their transcripts shows its bar with `–` and no mode button. A split-pane teammate runs as its own session, so it has its own mode: it starts in the **Cache upkeep** chosen under **Teammates** in `/agent-models` (`off` unless you change it), and its mode button can change it from then on. The lead's own mode never changes a teammate's. Teammates read the setting when they start, so a change applies to teammates launched afterwards.
 
 Keepalives are billed: each reads the cached context at the cache-read rate and adds a few uncached and output tokens. Warming pauses once the keepalives since the last request, plus one more, would cost more than letting the entry expire and writing the cached context again. Each keepalive's measured tokens are priced as multiples of the model's input price, taken from [models.dev](https://models.dev): the cache-read, cache-write, and output prices (see **Model prices** below). With Claude Opus 5.5's listed prices that is about 23 keepalives on a 5-minute TTL, roughly an hour and 50 minutes of idle time; with the more common 0.1× cache reads, about 11, roughly 55 minutes. That point is when `warmcomp` compacts: until then each keepalive costs less than the rewrite it prevents, and past it only a shorter conversation makes your return cheaper. Your gateway's own pricing may differ from the public listing. A real request resets the count. In `warm` and `warmcomp`, the bar shows how many keepalives that leaves: `↻11` for 11 more. On a `warmcomp` conversation large enough to compact, it shows `↻11 ➜ cmpt`, then `➜ cmpt` once the next action is the compaction. The dashboard spells this out (`11 keepalives, then compact`) and adds how many have been sent since your last request. The count assumes each remaining keepalive costs what the last one did, so it can shift by one after the first. Keepalives only pay off if you return to the conversation; if you don't, they are spent for nothing. Keepalives appear in the dashboard's request history and totals, but the bar keeps the hit rate of the last real request. A keepalive sent after a compaction would replay the summary without a cache breakpoint on it, so no mode warms a compacted conversation. Compaction runs only between turns; if it is refused, the debug log says why.
 

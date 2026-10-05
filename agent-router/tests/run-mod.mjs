@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
-import { modelOptions } from './fixtures.mjs';
+import { modelOptions, upkeepOptions } from './fixtures.mjs';
 
 // The native test runner takes options from manifest defaults, not user settings.
 // Supply synthetic options ONLY in a disposable copy; the published manifest
@@ -20,7 +20,7 @@ try {
   }
   const manifestPath = join(plugin, '.claude-plugin', 'plugin.json');
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
-  for (const [key, value] of Object.entries(modelOptions)) manifest.userConfig[key].default = value;
+  for (const [key, value] of Object.entries({ ...modelOptions, ...upkeepOptions })) manifest.userConfig[key].default = value;
   await writeFile(manifestPath, JSON.stringify(manifest), { mode: 0o600 });
   const env = { ...process.env, CLAUDE_CONFIG_DIR: config, CLAUDE_CODE_ENABLE_FUNCTION_HOOKS: '1', DISABLE_TELEMETRY: '1' };
   delete env.ANTHROPIC_API_KEY;

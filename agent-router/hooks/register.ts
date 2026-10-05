@@ -3,7 +3,7 @@ import { routeAgent, routeTeammate, validatePolicy, sameModel, isTruthy } from '
 import { createModelPicker, type ModelPickerHost } from './model-picker';
 import { createStatsPanel } from './stats-panel';
 import { agentBadge, sameSent, type Sent } from './agent-badge';
-import { createCachePanel, CACHE_PANE } from './cache-panel';
+import { createCachePanel, CACHE_PANE, upkeepMode } from './cache-panel';
 
 type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 type Policy = { version: number; roles: Record<string, { model: string; aliases: string[]; effort?: Effort }>; teammate?: { model?: string; effort?: Effort } };
@@ -230,6 +230,7 @@ export function register(on: On, options: PluginOptions = {}) {
             DISABLE_PROMPT_CACHING_OPUS: await $.env.get('DISABLE_PROMPT_CACHING_OPUS').catch(() => undefined),
             COLORFGBG: await $.env.get('COLORFGBG').catch(() => undefined),
           },
+          upkeep: snapshot?.active && (snapshot.self || snapshot.teammate) ? upkeepMode(options.teammate_cache_upkeep) : undefined,
         });
       if (e.isInteractive && e.surface === 'terminal') {
         cacheTicks = 0;

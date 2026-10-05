@@ -42,6 +42,7 @@ const roleRow = (rows: ConfigRow[], plugin: string, field: string) => ownedRow(r
 const effortField = (field: string) => field.replace(/_model$/, '_effort');
 const effortRow = (rows: ConfigRow[], plugin: string, field: string) => ownedRow(rows, plugin, effortField(field), 'choice');
 const effortLabel = (value: string) => value === 'default' ? 'Default (engine effort)' : value;
+const upkeepRow = (rows: ConfigRow[], plugin: string) => ownedRow(rows, plugin, 'teammate_cache_upkeep', 'choice');
 
 export function createModelPicker(options: PluginOptions) {
   let session = '';
@@ -210,6 +211,31 @@ export function createModelPicker(options: PluginOptions) {
     }
   }
 
+  async function saveUpkeep(host: ModelPickerHost, value: string, renderedGeneration: number) {
+    if (!open || saving || loading || renderedGeneration !== generation || role !== teammateEntry.value) return;
+    saving = true;
+    error = '';
+    notice = '';
+    redraw(host);
+    try {
+      rows = await host.config.list();
+      if (!open) return;
+      const row = upkeepRow(rows, host.plugin.name);
+      if (row.isLocked) throw new Error('Your administrator manages this setting. Ask them to update teammate cache upkeep.');
+      if (!row.options?.includes(value)) return;
+      const result = await host.config.set({ key: row.key, value });
+      if (result.deny !== undefined) throw new Error(result.deny);
+      if (result.value !== value) throw new Error('The config writer returned a different value. Open /config to inspect the saved setting.');
+      rows = rows.map(item => item.key === row.key ? { ...item, value } : item);
+      notice = `Saved teammate cache upkeep. Split-pane teammates launched from now on start in ${value}.`;
+    } catch (cause) {
+      error = message(cause);
+    } finally {
+      saving = false;
+      redraw(host);
+    }
+  }
+
   async function initialize(host: ModelPickerHost, e: Args<'session.start'>) {
     interactive = e.isInteractive && (e.surface === 'terminal' || e.surface === 'desktop');
     terminal = e.surface === 'terminal';
@@ -253,11 +279,16 @@ export function createModelPicker(options: PluginOptions) {
     const { Box, Text, Button, Select, Input } = host.ui.resolve(e);
     let current: ConfigRow | undefined;
     let effort: ConfigRow | undefined;
+    let upkeep: ConfigRow | undefined;
     let rowError = '';
     let effortError = '';
+    let upkeepError = '';
     if (!loading && configLoaded) {
       try { current = roleRow(rows, host.plugin.name, role); } catch (cause) { rowError = message(cause); }
       try { effort = effortRow(rows, host.plugin.name, role); } catch (cause) { effortError = message(cause); }
+      if (role === teammateEntry.value) {
+        try { upkeep = upkeepRow(rows, host.plugin.name); } catch (cause) { upkeepError = message(cause); }
+      }
     }
     const filtered: ModelEntry[] = filterModels(models, query);
     const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
@@ -298,6 +329,12 @@ export function createModelPicker(options: PluginOptions) {
         onSelect={value => act(() => saveEffort(host, field, value, renderedGeneration))} />
         : effort ? <Text>{`Effort: ${effortLabel(String(effort.value))}${effort.isLocked ? ' · managed by your administrator' : ''}`}</Text> : null}
       {effortError ? <Text>{effortError}</Text> : null}
+      {upkeep && !upkeep.isLocked && !saving ? <Select key="teammate-upkeep" label="Cache upkeep" value={String(upkeep.value)}
+        options={(upkeep.options || []).map(value => ({ value, label: value }))}
+        onSelect={value => act(() => saveUpkeep(host, value, renderedGeneration))} />
+        : upkeep ? <Text>{`Cache upkeep: ${String(upkeep.value)}${upkeep.isLocked ? ' · managed by your administrator' : ''}`}</Text> : null}
+      {upkeep ? <Text dimColor>Split-pane teammates start in this cache upkeep and can change it from their own bar. In-process teammates and subagents can't be kept warm.</Text> : null}
+      {upkeepError ? <Text>{upkeepError}</Text> : null}
       <Input key="search" label="Search" placeholder="Name, exact ID, or description" value={query} autoFocus onInput={search} onSubmit={search} />
       {loading ? <Text>Loading endpoint catalog…</Text> : saving ? <Text>Saving model selection…</Text> : !catalogLoaded ? <Text>Catalog unavailable. Resolve the discovery error, then refresh.</Text> : <Box flexDirection="column" gap={1}>
         <Text>{`${filtered.length} matching models · page ${page + 1} of ${pages}`}</Text>

@@ -1,6 +1,6 @@
 {
   "name": "agent-router",
-  "version": "0.13.1",
+  "version": "0.14.0",
   "license": "MIT",
   "description": "Choose subagent models with /agent-models and inspect activity, routing, and per-agent prompt cache bars with /agent-cache. Requires Claude Code Mod function hooks enabled.",
   "author": {
@@ -131,6 +131,19 @@
         "max"
       ],
       "default": "default",
+      "required": false
+    },
+    "teammate_cache_upkeep": {
+      "type": "string",
+      "title": "Teammate cache upkeep",
+      "description": "Prompt cache upkeep that split-pane teammates start in. Each teammate's own mode button can change it. In-process teammates and subagents cannot be kept warm.",
+      "options": [
+        "off",
+        "warm",
+        "compact",
+        "warmcomp"
+      ],
+      "default": "off",
       "required": false
     }
   }

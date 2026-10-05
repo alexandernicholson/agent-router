@@ -297,3 +297,23 @@ test('a reloaded lead resumes polling for its split-pane teammates', async ($, o
   await world.clock!.advance(5_000);
   expect(statsReads(world) > started).toBe(true);
 });
+
+function upkeepMode(node: RenderNode): string | undefined {
+  if (typeof node !== 'object' || node === null) return undefined;
+  const props = ('props' in node ? node.props : {}) as { key?: string; label?: string };
+  if ('type' in node && node.type === 'Button' && props.key === 'agent-cache-upkeep') return props.label;
+  if (!('children' in node) || !Array.isArray(node.children)) return undefined;
+  for (const child of node.children) { const found = upkeepMode(child); if (found !== undefined) return found; }
+  return undefined;
+}
+
+test('a split-pane teammate starts in the teammate cache upkeep its lead set', async ($, on) => {
+  const self = { role: 'task', type: 'agent-router:task', model: 'vendor/task-v1' };
+  await lead($, on, { active: true, policy, leadSessionId: 'lead-of-mate', self, teammate: { agentId: 'worker@session-lead' } });
+  expect(upkeepMode(await $.ui.render(band()))).toBe('warm');
+});
+
+test('a lead keeps its own cache upkeep, whatever teammates start in', async ($, on) => {
+  await lead($, on);
+  expect(upkeepMode(await $.ui.render(band()))).toBe('off');
+});

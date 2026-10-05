@@ -20,6 +20,8 @@ function world(on: On, models = [{ id: 'vendor/selected', name: 'Selected model'
     provider: { plugin: 'agent-router@agent-router-tools', tier: 'user' }, isLocked: false });
   rows.push({ key: 'actual-owner.teammate_effort', label: 'teammate_effort', kind: 'choice', value: 'default', options: efforts,
     provider: { plugin: 'agent-router@agent-router-tools', tier: 'user' }, isLocked: false });
+  rows.push({ key: 'actual-owner.teammate_cache_upkeep', label: 'teammate_cache_upkeep', kind: 'choice', value: 'off', options: ['off', 'warm', 'compact', 'warmcomp'],
+    provider: { plugin: 'agent-router@agent-router-tools', tier: 'user' }, isLocked: false });
   // Similarly named foreign rows must never receive the selection.
   rows.push({ ...rows[rows.length - 5], key: 'foreign.scout_effort', provider: { plugin: 'foreign', tier: 'user' } });
   rows.unshift({ ...rows[0], key: 'foreign.scout_model', provider: { plugin: 'foreign', tier: 'user' } });
@@ -210,4 +212,28 @@ test('an unset teammate override never blocks the role setup flow', async ($, on
   const roles = state.rows.filter(row => row.kind === 'text' && row.key.startsWith('actual-owner.') && row.key !== 'actual-owner.teammate_model');
   expect(roles.every(row => row.value === 'vendor/selected')).toBe(true);
   expect(state.rows.find(row => row.key === 'actual-owner.teammate_model')?.value).toBe('');
+});
+
+test('the Teammates entry saves the cache upkeep teammates start in', async ($, on) => {
+  const state = world(on);
+  await open($);
+  expect(hasSelect(await $.ui.render(pane), 'teammate-upkeep')).toBe(false);
+  await $.ui.select({ plugin: 'agent-router', key: 'role', requestId: 'agent-models', value: 'teammate_model' });
+  const drawn = await $.ui.render(pane);
+  expect(hasSelect(drawn, 'teammate-upkeep')).toBe(true);
+  expect(text(drawn).includes('Split-pane teammates start in this cache upkeep')).toBe(true);
+  await $.ui.select({ plugin: 'agent-router', key: 'teammate-upkeep', requestId: 'agent-models', value: 'warmcomp' });
+  expect(state.rows.find(row => row.key === 'actual-owner.teammate_cache_upkeep')?.value).toBe('warmcomp');
+  expect(state.rows.find(row => row.key === 'actual-owner.teammate_effort')?.value).toBe('default');
+});
+
+test('a locked teammate upkeep row is shown but never written', async ($, on) => {
+  const state = world(on);
+  state.rows.find(row => row.key === 'actual-owner.teammate_cache_upkeep')!.isLocked = true;
+  await open($);
+  await $.ui.select({ plugin: 'agent-router', key: 'role', requestId: 'agent-models', value: 'teammate_model' });
+  const drawn = await $.ui.render(pane);
+  expect(hasSelect(drawn, 'teammate-upkeep')).toBe(false);
+  expect(text(drawn).includes('Cache upkeep: off · managed by your administrator')).toBe(true);
+  expect(state.writes).toBe(0);
 });

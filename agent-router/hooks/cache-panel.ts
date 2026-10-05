@@ -15,6 +15,11 @@ const UPKEEP_KEY = 'cache-upkeep';
 const KEEPALIVE_PROMPT = 'Reply with only: OK';
 const PRICES_MS = 3600000;
 type Upkeep = typeof UPKEEP[number];
+export const upkeepMode = (value: unknown): Upkeep | undefined => UPKEEP.find(mode => mode === value);
+const AGENT_FILTERS = ['all', 'main', 'subagents', 'teammates'] as const;
+const REQUEST_FILTERS = ['all', 'real', 'keepalives', 'compactions', 'misses'] as const;
+type Kind = 'main' | 'subagent' | 'in-process teammate' | 'split-pane teammate';
+type Node = { row: CacheRow; kind: Kind; depth: number; prefix: string; body: string; upkeep?: Upkeep };
 type Family = keyof typeof CACHE_COLORS;
 type Palette = typeof CACHE_COLORS[Family];
 const MARKERS: Record<Upkeep, (keyof Palette)[]> = { off: [], warm: ['warm'], compact: ['compact'], warmcomp: ['warm', 'compact'] };
@@ -59,6 +64,10 @@ export function createCachePanel() {
   let context: Context | undefined;
   let open = false;
   let selected: string | undefined;
+  let agentFilter: typeof AGENT_FILTERS[number] = 'all';
+  let requestFilter: typeof REQUEST_FILTERS[number] = 'all';
+  let historyScope: 'agent' | 'all' = 'agent';
+  let paneModes = new Map<string, Upkeep>();
   let lastDisplay = '';
   let previous: Context | undefined;
   const transcripts = new Map<string, string>();
@@ -117,6 +126,53 @@ export function createCachePanel() {
 
   const mainRow = (current: Context) => rows(current).find(row => row.sessionId === current.sessionId && row.agentId === null);
 
+  function kindOf(current: Context, row: CacheRow): Kind {
+    if (row.agentId === null) return row.sessionId === current.sessionId ? 'main' : 'split-pane teammate';
+    const agent = row.sessionId === current.sessionId ? current.roster.find(item => item.id === row.agentId) : undefined;
+    return agent?.type === 'teammate' ? 'in-process teammate' : 'subagent';
+  }
+
+  function tree(current: Context): Node[] {
+    const all = rows(current);
+    const parents = new Map<string, string>();
+    for (const row of all) {
+      const key = loopKey(row.sessionId, row.agentId);
+      if (row.agentId === null) { if (row.sessionId !== current.sessionId) parents.set(key, loopKey(current.sessionId, null)); continue; }
+      const parentId = row.sessionId === current.sessionId ? current.roster.find(item => item.id === row.agentId)?.parentId : undefined;
+      const parent = loopKey(row.sessionId, parentId ?? null);
+      parents.set(key, all.some(other => loopKey(other.sessionId, other.agentId) === parent) ? parent : loopKey(row.sessionId, null));
+    }
+    const children = new Map<string, CacheRow[]>();
+    for (const row of all) {
+      const parent = parents.get(loopKey(row.sessionId, row.agentId));
+      if (parent) children.set(parent, [...(children.get(parent) ?? []), row]);
+    }
+    const nodes: Node[] = [];
+    const visit = (row: CacheRow, depth: number, lead: string, last: boolean) => {
+      const key = loopKey(row.sessionId, row.agentId);
+      const kind = kindOf(current, row);
+      const upkeep = kind === 'main' ? current.upkeep : kind === 'split-pane teammate' ? paneModes.get(row.sessionId) ?? 'off' : undefined;
+      nodes.push({ row, kind, depth, upkeep, prefix: depth ? `${lead}${last ? '└─ ' : '├─ '}` : '', body: depth ? `${lead}${last ? '   ' : '│  '}` : '' });
+      const kids = children.get(key) ?? [];
+      kids.forEach((kid, index) => visit(kid, depth + 1, depth ? `${lead}${last ? '   ' : '│  '}` : '', index === kids.length - 1));
+    };
+    const main = all.find(row => row.sessionId === current.sessionId && row.agentId === null);
+    if (main) visit(main, 0, '', true);
+    for (const row of all) if (!nodes.some(node => node.row === row)) visit(row, 1, '', true);
+    return nodes;
+  }
+
+  function marker(elements: Elements[RenderSurface], current: Context, upkeep: Upkeep | undefined): RenderElement[] {
+    if (!upkeep) return [elements.Text({ dimColor: true, children: ['–'] })];
+    const marks = MARKERS[upkeep];
+    return marks.length ? marks.map(name => elements.Text({ color: palette(current)[name], children: ['⬥'] })) : [elements.Text({ dimColor: true, children: ['⬦'] })];
+  }
+
+  async function readPaneModes(current: Context) {
+    const saved = await savedUpkeep(current.host);
+    paneModes = new Map(saved.filter(([id]) => id !== current.sessionId));
+  }
+
   function state(current: Context, row: CacheRow): CacheStatus {
     const pending = current.pending.get(loopKey(row.sessionId, row.agentId));
     const value = cacheStatus(row, current.now, pending?.startedAt);
@@ -169,6 +225,7 @@ export function createCachePanel() {
         ]);
         if (context !== current) return;
         if (theme !== undefined) current.family = themeFamily(theme, current.env.COLORFGBG);
+        await readPaneModes(current);
         if (!Array.isArray(snapshot.samples) || !Array.isArray(snapshot.resets) || !Array.isArray(snapshot.labels)) throw new Error('Invalid cache snapshot');
         for (const sample of snapshot.samples) if (validSample(sample)) current.samples.set(sampleKey(sample), sample);
         current.resets = snapshot.resets;
@@ -416,12 +473,11 @@ export function createCachePanel() {
     const latest = status?.sample;
     const note = row && keepaliveNote(current, row, true);
     const counts = `${note ? ` · ${note}` : ''}${latest ? ` · read ${cacheTokens(latest.read)} · write ${cacheTokens(latest.write)} · new ${cacheTokens(latest.fresh)}` : ''}`;
-    const marks = MARKERS[current.upkeep];
-    const marker = marks.length ? marks.map(name => Text({ color: palette(current)[name], children: ['⬥'] })) : [Text({ dimColor: true, children: ['⬦'] })];
+    const upkeeps = !agentId;
     return Box({ flexDirection: 'column', children: [content, Box({ flexDirection: 'row', gap: 1, children: [
       Button({ key: 'agent-cache-open', label: cacheDial(status), onPress: show }),
-      Box({ flexDirection: 'row', children: marker }),
-      Button({ key: 'agent-cache-upkeep', label: current.upkeep, plain: true, onPress: cycle }),
+      Box({ flexDirection: 'row', children: marker(elements, current, upkeeps ? current.upkeep : undefined) }),
+      ...(upkeeps ? [Button({ key: 'agent-cache-upkeep', label: current.upkeep, plain: true, onPress: cycle })] : []),
       Box({ flexDirection: 'row', children: [...paint(elements, row ? segments(current, row) : [{ text: 'no observation' }]),
         Text({ wrap: 'truncate-end', children: [`${counts}${current.available ? '' : ' · storage unavailable'}`] })] }),
     ] })] });
@@ -457,41 +513,66 @@ export function createCachePanel() {
     return known.value ? ` · prices from models.dev ${displayText(`${known.value.provider}/${known.value.id}`, 120)}` : ' · no models.dev price';
   }
 
+  const shown = (node: Node) => agentFilter === 'all' || agentFilter === 'main' && node.kind === 'main' ||
+    agentFilter === 'subagents' && node.kind === 'subagent' || agentFilter === 'teammates' && node.kind.endsWith('teammate');
+  const wanted = (sample: CacheSample) => requestFilter === 'all' ||
+    requestFilter === 'keepalives' && isKeepalive(sample) || requestFilter === 'compactions' && isCompaction(sample) ||
+    requestFilter === 'real' && !isKeepalive(sample) && !isCompaction(sample) || requestFilter === 'misses' && !!sample.miss;
+
+  function chips<T extends string>(elements: Elements[RenderSurface], current: Context, group: string, values: readonly T[], value: T, choose: (next: T) => void) {
+    return values.map(option => elements.Button({ key: `${group}:${option}`, label: option === value ? `[${option}]` : option, plain: true,
+      onPress: () => { choose(option); redraw(current); } }));
+  }
+
   function renderPane(elements: Elements[RenderSurface], agentId?: string): RenderElement | undefined {
     const current = context;
     if (!current || !open) return undefined;
     const { Box, Button, Text } = elements;
-    const all = rows(current);
-    const chosen = all.find(row => loopKey(row.sessionId, row.agentId) === (selected ?? loopKey(current.sessionId, agentId)));
+    const nodes = tree(current);
+    const chosen = nodes.find(node => loopKey(node.row.sessionId, node.row.agentId) === (selected ?? loopKey(current.sessionId, agentId)))?.row;
     const children: RenderElement[] = [Text({ bold: true, children: ['Prompt cache · all agents'] }),
       Text({ dimColor: true, children: ['Bars show each loop\'s last request hit rate, coloured for its context size. Time left counts from the last request that read or wrote the cache. Select an agent for recent requests.'] }),
-      Text({ dimColor: true, children: [`Upkeep: ${UPKEEP_TEXT[current.upkeep]}`] })];
+      Text({ dimColor: true, children: [`Upkeep: ${UPKEEP_TEXT[current.upkeep]}`] }),
+      Text({ dimColor: true, children: ['– can\'t be kept warm: Claude Code has no keepalive or compaction for subagents and in-process teammates.'] }),
+      Box({ flexDirection: 'row', gap: 1, children: [Text({ children: ['Agents:'] }), ...chips(elements, current, 'cache-agents', AGENT_FILTERS, agentFilter, next => { agentFilter = next; })] }),
+      Box({ flexDirection: 'row', gap: 1, children: [Text({ children: ['Requests:'] }), ...chips(elements, current, 'cache-requests', REQUEST_FILTERS, requestFilter, next => { requestFilter = next; }),
+        Text({ children: ['·'] }), ...chips(elements, current, 'cache-history', ['agent', 'all'] as const, historyScope, next => { historyScope = next; })] })];
     if (!current.available) children.push(Text({ color: palette(current).fair, children: ['Storage unavailable · showing last known observations'] }));
-    for (const row of all) {
+    for (const node of nodes.filter(shown)) {
+      const { row } = node;
       const key = loopKey(row.sessionId, row.agentId);
       const counts = row.totals;
+      const indent = node.body;
       const life: RenderElement[] = state(current, row).lifetimes.map(part => Text({
         color: palette(current)[lifeGrade(part.leftMs)!],
-        children: [`TTL ${part.ttl} · ${cacheTokens(part.tokens)} written · ${cacheBar(part.leftMs / part.ttlMs)} ~${cacheClock(part.leftMs)} left`],
+        children: [`${indent}TTL ${part.ttl} · ${cacheTokens(part.tokens)} written · ${cacheBar(part.leftMs / part.ttlMs)} ~${cacheClock(part.leftMs)} left`],
       }));
       const upkeepLine = [row.keepalives.length ? `${plural(row.keepalives.length, 'keepalive')} since the last request` : '', keepaliveNote(current, row) ?? '']
         .filter(Boolean).join(' · ');
-      const keepalives = upkeepLine ? [Text({ dimColor: true, children: [upkeepLine] })] : [];
+      const keepalives = upkeepLine ? [Text({ dimColor: true, children: [`${indent}${upkeepLine}`] })] : [];
+      const kind = node.kind === 'main' || node.kind === 'subagent' ? '' : ` · ${node.kind}`;
       children.push(Box({ flexDirection: 'column', children: [
-        Button({ key: `cache-agent:${key}`, label: displayText(row.label, 120), onPress: () => { selected = key; redraw(current); } }),
-        Box({ flexDirection: 'row', children: paint(elements, [{ text: `${cacheDial(state(current, row))} ` }, ...segments(current, row)]) }),
+        Box({ flexDirection: 'row', children: [Text({ dimColor: true, children: [node.prefix] }),
+          Button({ key: `cache-agent:${key}`, label: `${displayText(row.label, 120)}${kind}`, plain: true, onPress: () => { selected = key; historyScope = 'agent'; redraw(current); } })] }),
+        Box({ flexDirection: 'row', children: [Text({ children: [`${indent}${cacheDial(state(current, row))} `] }), ...marker(elements, current, node.upkeep),
+          Text({ children: [node.upkeep ? ` ${node.upkeep} ` : ' '] }), ...paint(elements, segments(current, row))] }),
         ...life,
         ...keepalives,
-        Text({ dimColor: true, children: [`${counts.requests} requests · read ${cacheTokens(counts.read)} · write ${cacheTokens(counts.write)} · new ${cacheTokens(counts.fresh)} · out ${cacheTokens(counts.output)}`] }),
-        Text({ dimColor: true, children: [row.last ? `${displayText(row.last.model, 160)} · ${displayText(row.last.ttlSource, 120)}${priceNote(current, row)}` : 'No usage observed in this context'] }),
+        Text({ dimColor: true, children: [`${indent}${plural(counts.requests, 'request')} · read ${cacheTokens(counts.read)} · write ${cacheTokens(counts.write)} · new ${cacheTokens(counts.fresh)} · out ${cacheTokens(counts.output)}`] }),
+        Text({ dimColor: true, children: [`${indent}${row.last ? `${displayText(row.last.model, 160)} · ${displayText(row.last.ttlSource, 120)}${node.kind === 'main' ? priceNote(current, row) : ''}` : 'No usage observed in this context'}`] }),
       ] }));
     }
-    if (chosen) {
-      children.push(Text({ bold: true, children: [`Recent requests · ${displayText(chosen.label, 120)} (last 30)`] }));
-      for (const sample of [...chosen.samples].reverse()) {
+    const scope = historyScope === 'all' ? nodes.filter(shown).map(node => node.row) : chosen ? [chosen] : [];
+    if (scope.length) {
+      const labels = new Map(scope.map(row => [loopKey(row.sessionId, row.agentId), row.label]));
+      const samples = scope.flatMap(row => row.samples).filter(wanted).sort((a, b) => b.startedAt - a.startedAt || b.index - a.index).slice(0, 30);
+      children.push(Text({ bold: true, children: [`Recent requests · ${historyScope === 'all' ? 'all agents' : displayText(chosen!.label, 120)} (last 30${requestFilter === 'all' ? '' : ` ${requestFilter}`})`] }));
+      if (!samples.length) children.push(Text({ dimColor: true, children: ['No requests match these filters.'] }));
+      for (const sample of samples) {
         const name = isKeepalive(sample) ? 'keepalive' : isCompaction(sample) ? 'compaction' : `${displayText(sample.turnId, 12)}:${sample.index}`;
+        const owner = historyScope === 'all' ? `${displayText(labels.get(loopKey(sample.sessionId, sample.agentId)) ?? '', 40)} · ` : '';
         children.push(Box({ flexDirection: 'row', children: [
-          Text({ children: [`${name} `] }),
+          Text({ children: [`${owner}${name} `] }),
           ...paint(elements, rate(current, sample, 6)),
           Text({ wrap: 'truncate-end', children: [`${sample.miss ? ` · ${sample.miss}` : ''} · read ${cacheTokens(sample.read)} · write ${cacheTokens(sample.write)} · new ${cacheTokens(sample.fresh)} · out ${cacheTokens(sample.output)} · ${displayText(sample.model, 160)}`] }),
         ] }));

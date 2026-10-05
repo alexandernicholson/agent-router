@@ -2,7 +2,7 @@ import { test, expect, mock, tier } from 'claude-code/testing';
 import type { Engine } from 'claude-code/testing';
 import type { AgentInfo, On, RenderInput, RenderNode, TurnStepInput } from 'claude-code';
 import { ROLES } from '../lib/routing.js';
-import { applyCacheCreation } from '../lib/cache.js';
+import { applyCacheCreation, loopKey } from '../lib/cache.js';
 import { CACHE_COLORS } from '../lib/cache-colors.js';
 
 tier('user');
@@ -21,8 +21,8 @@ function text(node: RenderNode): string {
   return label || ('children' in node && Array.isArray(node.children) ? node.children.map(text).join(' ') : '');
 }
 
-async function setup($: Engine, on: On, endpoint = 'https://gateway.example') {
-  mock.store(on);
+async function setup($: Engine, on: On, endpoint = 'https://gateway.example', stored?: Record<string, unknown>) {
+  mock.store(on, stored);
   mock.env(on, { ANTHROPIC_BASE_URL: endpoint });
   const clock = mock.clock(on);
   const world = { samples: [] as Record<string, any>[], resets: [] as Record<string, any>[], calls: [] as Record<string, any>[],
@@ -33,7 +33,8 @@ async function setup($: Engine, on: On, endpoint = 'https://gateway.example') {
     forkUsage: { input_tokens: 10, output_tokens: 2, cache_read_input_tokens: 900, cache_creation_input_tokens: 0 },
     compaction: {} as Record<string, unknown>,
     prices: { 'vendor/main': { read: 0.1, fiveMinute: 1.25, output: 5, provider: 'example', id: 'main-1' } } as Record<string, unknown>,
-    priceLookups: [] as string[][], pricesFail: false };
+    priceLookups: [] as string[][], pricesFail: false,
+    linked: [] as Record<string, any>[], labels: [] as [string, string][] };
   const policy = { version: 1, roles: Object.fromEntries(ROLES.map(role => [role, { model: `vendor/${role}`, aliases: [role] }])) };
   on('session.id', () => ({ value: world.sessionId }));
   on('session.start', ($, e) => ({ cwd: e.cwd }));
@@ -84,7 +85,7 @@ async function setup($: Engine, on: On, endpoint = 'https://gateway.example') {
     if (request.action === 'cache-snapshot' && world.failRead) return { value: { exitCode: 1, stderr: 'storage failed', stdout: '' } };
     const output = request.action === 'bootstrap' ? { active: true, policy, agents: [] }
       : request.action === 'cache-sample' ? { sample: world.samples.at(-1) }
-      : request.action === 'cache-snapshot' ? { samples: world.samples.filter(s => s.sessionId === request.session_id), resets: world.resets, labels: [] }
+      : request.action === 'cache-snapshot' ? { samples: [...world.samples.filter(s => s.sessionId === request.session_id), ...world.linked], resets: world.resets, labels: world.labels }
       : request.action === 'stats' ? { routed: 0, overrides: 0, mismatches: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 } : {};
     return { value: { exitCode: 0, stderr: '', stdout: JSON.stringify(output) } };
   });
@@ -129,7 +130,7 @@ test('main and child cache bars remain distinct and native stream and response s
   expect(JSON.stringify(world.samples).includes('PRIVATE')).toBe(false);
   const contents = await dashboard($);
   expect(contents.includes('2 requests')).toBe(true);
-  expect(contents.includes('1 requests')).toBe(true);
+  expect(contents.includes('1 request ')).toBe(true);
   expect(contents.includes('child')).toBe(true);
   expect(contents.includes('80%')).toBe(true);
   expect(contents.includes('TTL unknown')).toBe(true);
@@ -188,7 +189,7 @@ test('clear separates new session usage and does not reuse a warm bar', async ($
   await step($);
   expect(world.samples[1].sessionId).toBe('new-session');
   const contents = await dashboard($);
-  expect(contents.includes('1 requests')).toBe(true);
+  expect(contents.includes('1 request ')).toBe(true);
   expect(contents.includes('2 requests')).toBe(false);
 });
 
@@ -662,8 +663,8 @@ test('the band and dashboard dial follow each agent', async ($, on) => {
   expect(await dial($)).toBe('◑');
   expect(await dial($, 'child')).toBe('◌');
   const contents = await dashboard($);
-  expect(/Main ◑\s+█/.test(contents)).toBe(true);
-  expect(/\(child\) ◌\s+█/.test(contents)).toBe(true);
+  expect(/Main ◑\s+⬦\s+off\s+█/.test(contents)).toBe(true);
+  expect(/\(child\)\s+◌\s+–\s+█/.test(contents)).toBe(true);
 });
 
 test('keepalives are priced from the models.dev listing matched to the model', async ($, on) => {
@@ -752,4 +753,117 @@ test('modes that send no keepalives show no count', async ($, on) => {
   await clock.advance(2000);
   expect(text(await $.ui.render(band())).includes('↻')).toBe(false);
   expect(text(await $.ui.render(band())).includes('➜')).toBe(false);
+});
+
+function keys(node: RenderNode, prefix: string, found: string[] = []): string[] {
+  if (typeof node === 'string') return found;
+  if (node.type === 'Button' && typeof node.props.key === 'string' && node.props.key.startsWith(prefix)) found.push(node.props.key);
+  if ('children' in node && Array.isArray(node.children)) for (const child of node.children) keys(child, prefix, found);
+  return found;
+}
+const press = ($: Engine, key: string) => $.ui.press({ plugin: 'agent-router', key, requestId: 'agent-cache' });
+
+test('viewing an agent that cannot be warmed shows a dash in place of the mode button', async ($, on) => {
+  response(on);
+  const { world } = await setup($, on);
+  await cycleTo($, 'warm');
+  await step($);
+  world.roster = [{ id: 'child', type: 'agent-router:scout', description: 'Search', status: 'running' }];
+  await step($, { agentId: 'child' });
+  const child = await $.ui.render(band('child'));
+  expect(button(child, 'agent-cache-upkeep')).toBe(undefined);
+  expect(/◌ – █/.test(text(child))).toBe(true);
+  expect(button(await $.ui.render(band()), 'agent-cache-upkeep')?.label).toBe('warm');
+});
+
+test('the dashboard draws every agent as a tree with its kind and upkeep mode', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on, undefined, { 'cache-upkeep': [['pane-session', 'warm']] });
+  world.reported = { fiveMinute: 100, oneHour: 0 };
+  world.roster = [
+    { id: 'scout1', type: 'agent-router:scout', description: 'Search', status: 'running' },
+    { id: 'nested1', type: 'agent-router:task', description: 'Dig', status: 'running', parentId: 'scout1' },
+    { id: 'mate1', type: 'teammate', description: 'Probe', status: 'running', name: 'probe' },
+  ];
+  await step($);
+  for (const agentId of ['scout1', 'nested1', 'mate1']) await step($, { agentId });
+  const now = clock.now();
+  const linked = (agentId: string | null, index: number) => applyCacheCreation({ sessionId: 'pane-session', agentId, turnId: 'pane-turn', index, model: 'vendor/main',
+    startedAt: now, completedAt: now, read: 800, write: 100, fresh: 100, output: 20, ttlMs: null, ttlSource: 'response cache_creation', disabled: false },
+    { fiveMinute: 100, oneHour: 0 });
+  world.linked = [linked(null, 0), linked('pane-sub', 1)];
+  world.labels = [[loopKey('pane-session', null), 'Worker (worker@team)']];
+  await clock.advance(5000);
+  const contents = await dashboard($);
+  const order = ['Main', 'agent-router:scout (scout1)', 'agent-router:task (nested1)', 'probe (mate1)', 'Worker (worker@team)', 'pane-sub'].map(label => contents.indexOf(label));
+  expect(order.every(index => index >= 0)).toBe(true);
+  expect([...order].sort((a, b) => a - b)).toEqual(order);
+  expect(/├─\s+agent-router:scout \(scout1\)/.test(contents)).toBe(true);
+  expect(/│\s+└─\s+agent-router:task \(nested1\)/.test(contents)).toBe(true);
+  expect(contents.includes('probe (mate1) · in-process teammate')).toBe(true);
+  expect(contents.includes('Worker (worker@team) · split-pane teammate')).toBe(true);
+  expect(/Main\s+●\s+⬦\s+off/.test(contents)).toBe(true);
+  expect(/Worker \(worker@team\) · split-pane teammate\s+●\s+⬥\s+warm/.test(contents)).toBe(true);
+  expect(/\(scout1\)\s+│?\s+●\s+–\s+█/.test(contents)).toBe(true);
+  expect(contents.includes('– can\'t be kept warm')).toBe(true);
+  const lines = treeLines(await $.ui.render(pane));
+  const scout = lines.findIndex(line => line.includes('(scout1)'));
+  expect(lines[scout + 1].startsWith('│  ')).toBe(true);
+});
+
+function treeLines(node: RenderNode): string[] {
+  if (typeof node === 'string') return [node];
+  if (node.type === 'Button') return [node.props.plain ? node.props.label ?? '' : `[ ${node.props.label} ]`];
+  const kids = ('children' in node && Array.isArray(node.children) ? node.children : []).map(treeLines);
+  if (node.type === 'Text') return [kids.map(kid => kid.join('')).join('')];
+  const props = ('props' in node ? node.props : {}) as { flexDirection?: string; gap?: number };
+  return props.flexDirection === 'column' ? kids.flat() : [kids.map(kid => kid.join('')).join(' '.repeat(props.gap ?? 0))];
+}
+
+test('the dashboard filters agents by kind and requests by type, across all agents', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 100, oneHour: 0 };
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(275000);
+  expect(world.forks.length).toBe(1);
+  world.roster = [{ id: 'child', type: 'agent-router:scout', description: 'Search', status: 'running' }];
+  await step($, { agentId: 'child', turnId: 'child-turn' });
+  await dashboard($);
+  let drawn = await $.ui.render(pane);
+  expect(keys(drawn, 'cache-agent:').length).toBe(2);
+  await press($, 'cache-agents:subagents');
+  drawn = await $.ui.render(pane);
+  expect(keys(drawn, 'cache-agent:')).toEqual([`cache-agent:${loopKey('cache-session', 'child')}`]);
+  await press($, 'cache-agents:all');
+  await press($, 'cache-requests:keepalives');
+  drawn = await $.ui.render(pane);
+  expect(text(drawn).includes('keepalive ')).toBe(true);
+  expect(text(drawn).includes('same-turn:0')).toBe(false);
+  await press($, 'cache-requests:all');
+  await press($, 'cache-history:all');
+  drawn = await $.ui.render(pane);
+  expect(text(drawn).includes('Recent requests · all agents')).toBe(true);
+  expect(text(drawn).includes('child-turn:0')).toBe(true);
+  expect(text(drawn).includes('same-turn:0')).toBe(true);
+  await press($, 'cache-requests:misses');
+  expect(text(await $.ui.render(pane)).includes('No requests match')).toBe(true);
+});
+
+test('only the main conversation names the keepalive prices it is warmed at', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 100, oneHour: 0 };
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(2000);
+  const now = clock.now();
+  world.linked = [applyCacheCreation({ sessionId: 'pane-session', agentId: null, turnId: 'pane-turn', index: 0, model: 'vendor/main',
+    startedAt: now, completedAt: now, read: 800, write: 100, fresh: 100, output: 20, ttlMs: null, ttlSource: 'response cache_creation', disabled: false },
+    { fiveMinute: 100, oneHour: 0 })];
+  await dashboard($);
+  const lines = treeLines(await $.ui.render(pane));
+  expect(lines.filter(line => line.includes('vendor/main · response')).length).toBe(2);
+  expect(lines.filter(line => line.includes('prices from models.dev')).length).toBe(1);
 });
