@@ -9,6 +9,7 @@ export async function recordCacheSample(root, sessionId, input, transcriptPath) 
   if (input?.completedAt !== undefined) sample.completedAt = input.completedAt;
   if (validCreation(input?.cacheCreation, sample.write)) sample = applyCacheCreation(sample, input.cacheCreation);
   if (!validSample(sample)) throw new Error('Invalid cache sample.');
+  if (!sample.cacheCreation) sample = { ...sample, ttlMs: null, ttlSource: 'response TTL metadata absent' };
   idKey(sample.turnId);
   if (sample.agentId !== null) idKey(sample.agentId);
   const identity = JSON.stringify([sample.agentId, sample.turnId, sample.index]);

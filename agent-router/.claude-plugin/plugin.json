@@ -7,14 +7,6 @@
     "name": "Alexander Nicholson"
   },
   "userConfig": {
-    "cache_ttl": {
-      "type": "string",
-      "title": "Cache lifetime estimate",
-      "description": "Display estimate only; does not change provider cache control. Response-reported 5m/1h write buckets take precedence for every provider. When absent, auto follows Claude's TTL settings for an explicit Anthropic API endpoint and leaves third-party TTL unknown. Choose 5m or 1h only when your provider uses that lifetime.",
-      "options": ["auto", "5m", "1h"],
-      "default": "auto",
-      "required": false
-    },
     "scout_model": {
       "type": "string",
       "title": "Scout model",

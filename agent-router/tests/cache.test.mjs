@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { cachePolicy, cacheRows, cacheStatus, cacheBar, cacheClock, loopKey } from '../lib/cache.js';
+import { cachePolicy, cacheRows, cacheStatus, cacheBar, cacheClock, loopKey, applyCacheCreation } from '../lib/cache.js';
 import { recordCacheSample, resetCache, cacheSnapshot } from '../lib/cache-state.mjs';
 import { recordPath, writeRecord, linkTeammate } from '../lib/state.mjs';
 import { handleRequest } from '../lib/bridge.mjs';
@@ -16,23 +16,24 @@ async function fixture(t) {
   return root;
 }
 
-test('gateway TTL is unknown even when Claude requests a particular lifetime', () => {
-  assert.equal(cachePolicy('auto', 'https://gateway.example', { ENABLE_PROMPT_CACHING_1H: '1' }).ttlMs, null);
-  assert.equal(cachePolicy('1h', 'https://gateway.example').ttlMs, 3600000);
-  assert.equal(cachePolicy('auto', 'https://api.anthropic.com.evil.example').ttlMs, null);
-  assert.equal(cachePolicy('auto', 'https://api.anthropic.com').ttlMs, 300000);
-  assert.equal(cachePolicy('auto', 'https://api.anthropic.com', { ENABLE_PROMPT_CACHING_1H: '1', FORCE_PROMPT_CACHING_5M: 'true' }).ttlMs, 300000);
-  assert.equal(cachePolicy('auto', 'https://api.anthropic.com', {}, '1h').ttlMs, 3600000);
-  assert.equal(cachePolicy('auto', 'https://api.anthropic.com', { CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' }, '1h').ttlMs, 300000);
-  assert.equal(cachePolicy('auto', 'https://api.anthropic.com', { CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' }, undefined, 'opus', true).ttlMs, 300000);
-  assert.equal(cachePolicy('auto', 'https://api.anthropic.com', { CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: '1h' }, undefined, 'opus', true).ttlMs, 3600000);
-  assert.equal(cachePolicy('5m', 'https://gateway.example', { DISABLE_PROMPT_CACHING_OPUS: '1' }, undefined, 'claude-opus-5').disabled, true);
+test('missing response metadata stays unknown and local flags only indicate disabling', () => {
+  assert.equal(cachePolicy().ttlMs, null);
+  assert.equal(cachePolicy({ ENABLE_PROMPT_CACHING_1H: '1', FORCE_PROMPT_CACHING_5M: 'true',
+    CLAUDE_CODE_PROMPT_CACHE_TTL: '1h', CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: '1h' }, 'claude-opus-5').ttlMs, null);
+  assert.equal(cachePolicy({ DISABLE_PROMPT_CACHING_OPUS: '1' }, 'claude-opus-5').disabled, true);
+  // Persisted estimates from an older version cannot produce a warm/expiry bar.
+  assert.equal(cacheStatus(sample(), 1000).state, 'TTL unknown');
+  assert.equal(cacheStatus(sample(), 9999999).leftMs, null);
+  const old = cacheRows([sample()])[0].last;
+  assert.equal(old.ttlMs, null);
+  assert.equal(old.ttlSource, 'response TTL metadata absent');
 });
 
 test('read ratio excludes output and countdown starts at dispatch, not response completion', () => {
   assert.equal(cacheStatus(sample({ output: 1000000 }), 101000).ratio, 0.8);
-  assert.equal(cacheStatus(sample(), 101000).leftMs, 200000);
-  assert.equal(cacheStatus(sample(), 301000).state, 'likely expired');
+  const reported = applyCacheCreation(sample(), { fiveMinute: 100, oneHour: 0 });
+  assert.equal(cacheStatus(reported, 101000).leftMs, 200000);
+  assert.equal(cacheStatus(reported, 301000).state, 'reported 5m writes · likely expired');
   assert.equal(cacheStatus(sample({ ttlMs: null }), 9999999).state, 'TTL unknown');
   assert.equal(cacheStatus(sample({ read: 0, write: 0 }), 1000).state, 'uncached');
   assert.equal(cacheStatus(sample({ read: 0, write: 0, fresh: 0 }), 1000).ratio, null);

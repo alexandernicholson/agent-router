@@ -23,7 +23,7 @@ type Bridge = (request: Record<string, unknown>) => Promise<any>;
 export function register(on: On, options: PluginOptions = {}) {
   const picker = createModelPicker(options);
   const statsPanel = createStatsPanel();
-  const cachePanel = createCachePanel(options);
+  const cachePanel = createCachePanel();
   let cacheTimer: Timer | undefined;
   let cacheTicks = 0;
   let activityTimer: Timer | undefined;
@@ -213,7 +213,6 @@ export function register(on: On, options: PluginOptions = {}) {
     try { await picker.initialize(pickerHost, e); }
     catch (error) { $.ui.log(`Agent Router models: ${error instanceof Error ? error.message : 'Open /agent-models to retry.'}`); }
     if (bridge) {
-      const cacheSettings = await $.settings.read().catch(() => ({})) as Record<string, unknown>;
       await cachePanel.initialize({
         session: { id: () => $.session.id() },
         agent: { list: () => $.agent.list() },
@@ -224,17 +223,11 @@ export function register(on: On, options: PluginOptions = {}) {
       }, bridge, await $.session.id(), await $.env.get('ANTHROPIC_BASE_URL'),
         snapshot?.active && snapshot.teammate ? snapshot.teammate.name ?? snapshot.teammate.agentId : undefined, {
           env: {
-            FORCE_PROMPT_CACHING_5M: await $.env.get('FORCE_PROMPT_CACHING_5M').catch(() => undefined),
-            CLAUDE_CODE_PROMPT_CACHE_TTL: await $.env.get('CLAUDE_CODE_PROMPT_CACHE_TTL').catch(() => undefined),
-            CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: await $.env.get('CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL').catch(() => undefined),
-            ENABLE_PROMPT_CACHING_1H: await $.env.get('ENABLE_PROMPT_CACHING_1H').catch(() => undefined),
             DISABLE_PROMPT_CACHING: await $.env.get('DISABLE_PROMPT_CACHING').catch(() => undefined),
             DISABLE_PROMPT_CACHING_HAIKU: await $.env.get('DISABLE_PROMPT_CACHING_HAIKU').catch(() => undefined),
             DISABLE_PROMPT_CACHING_SONNET: await $.env.get('DISABLE_PROMPT_CACHING_SONNET').catch(() => undefined),
             DISABLE_PROMPT_CACHING_OPUS: await $.env.get('DISABLE_PROMPT_CACHING_OPUS').catch(() => undefined),
           },
-          setting: cacheSettings.promptCacheTtl,
-          subagentSetting: cacheSettings.subagentPromptCacheTtl,
         });
       if (e.isInteractive && e.surface === 'terminal') {
         cacheTicks = 0;

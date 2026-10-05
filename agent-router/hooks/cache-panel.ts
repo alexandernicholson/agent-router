@@ -1,4 +1,4 @@
-import type { AgentInfo, Elements, EngineInterface, PluginOptions, RenderElement, RenderSurface, TurnStepInput, TurnUsage } from 'claude-code';
+import type { AgentInfo, Elements, EngineInterface, RenderElement, RenderSurface, TurnStepInput, TurnUsage } from 'claude-code';
 import { applyCacheCreation, reportedCacheCreation, reportedLifetimes, cacheBar, cacheClock, cachePolicy, cacheRows, cacheStatus, cacheTokens, loopKey, sampleKey, validSample } from '../lib/cache.js';
 import type { CacheRow, CacheSample, CacheReset } from '../lib/cache.js';
 import { displayText } from '../lib/catalog.js';
@@ -18,8 +18,6 @@ type Context = {
   sessionId: string;
   endpoint?: string;
   selfLabel?: string;
-  setting: unknown;
-  subagentSetting?: unknown;
   env: Record<string, string | undefined>;
   samples: Map<string, CacheSample>;
   resets: CacheReset[];
@@ -31,7 +29,7 @@ type Context = {
   available: boolean;
 };
 
-export function createCachePanel(options: PluginOptions) {
+export function createCachePanel() {
   let context: Context | undefined;
   let open = false;
   let selected: string | undefined;
@@ -133,7 +131,7 @@ export function createCachePanel(options: PluginOptions) {
   }
 
   async function initialize(host: CachePanelHost, bridge: Bridge, sessionId: string, endpoint?: string, selfLabel?: string,
-    configuration: { env: Record<string, string | undefined>; setting: unknown; subagentSetting?: unknown } = { env: {}, setting: undefined }) {
+    configuration: { env: Record<string, string | undefined> } = { env: {} }) {
     const current: Context = { host, bridge, sessionId, endpoint, selfLabel, ...configuration,
       samples: new Map(), resets: [], labels: new Map(), roster: [], now: 0, pending: new Map(), available: true };
     context = current;
@@ -149,7 +147,7 @@ export function createCachePanel(options: PluginOptions) {
     const prior = context ?? previous;
     if (prior) {
       const id = await prior.host.session.id();
-      if (!context || id !== prior.sessionId) await initialize(prior.host, prior.bridge, id, prior.endpoint, undefined, { env: prior.env, setting: prior.setting, subagentSetting: prior.subagentSetting });
+      if (!context || id !== prior.sessionId) await initialize(prior.host, prior.bridge, id, prior.endpoint, undefined, { env: prior.env });
     }
     const current = context;
     if (!current) return undefined;
@@ -172,7 +170,7 @@ export function createCachePanel(options: PluginOptions) {
       let sample: CacheSample = { sessionId: current.sessionId, agentId: request.agentId ?? null, turnId: request.turnId,
         index: request.index, model, startedAt, read: usage.cache_read_input_tokens, write: usage.cache_creation_input_tokens,
         completedAt: await current.host.clock.now(), fresh: usage.input_tokens, output: usage.output_tokens,
-        ...cachePolicy(options.cache_ttl, current.endpoint, current.env, request.agentId ? current.subagentSetting : current.setting, model, request.agentId !== undefined) };
+        ...cachePolicy(current.env, model) };
       const reported = reportedCacheCreation(usage);
       if (reported) sample = applyCacheCreation(sample, reported);
       if (validSample(sample)) {
@@ -212,7 +210,7 @@ export function createCachePanel(options: PluginOptions) {
     if (prior) {
       const id = await prior.host.session.id();
       if (!context || id !== prior.sessionId) await initialize(prior.host, prior.bridge, id, prior.endpoint, undefined,
-        { env: prior.env, setting: prior.setting, subagentSetting: prior.subagentSetting });
+        { env: prior.env });
     }
     const current = context;
     if (!current) return false;
@@ -253,10 +251,7 @@ export function createCachePanel(options: PluginOptions) {
       const life: RenderElement[] = reported.length ? reported.map(part => Text({
         color: part.leftMs === 0 ? 'red' : part.leftMs < 60000 ? 'yellow' : 'green',
         children: [`Reported ${part.ttl} writes ${cacheTokens(part.tokens)} · ${cacheBar(part.leftMs / part.ttlMs)} ~${cacheClock(part.leftMs)} left`],
-      })) : row.last?.ttlMs && status.leftMs !== null ? [Text({
-        color: status.leftMs === 0 ? 'red' : status.leftMs < 60000 ? 'yellow' : 'green',
-        children: [`Estimated lifetime ${cacheBar(status.leftMs / row.last.ttlMs)} ~${cacheClock(status.leftMs)} left`],
-      })] : [];
+      })) : [];
       children.push(Box({ flexDirection: 'column', children: [
         Button({ key: `cache-agent:${key}`, label: displayText(row.label, 120), onPress: () => { selected = key; redraw(current); } }),
         Text({ children: [meter(current, row)] }),

@@ -109,6 +109,7 @@ test('native countdown expires from dispatch and compaction clears only the affe
   response(on);
   on('session.compact', ($, e) => ({ messages: e.messages }));
   const { clock, world } = await setup($, on, 'https://api.anthropic.com');
+  world.reported = { fiveMinute: 100, oneHour: 0 };
   await step($);
   await step($, { agentId: 'unmanaged', model: 'vendor/worker' });
   await clock.advance(301000);
@@ -179,4 +180,18 @@ test('reported third-party mixed TTLs produce separate lifetime bars in the nati
   const later = text(await $.ui.render(pane));
   expect(later.includes('~0:00 left')).toBe(true);
   expect(later.includes('~54:59 left')).toBe(true);
+});
+
+test('absent metadata is unknown for main and child on an Anthropic endpoint', async ($, on) => {
+  response(on);
+  const { clock, world } = await setup($, on, 'https://api.anthropic.com');
+  await step($);
+  await step($, { agentId: 'child' });
+  expect(world.samples.every(sample => sample.ttlMs === null)).toBe(true);
+  await clock.advance(301000);
+  expect(text(await $.ui.render(band())).includes('TTL unknown')).toBe(true);
+  expect(text(await $.ui.render(band('child'))).includes('TTL unknown')).toBe(true);
+  const contents = await dashboard($);
+  expect(contents.includes('Estimated lifetime')).toBe(false);
+  expect(contents.includes('likely expired')).toBe(false);
 });

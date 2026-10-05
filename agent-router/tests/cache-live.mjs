@@ -19,7 +19,7 @@ async function files(directory) {
   return result;
 }
 
-test('live third-party main and child responses override a pinned 1h estimate and preserve mixed TTLs', { timeout: 60000 }, async t => {
+test('live third-party main and child responses report mixed TTLs without configured lifetimes', { timeout: 60000 }, async t => {
   const temporary = await mkdtemp(join(tmpdir(), 'agent-router-cache-live-'));
   t.after(() => rm(temporary, { recursive: true, force: true }));
   const plugin = join(temporary, 'plugin');
@@ -31,7 +31,6 @@ test('live third-party main and child responses override a pinned 1h estimate an
   const manifestPath = join(plugin, '.claude-plugin', 'plugin.json');
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
   for (const [key, config] of Object.entries(manifest.userConfig)) if (key.endsWith('_model')) config.default = 'vendor/test';
-  manifest.userConfig.cache_ttl.default = '1h';
   await writeFile(manifestPath, JSON.stringify(manifest));
   let requests = 0;
   const toolResults = [];

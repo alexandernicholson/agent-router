@@ -47,23 +47,11 @@ export function reportedLifetimes(sample, now) {
       leftMs: Math.max(0, Math.min(part.ttlMs, sample.startedAt + part.ttlMs - now)) }));
 }
 
-/** Display estimate only: the native hook cannot set cache_control on the wire. */
-export function cachePolicy(option, endpoint, env = {}, setting, model = '', subagent = false) {
+/** Local flags describe disabling; only response metadata can establish a TTL. */
+export function cachePolicy(env = {}, model = '') {
   const family = /haiku/i.test(model) ? 'HAIKU' : /sonnet/i.test(model) ? 'SONNET' : /opus/i.test(model) ? 'OPUS' : '';
   const disabled = on(env.DISABLE_PROMPT_CACHING) || !!family && on(env[`DISABLE_PROMPT_CACHING_${family}`]);
-  const result = (ttl, source) => ({ ttlMs: ttl === '1h' ? 3600000 : 300000, ttlSource: source, disabled });
-  if (option === '5m' || option === '1h') return result(option, 'plugin estimate');
-  // Third-party providers may ignore Claude Code's TTL flags entirely.
-  let anthropic = false;
-  try { anthropic = new URL(endpoint).hostname === 'api.anthropic.com'; } catch { /* Unknown provider. */ }
-  if (!anthropic) return { ttlMs: null, ttlSource: 'provider TTL unknown', disabled };
-  if (on(env.FORCE_PROMPT_CACHING_5M)) return result('5m', 'FORCE_PROMPT_CACHING_5M');
-  const variableName = subagent ? 'CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL' : 'CLAUDE_CODE_PROMPT_CACHE_TTL';
-  const variable = env[variableName];
-  if (variable === '5m' || variable === '1h') return result(variable, variableName);
-  if (setting === '5m' || setting === '1h') return result(setting, subagent ? 'subagentPromptCacheTtl' : 'promptCacheTtl');
-  if (on(env.ENABLE_PROMPT_CACHING_1H)) return result('1h', 'ENABLE_PROMPT_CACHING_1H');
-  return result('5m', 'Anthropic API default');
+  return { ttlMs: null, ttlSource: 'response TTL metadata absent', disabled };
 }
 
 /** Dedupe identities and keep lifetime totals while bounding the visible request history. */
@@ -71,7 +59,7 @@ export function cacheRows(samples, resets = [], labels = new Map()) {
   const cutoffs = new Map(resets.map(r => [loopKey(r.sessionId, r.agentId), r.resetAt]));
   /** @type {Map<string, CacheRow>} */
   const rows = new Map();
-  const unique = new Map(samples.filter(validSample).map(s => [sampleKey(s), s]));
+  const unique = new Map(samples.filter(validSample).map(s => [sampleKey(s), s.cacheCreation ? applyCacheCreation(s, s.cacheCreation) : { ...s, ttlMs: null, ttlSource: 'response TTL metadata absent' }]));
   for (const s of [...unique.values()].sort((a, b) => a.startedAt - b.startedAt || a.index - b.index || sampleKey(a).localeCompare(sampleKey(b)))) {
     const key = loopKey(s.sessionId, s.agentId);
     let row = rows.get(key);
@@ -95,7 +83,7 @@ export function cacheStatus(sample, now) {
   if (sample.disabled) return { state: 'disabled', leftMs: null, ratio };
   if (sample.read + sample.write === 0) return { state: 'uncached', leftMs: null, ratio };
   if (sample.cacheCreation?.fiveMinute && sample.cacheCreation?.oneHour) return { state: 'reported mixed 5m/1h writes', leftMs: null, ratio };
-  if (sample.ttlMs === null) return { state: 'TTL unknown', leftMs: null, ratio };
+  if (!sample.cacheCreation || sample.ttlMs === null) return { state: 'TTL unknown', leftMs: null, ratio };
   const leftMs = Math.max(0, Math.min(sample.ttlMs, sample.startedAt + sample.ttlMs - now));
   const prefix = sample.cacheCreation ? `reported ${sample.cacheCreation.oneHour ? '1h' : '5m'} writes · ` : '';
   return { state: prefix + (leftMs === 0 ? 'likely expired' : 'estimated warm'), leftMs, ratio };
