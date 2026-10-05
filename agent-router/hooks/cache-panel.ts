@@ -1,5 +1,5 @@
 import type { AgentInfo, Elements, EngineInterface, RenderElement, RenderSurface, SessionCompactResult, TurnStepInput, TurnUsage } from 'claude-code';
-import { applyCacheCreation, reportedCacheCreation, cacheBar, cacheBarParts, cacheClock, cacheDial, cacheGrade, cachePercent, cachePolicy, cacheRows, cacheStatus, cacheTokens, isCompaction, isKeepalive, keepaliveWorthwhile, lifeGrade, loopKey, sampleKey, validSample } from '../lib/cache.js';
+import { applyCacheCreation, reportedCacheCreation, cacheBar, cacheBarParts, cacheClock, cacheDial, cacheGrade, cachePercent, cachePolicy, cacheRows, cacheStatus, cacheTokens, isCompaction, isKeepalive, keepaliveWorthwhile, keepalivesLeft, lifeGrade, loopKey, sampleKey, validSample } from '../lib/cache.js';
 import { validPrices } from '../lib/cache.js';
 import type { CachePrices, CacheRow, CacheSample, CacheReset, CacheStatus } from '../lib/cache.js';
 import { CACHE_COLORS, themeFamily } from '../lib/cache-colors.js';
@@ -48,7 +48,7 @@ type Context = {
   requested: Map<string, string>;
   rechecks: Map<string, number>;
   rechecking?: Promise<void>;
-  prices: Map<string, { at: number; value: CachePrices | null; lookup?: Promise<void> }>;
+  prices: Map<string, { at: number; value: CachePrices | null; settled: boolean; lookup?: Promise<void> }>;
   actedAt?: number;
   upkeeping?: Promise<void>;
   refresh?: Promise<void>;
@@ -351,13 +351,13 @@ export function createCachePanel() {
         value = validPrices(matched) ? matched : null;
         found = true;
       } catch {}
-      if (found) current.prices.set(model, { at: current.now, value });
+      if (found) current.prices.set(model, { at: current.now, value, settled: true });
       else if (known) current.prices.set(model, { ...known, lookup: undefined });
       else current.prices.delete(model);
       if (found && !value) current.host.ui.log(`Agent Router: no models.dev price for ${displayText(model, 160)}; keepalives are off for it.`, { to: 'debug' });
       redraw(current);
     })();
-    current.prices.set(model, { at: known?.at ?? current.now, value: known?.value ?? null, lookup });
+    current.prices.set(model, { at: known?.at ?? current.now, value: known?.value ?? null, settled: known?.settled ?? false, lookup });
     return lookup;
   }
 
@@ -414,7 +414,8 @@ export function createCachePanel() {
     const { Box, Button, Text } = elements;
     const status = row && state(current, row);
     const latest = status?.sample;
-    const counts = latest ? ` · read ${cacheTokens(latest.read)} · write ${cacheTokens(latest.write)} · new ${cacheTokens(latest.fresh)}` : '';
+    const note = row && keepaliveNote(current, row, true);
+    const counts = `${note ? ` · ${note}` : ''}${latest ? ` · read ${cacheTokens(latest.read)} · write ${cacheTokens(latest.write)} · new ${cacheTokens(latest.fresh)}` : ''}`;
     const marks = MARKERS[current.upkeep];
     const marker = marks.length ? marks.map(name => Text({ color: palette(current)[name], children: ['⬥'] })) : [Text({ dimColor: true, children: ['⬦'] })];
     return Box({ flexDirection: 'column', children: [content, Box({ flexDirection: 'row', gap: 1, children: [
@@ -433,9 +434,26 @@ export function createCachePanel() {
     warmcomp: `warmcomp · keepalives while they cost less than rewriting the cache, then compacts a main conversation of ${cacheTokens(COMPACT_MIN_TOKENS)}+ tokens 30s before its TTL ends`,
   };
 
+  const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? '' : 's'}`;
+
+  function keepaliveNote(current: Context, row: CacheRow, short = false) {
+    if (current.upkeep !== 'warm' && current.upkeep !== 'warmcomp') return undefined;
+    if (row.sessionId !== current.sessionId || row.agentId !== null || !row.last) return undefined;
+    if (current.pending.has(loopKey(current.sessionId, null))) return undefined;
+    const status = state(current, row);
+    const known = current.prices.get(row.last.model);
+    if (!status.ttl || !status.leftMs || !known?.settled) return undefined;
+    const left = keepalivesLeft(row, known.value);
+    if (left === null) return undefined;
+    const compacts = current.upkeep === 'warmcomp' && row.last.read + row.last.write + row.last.fresh >= COMPACT_MIN_TOKENS;
+    if (short) return [left || !compacts ? `↻${left}` : '', compacts ? '➜ cmpt' : ''].filter(Boolean).join(' ');
+    if (!compacts) return `${plural(left, 'keepalive')} left`;
+    return left ? `${plural(left, 'keepalive')}, then compact` : 'compact next';
+  }
+
   function priceNote(current: Context, row: CacheRow) {
     const known = row.last && current.prices.get(row.last.model);
-    if (!known || known.lookup && !known.at) return '';
+    if (!known?.settled) return '';
     return known.value ? ` · prices from models.dev ${displayText(`${known.value.provider}/${known.value.id}`, 120)}` : ' · no models.dev price';
   }
 
@@ -456,7 +474,9 @@ export function createCachePanel() {
         color: palette(current)[lifeGrade(part.leftMs)!],
         children: [`TTL ${part.ttl} · ${cacheTokens(part.tokens)} written · ${cacheBar(part.leftMs / part.ttlMs)} ~${cacheClock(part.leftMs)} left`],
       }));
-      const keepalives = row.keepalives.length ? [Text({ dimColor: true, children: [`${row.keepalives.length} keepalives since the last request`] })] : [];
+      const upkeepLine = [row.keepalives.length ? `${plural(row.keepalives.length, 'keepalive')} since the last request` : '', keepaliveNote(current, row) ?? '']
+        .filter(Boolean).join(' · ');
+      const keepalives = upkeepLine ? [Text({ dimColor: true, children: [upkeepLine] })] : [];
       children.push(Box({ flexDirection: 'column', children: [
         Button({ key: `cache-agent:${key}`, label: displayText(row.label, 120), onPress: () => { selected = key; redraw(current); } }),
         Box({ flexDirection: 'row', children: paint(elements, [{ text: `${cacheDial(state(current, row))} ` }, ...segments(current, row)]) }),

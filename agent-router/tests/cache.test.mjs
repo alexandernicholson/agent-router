@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { cachePolicy, cacheRows, cacheStatus, cacheBar, cacheClock, loopKey, applyCacheCreation, cacheGrade, cachePercent, lifeGrade, isKeepalive, keepaliveWorthwhile, cacheDial, cacheBarParts, isCompaction } from '../lib/cache.js';
+import { cachePolicy, cacheRows, cacheStatus, cacheBar, cacheClock, loopKey, applyCacheCreation, cacheGrade, cachePercent, lifeGrade, isKeepalive, keepaliveWorthwhile, keepalivesLeft, cacheDial, cacheBarParts, isCompaction } from '../lib/cache.js';
 import { recordCacheSample, resetCache, cacheSnapshot } from '../lib/cache-state.mjs';
 import { recordPath, writeRecord, linkTeammate } from '../lib/state.mjs';
 import { handleRequest } from '../lib/bridge.mjs';
@@ -273,4 +273,21 @@ test('a compaction record keeps its sizes and nothing else', async t => {
   assert.equal(saved.tokensAfter, 18000);
   assert.equal(JSON.stringify(saved).includes('PRIVATE'), false);
   await assert.rejects(recordCacheSample(root, 'lead', sample({ turnId: 'compaction:3000', tokensAfter: -1 })), /Invalid/);
+});
+
+test('the keepalives left count down to the point where warming stops', () => {
+  const standard = { read: 0.1, fiveMinute: 1.25, output: 5 };
+  const samples = [applyCacheCreation(sample({ read: 9000, write: 1000, fresh: 0 }), { fiveMinute: 1000, oneHour: 0 })];
+  const counts = [];
+  for (let i = 1; i <= 12; i++) {
+    const row = cacheRows(samples)[0];
+    const left = keepalivesLeft(row, standard);
+    assert.equal(left > 0, keepaliveWorthwhile(row, standard));
+    counts.push(left);
+    samples.push(sample({ turnId: `keepalive:${i}`, startedAt: 1000 + i, read: 10000, write: 0, fresh: 10, output: 2 }));
+  }
+  assert.deepEqual(counts, [11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]);
+  assert.equal(keepalivesLeft(cacheRows(samples.slice(0, 1))[0], null), 0);
+  assert.equal(keepalivesLeft(cacheRows([sample({ read: 0, write: 0 })])[0], standard), null);
+  assert.equal(keepalivesLeft(undefined, standard), null);
 });

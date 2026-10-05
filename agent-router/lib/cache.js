@@ -86,6 +86,24 @@ export function keepaliveWorthwhile(row, prices) {
   return spent + next <= prefix * (write - prices.read);
 }
 
+/**
+ * @param {CacheRow | undefined} row
+ * @param {CachePrices | null | undefined} prices
+ * @returns {number | null}
+ */
+export function keepalivesLeft(row, prices) {
+  const last = row?.last;
+  const prefix = last ? last.read + last.write : 0;
+  if (!last || !prefix) return null;
+  if (!validPrices(prices)) return 0;
+  const write = Math.max(1, prices.fiveMinute ?? 1);
+  const cost = s => s.read * prices.read + s.write * write + s.fresh + s.output * prices.output;
+  const spent = row.keepalives.reduce((sum, s) => sum + cost(s), 0);
+  const next = row.keepalives.length ? cost(row.keepalives.at(-1)) : prefix * prices.read;
+  if (next <= 0) return null;
+  return Math.max(0, Math.floor((prefix * (write - prices.read) - spent) / next + 1e-9));
+}
+
 export function cachePolicy(env = {}, model = '') {
   const family = /haiku/i.test(model) ? 'HAIKU' : /sonnet/i.test(model) ? 'SONNET' : /opus/i.test(model) ? 'OPUS' : '';
   const disabled = on(env.DISABLE_PROMPT_CACHING) || !!family && on(env[`DISABLE_PROMPT_CACHING_${family}`]);

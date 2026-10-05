@@ -710,3 +710,46 @@ test('upkeep waits for a price lookup rather than deciding without one', async (
   expect(world.compactions).toEqual(['default']);
   expect(world.priceLookups.length > 1).toBe(true);
 });
+
+test('warm mode shows how many keepalives are left before warming stops', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 100, oneHour: 0 };
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(2000);
+  expect(text(await $.ui.render(band())).includes('· ↻11 ·')).toBe(true);
+  await clock.advance(273000);
+  expect(world.forks.length).toBe(1);
+  expect(text(await $.ui.render(band())).includes('· ↻8 ·')).toBe(true);
+  expect((await dashboard($)).includes('1 keepalive since the last request · 8 keepalives left')).toBe(true);
+  expect(text(await $.ui.render(band('child'))).includes('↻')).toBe(false);
+});
+
+test('warmcomp counts down the keepalives left before it compacts', async ($, on) => {
+  response(on, 120000, 1000, 100);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 1000, oneHour: 0 };
+  world.forkUsage = { input_tokens: 10, output_tokens: 2, cache_read_input_tokens: 121000, cache_creation_input_tokens: 0 };
+  await cycleTo($, 'warmcomp');
+  await step($);
+  await clock.advance(2000);
+  expect(text(await $.ui.render(band())).includes('· ↻11 ➜ cmpt ·')).toBe(true);
+  for (let i = 0; i < 11; i++) await clock.advance(270000);
+  expect(world.forks.length).toBe(11);
+  expect(text(await $.ui.render(band())).includes('· ➜ cmpt ·')).toBe(true);
+  expect((await dashboard($)).includes('compact next')).toBe(true);
+});
+
+test('modes that send no keepalives show no count', async ($, on) => {
+  response(on, 120000, 1000, 100);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 1000, oneHour: 0 };
+  await step($);
+  await clock.advance(2000);
+  expect(text(await $.ui.render(band())).includes('↻')).toBe(false);
+  await cycleTo($, 'compact');
+  await clock.advance(2000);
+  expect(text(await $.ui.render(band())).includes('↻')).toBe(false);
+  expect(text(await $.ui.render(band())).includes('➜')).toBe(false);
+});
