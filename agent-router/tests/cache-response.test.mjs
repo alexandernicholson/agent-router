@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { applyCacheCreation, reportedCacheCreation, reportedLifetimes, validSample } from '../lib/cache.js';
+import { applyCacheCreation, reportedCacheCreation, cacheRows, cacheStatus, validSample } from '../lib/cache.js';
 import { transcriptCreation, transcriptTail } from '../lib/cache-transcript.mjs';
 import { recordCacheSample, enrichCacheSamples, cacheSnapshot } from '../lib/cache-state.mjs';
 import { handleRequest } from '../lib/bridge.mjs';
@@ -34,8 +34,11 @@ test('mixed reported writes retain two token counts and two independent lifetime
   const mixed = applyCacheCreation(sample(), reportedCacheCreation(usage(40, 60)));
   assert.equal(validSample(mixed), true);
   assert.equal(mixed.ttlMs, null);
-  const lifetimes = reportedLifetimes(mixed, 401000);
-  assert.deepEqual(lifetimes.map(p => [p.ttl, p.tokens, p.leftMs]), [['5m', 40, 0], ['1h', 60, 3200000]]);
+  const status = cacheStatus(cacheRows([mixed])[0], 401000);
+  assert.deepEqual(status.lifetimes.map(p => [p.ttl, p.tokens, p.leftMs]), [['5m', 40, 0], ['1h', 60, 3200000]]);
+  // The 1h portion stays warm after the 5m portion expires.
+  assert.equal(status.state, 'warm');
+  assert.equal(status.leftMs, 3200000);
 });
 
 test('missing, null, negative, fractional, inconsistent and read-only bucket metadata never manufactures a TTL', () => {

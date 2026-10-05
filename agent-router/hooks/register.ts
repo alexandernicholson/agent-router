@@ -214,9 +214,11 @@ export function register(on: On, options: PluginOptions = {}) {
     catch (error) { $.ui.log(`Agent Router models: ${error instanceof Error ? error.message : 'Open /agent-models to retry.'}`); }
     if (bridge) {
       await cachePanel.initialize({
-        session: { id: () => $.session.id() },
+        session: { id: () => $.session.id(), compact: input => $.session.compact(input) },
         agent: { list: () => $.agent.list() },
         clock: { now: () => $.clock.now() },
+        model: { fork: request => $.model.fork(request) },
+        store: { get: key => $.store.get(key), set: (key, value) => $.store.set(key, value) },
         ui: { invalidate: event => $.ui.invalidate(event), open: input => $.ui.open(input),
           close: input => $.ui.close(input), log: (text, settings) => $.ui.log(text, settings) },
         command: { register: input => $.command.register(input) },
@@ -388,7 +390,8 @@ export function register(on: On, options: PluginOptions = {}) {
     return result;
   });
 
-  on('session.end', ($, e, next) => {
+  on('session.end', async ($, e, next) => {
+    await cachePanel.settle();
     activityTimer?.cancel();
     activityTimer = undefined;
     if (e.reason === 'clear') cachePanel.clear();

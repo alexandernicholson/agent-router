@@ -159,19 +159,53 @@ Usage and routing refresh when their records change. A view shows `unavailable` 
 
 ## Prompt cache observability
 
-The **Cache** bar beneath the developer panel follows the conversation in view. It shows the last request's cache hit rate and the tokens read, written, and sent uncached. Click **Cache**, or run `/agent-cache`, to open a dashboard with a bar for the main conversation and every observed agent. Select an agent to inspect its last 30 requests, including each response's model, turn, step, and token counts.
+The cache bar beneath the developer panel follows the conversation in view: the main conversation, or the subagent or teammate whose transcript you are viewing.
 
-The hit rate is `cache_read_input_tokens / (cache_read_input_tokens + cache_creation_input_tokens + input_tokens)`. Output tokens are shown separately. Counts come from every native `turn.step` response, including intermediate tool steps, rather than from completed-turn totals. Separate agent and session identities keep nested agents, parallel requests, and split-pane teammate main loops distinct. Agents in the live roster without usage show **no observation**, not zero usage.
+```text
+[ ◕ ] off ██████████ 96% · TTL 5m · ETA ~3:44 · read 148.1k · write 5.7k · new 2
+```
 
-Request records persist across resume. Repeated request identities count once. The dashboard retains totals for all recorded requests; the 30-request limit applies only to the displayed history. The lead polls linked split-pane teammates every five seconds. Successful compaction invalidates the compacted loop's expiry estimate while preserving its historical counts; `/clear` starts a separate cache ledger on the next request.
+It shows the last request's cache hit rate, the TTL its cache writes reported, the time left before the entry expires, and the tokens read, written, and sent uncached.
 
-TTLs come exclusively from response metadata for **every provider**, including third-party gateways. When `usage.cache_creation` contains `ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens`, the dashboard shows the reported write counts and a lifetime bar for each nonzero bucket. Mixed five-minute and one-hour writes remain separate. This metadata describes newly written tokens; it does not establish the TTL of tokens read from cache.
+The dial button shows the time left in quarters of the TTL: `●` for a cache just read or written, then `◕`, `◑`, `◔`, and `○` once it has expired. It refills when a request is dispatched, and shows `◌` while there is no reported TTL to count down. Click the dial, or run `/agent-cache`, to open a dashboard with a dial and bar for the main conversation and every observed agent. Select an agent to inspect its last 30 requests, including each response's model, turn, step, and token counts.
+
+The hit rate is `cache_read_input_tokens / (cache_read_input_tokens + cache_creation_input_tokens + input_tokens)`, rounded down so that 100% means a complete hit. Output tokens are shown separately.
+
+The bar and percentage are coloured by the uncached tokens a request cost relative to its context (read, write, and new tokens), since a miss on a large context costs more than the same rate on a small one:
+
+| Colour | Uncached tokens (write + new) | Hit rate this means |
+| --- | --- | --- |
+| Green | Up to 5% of the context, at least 2k and at most 20k | 95% from 40k to 400k tokens; 98% at 1M; lower on small contexts |
+| Yellow | Up to 20% of the context, at least 5k and at most 50k | 80% from 25k to 250k tokens; 95% at 1M |
+| Red | More | |
+
+For example, a 90% hit rate on a 10k context is green, and the same rate on a 990k context is red. The time left is green above two minutes, yellow above 30 seconds, and red in the last 30 seconds, when upkeep acts. Counts come from every native `turn.step` response, including intermediate tool steps, rather than from completed-turn totals. Separate agent and session identities keep nested agents, parallel requests, and split-pane teammate main loops distinct. Agents in the live roster without usage show **no observation**, not zero usage.
+
+Request records persist across resume. Repeated request identities count once. The dashboard retains totals for all recorded requests; the 30-request limit applies only to the displayed history. The lead polls linked split-pane teammates every five seconds. Successful compaction clears the compacted loop's countdown while preserving its historical counts; `/clear` starts a separate cache ledger on the next request.
+
+TTLs come exclusively from response metadata for **every provider**, including third-party gateways. When `usage.cache_creation` contains `ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens`, the dashboard shows the reported write counts and a lifetime bar for each nonzero bucket. Mixed five-minute and one-hour writes remain separate. This metadata describes newly written tokens. A request that only reads the cache keeps the TTL of the loop's latest reported write, since read tokens keep the TTL they were written with.
 
 Claude Code's native `turn.step` hook currently normalizes usage to four token totals and omits the TTL breakdown. Agent Router first checks the response usage and then recovers the breakdown from a bounded tail of the corresponding main or subagent transcript. Records must match the session, agent, model, request interval, and all four token counts; ambiguous matches are ignored. Delayed transcript writes are checked again after tool use, at agent completion, and for up to 30 seconds after each response. Only usage metadata is persisted; transcript text stays out of cache records.
 
-If response TTL metadata is absent, invalid, or ambiguous, the dashboard shows **TTL unknown** for every provider. Requested TTLs, environment variables, endpoint defaults, and prior responses do not establish the current response's TTL. No manual lifetime override is offered. For reported TTLs, expiry countdowns remain **estimates**, timed from request dispatch; responses do not report an exact expiry timestamp. A bar can show a historical cache hit after its estimated lifetime has expired. The plugin does not set API `cache_control` or extend retention.
+If response TTL metadata is absent, invalid, or ambiguous, the dashboard shows **TTL unknown** for every provider. Requested TTLs, environment variables, endpoint defaults, and responses from other loops do not establish a TTL. No manual lifetime override is offered.
 
-The dashboard distinguishes caching disabled by `DISABLE_PROMPT_CACHING*`, a response with no cached tokens, missing usage, unknown TTL, and a likely expired entry. It does not attribute a miss to a particular prompt change or claim authoritative upstream billing. No keepalive model requests are sent.
+The time left uses the reported TTL and the dispatch time of the loop's latest request that read or wrote its cache: an entry's lifetime runs from the start of the request that writes or reads it, and every read refreshes it. A request in flight restarts the countdown when it is dispatched. Mixed five-minute and one-hour writes count down separately, and the bar shows the sooner one still running. Responses carry no expiry timestamp, so the countdown is timed by Claude Code's clock; a bar can show a past cache hit after its entry has expired. The plugin does not set API `cache_control`.
+
+The dashboard distinguishes caching disabled by `DISABLE_PROMPT_CACHING*`, a response with no cached tokens, missing usage, unknown TTL, and an expired entry. It does not attribute a miss to a particular prompt change or claim authoritative upstream billing.
+
+### Cache upkeep
+
+The mode button next to the dial shows the current upkeep mode for the main conversation; click it, or focus it and press Enter, to switch to the next mode: `off` → `warm` → `compact` → `off`. Each mode has its own background colour (grey for `off`, teal for `warm`, purple for `compact`, as the active theme draws them), chosen to stay distinct from the green, yellow, and red of the hit rate and time left. The choice lasts for the session, including after a reload or `/clear`; a new session starts with **off**.
+
+| Mode | What happens 30 seconds before the main conversation's TTL ends |
+| --- | --- |
+| `off` (default) | Nothing. No requests are sent. |
+| `warm` | A keepalive request: one tool-less request over the conversation as last sent, asking for `OK`. Its prompt-cache read refreshes the entry. |
+| `compact` | The conversation is compacted, as `/compact` does, while its cache is still warm, if its context is 100k tokens or larger. |
+
+Upkeep acts only while no main-conversation request is in flight, and at most once per countdown. Subagents and split-pane teammates are left alone. Upkeep needs a reported TTL, so it does nothing while the TTL is unknown.
+
+Keepalives are billed: each reads the cached context at the cache-read rate and adds a few uncached and output tokens. Warming pauses once the keepalives since the last request, plus one more, would cost more than letting the entry expire and writing the cached context again at the reported TTL's write price. Each keepalive's measured tokens are priced at list multiples of the model's base input price: cache reads 0.1× (0.05× for Claude Opus 5.5, 0.025× for Claude Fable 5.1 and Claude Mythos 5.1), writes 1.25× for 5 minutes and 2× for 1 hour, output 5×. At standard prices that is about 11 keepalives on a 5-minute TTL, roughly 55 minutes of idle time. A gateway's own pricing may differ. A real request resets the count. Keepalives only pay off if you return to the conversation; if you don't, they are spent for nothing. Keepalives appear in the dashboard's request history and totals, but the bar keeps the hit rate of the last real request. Compaction runs only between turns; if it is refused, the debug log says why.
 
 The [prompt-cache-control reference mod](https://github.com/davila7/claude-code-templates/tree/main/cli-tool/components/mods/observability/prompt-cache-control), installed with `npx claude-code-templates@latest --mod observability/prompt-cache-control`, monitors the main conversation. Agent Router implements its own per-agent dashboard; that mod is not required. The `/agent-cache` command remains distinct from its `/cache` command.
 
