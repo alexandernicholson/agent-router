@@ -1,4 +1,4 @@
-/** @typedef {{sessionId: string, agentId: string | null, turnId: string, index: number, model: string, startedAt: number, completedAt?: number, read: number, write: number, fresh: number, output: number, ttlMs: number | null, ttlSource: string, disabled: boolean, cacheCreation?: {fiveMinute: number, oneHour: number}, tokensBefore?: number, tokensAfter?: number, miss?: string}} CacheSample */
+/** @typedef {{sessionId: string, agentId: string | null, turnId: string, index: number, model: string, startedAt: number, completedAt?: number, read: number, write: number, fresh: number, output: number, ttlMs: number | null, ttlSource: string, disabled: boolean, cacheCreation?: {fiveMinute: number, oneHour: number}, tokensBefore?: number, tokensAfter?: number, miss?: string, requested?: '5m' | '1h'}} CacheSample */
 /** @typedef {{sessionId: string, agentId: string | null, resetAt: number}} CacheReset */
 /** @typedef {{fiveMinute: number, oneHour: number}} CacheCreation */
 /** @typedef {{sessionId: string, agentId: string | null, label: string, samples: CacheSample[], last?: CacheSample, compaction?: CacheSample, touchedAt?: number, creation?: CacheCreation | null, keepalives: CacheSample[], totals: {requests: number, read: number, write: number, fresh: number, output: number}}} CacheRow */
@@ -22,7 +22,7 @@ export function validSample(s) {
     typeof s.ttlSource === 'string' && typeof s.disabled === 'boolean' &&
     (s.completedAt === undefined || Number.isSafeInteger(s.completedAt) && s.completedAt >= s.startedAt) &&
     (s.cacheCreation === undefined || validCreation(s.cacheCreation, s.write)) &&
-    count(s.tokensBefore) && count(s.tokensAfter);
+    count(s.tokensBefore) && count(s.tokensAfter) && (s.requested === undefined || s.requested === '5m' || s.requested === '1h');
 }
 
 export function validCreation(value, writes) {
@@ -57,18 +57,19 @@ function missOf(s, prior, touchedAt, creation) {
   const expected = prior ? prior.read + prior.write : 0;
   if (!prior || !expected || expected - s.read < Math.max(2000, expected * 0.05)) return undefined;
   if (!sameModel(prior.model, s.model)) return 'model changed';
+  if (s.requested === '1h' && (prior.requested ?? '5m') !== '1h') return 'TTL changed';
   if (!creation) return 'cache miss';
   const ttlMs = creation.oneHour ? 3600000 : 300000;
   return s.startedAt - (touchedAt ?? prior.startedAt) > ttlMs ? 'expired' : 'prefix changed';
 }
 
-/** @typedef {{read: number, output: number, fiveMinute?: number, provider?: string, id?: string}} CachePrices */
+/** @typedef {{read: number, output: number, fiveMinute?: number, oneHour?: number, provider?: string, id?: string, source?: string}} CachePrices */
 
 const multiple = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
 /** @param {unknown} value */
 export function validPrices(value) {
   return !!value && typeof value === 'object' && multiple(value.read) && multiple(value.output) &&
-    (value.fiveMinute === undefined || multiple(value.fiveMinute));
+    (value.fiveMinute === undefined || multiple(value.fiveMinute)) && (value.oneHour === undefined || multiple(value.oneHour));
 }
 
 /**
@@ -76,15 +77,14 @@ export function validPrices(value) {
  * @param {CachePrices | null | undefined} prices
  */
 export function keepaliveWorthwhile(row, prices) {
-  const last = row?.last;
-  const prefix = last ? last.read + last.write : 0;
-  if (!last || !prefix || !validPrices(prices)) return false;
-  const write = Math.max(1, prices.fiveMinute ?? 1);
-  const cost = s => s.read * prices.read + s.write * write + s.fresh + s.output * prices.output;
-  const spent = row.keepalives.reduce((sum, s) => sum + cost(s), 0);
-  const next = row.keepalives.length ? cost(row.keepalives.at(-1)) : prefix * prices.read;
-  return spent + next <= prefix * (write - prices.read);
+  const left = keepalivesLeft(row, prices);
+  return left !== null && left > 0;
 }
+
+const writePrice = (row, prices) => {
+  const fiveMinute = Math.max(1, prices.fiveMinute ?? 1);
+  return row.creation?.oneHour && !row.creation.fiveMinute ? Math.max(fiveMinute, prices.oneHour ?? fiveMinute) : fiveMinute;
+};
 
 /**
  * @param {CacheRow | undefined} row
@@ -96,7 +96,7 @@ export function keepalivesLeft(row, prices) {
   const prefix = last ? last.read + last.write : 0;
   if (!last || !prefix) return null;
   if (!validPrices(prices)) return 0;
-  const write = Math.max(1, prices.fiveMinute ?? 1);
+  const write = writePrice(row, prices);
   const cost = s => s.read * prices.read + s.write * write + s.fresh + s.output * prices.output;
   const spent = row.keepalives.reduce((sum, s) => sum + cost(s), 0);
   const next = row.keepalives.length ? cost(row.keepalives.at(-1)) : prefix * prices.read;
@@ -156,7 +156,7 @@ export function cacheStatus(row, now, pendingAt) {
   const without = state => ({ state, leftMs: null, ratio, lifetimes: [], sample });
   if (sample.disabled) return without('caching disabled');
   if (sample.read + sample.write === 0) return without('uncached');
-  if (!row.creation) return without('TTL unknown');
+  if (!row.creation) return without('TTL not reported');
   const anchor = Math.max(row.touchedAt ?? sample.startedAt, pendingAt ?? 0);
   /** @type {CacheLifetime[]} */
   const lifetimes = [{ ttl: '5m', ttlMs: 300000, tokens: row.creation.fiveMinute }, { ttl: '1h', ttlMs: 3600000, tokens: row.creation.oneHour }]

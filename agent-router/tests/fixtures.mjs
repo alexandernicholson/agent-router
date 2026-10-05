@@ -6,4 +6,4 @@ export const modelOptions = Object.freeze({
   sonic_model: 'vendor/fast-v1',
 });
 
-export const upkeepOptions = Object.freeze({ teammate_cache_upkeep: 'warm' });
+export const upkeepOptions = Object.freeze({ teammate_cache_upkeep: 'warm', teammate_cache_ttl: '1h' });

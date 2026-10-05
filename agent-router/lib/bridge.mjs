@@ -4,7 +4,7 @@ import { teamMember } from './teammate.mjs';
 import { fetchModels, normalizeBaseUrl } from './connection.mjs';
 import { normalizeCatalog } from './catalog.js';
 import { recordCacheSample, enrichCacheSamples, resetCache, cacheSnapshot } from './cache-state.mjs';
-import { modelPrices } from './model-prices.mjs';
+import { lookUpPrices } from './price-sources.mjs';
 import { stateDirectory, recordPath, readRecord, writeRecord, agentAssignments, sessionStats, idKey, linkTeammate, USAGE_KEYS } from './state.mjs';
 
 
@@ -210,7 +210,7 @@ export async function handleRequest(input, env = process.env, discover = fetchMo
     if (!Array.isArray(models) || models.length > 16 || models.some(model => typeof model !== 'string' || !model || model.length > 200)) {
       throw new Error('cache-prices takes up to 16 model names in models.');
     }
-    return modelPrices(stateDirectory(env), models, env, pricesFetch);
+    return lookUpPrices(models, { root: stateDirectory(env), env, fetcher: pricesFetch });
   }
   if (input.action === 'catalog') return catalog(env, discover);
   if (input.action === 'stats') return sessionStats(stateDirectory(env), input.session_id);

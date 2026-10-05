@@ -100,3 +100,84 @@ test('live third-party main and child responses report mixed TTLs without config
   assert.deepEqual(agent.cacheCreation, { fiveMinute: 500, oneHour: 1000 });
   assert.equal(agent.ttlSource, 'response cache_creation');
 });
+
+test('live: the main conversation asks for its own TTL and a subagent keeps the subagent default', { timeout: 60000 }, async t => {
+  const temporary = await mkdtemp(join(tmpdir(), 'agent-router-cache-ttl-live-'));
+  t.after(() => rm(temporary, { recursive: true, force: true }));
+  const plugin = join(temporary, 'plugin');
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  await mkdir(plugin);
+  for (const name of ['.claude-plugin', 'agents', 'commands', 'hooks', 'lib', 'scripts']) {
+    await cp(join(root, name), join(plugin, name), { recursive: true });
+  }
+  const manifestPath = join(plugin, '.claude-plugin', 'plugin.json');
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  for (const [key, config] of Object.entries(manifest.userConfig)) if (key.endsWith('_model')) config.default = 'vendor/test';
+  manifest.userConfig.cache_ttl.default = '1h';
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  const seen = [];
+  let requests = 0;
+  const marks = body => {
+    const found = new Set();
+    const walk = node => {
+      if (Array.isArray(node)) return node.forEach(walk);
+      if (!node || typeof node !== 'object') return;
+      if (node.cache_control) found.add(node.cache_control.ttl ?? '5m');
+      for (const value of Object.values(node)) if (value && typeof value === 'object') walk(value);
+    };
+    walk([body.system, body.messages]);
+    return [...found].sort();
+  };
+  const server = createServer(async (request, response) => {
+    if (request.method !== 'POST') {
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      return response.end(JSON.stringify({ data: [{ id: 'vendor/test', type: 'model', display_name: 'Test' }] }));
+    }
+    let raw = '';
+    for await (const chunk of request) raw += chunk;
+    if (request.url.includes('count_tokens')) return response.end('{"input_tokens":100}');
+    const body = JSON.parse(raw);
+    const text = JSON.stringify(body.messages ?? []);
+    const kind = text.includes('Use a scout') ? 'main' : text.includes('Reply briefly') ? 'subagent' : 'other';
+    if (kind === 'other') {
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      return response.end(JSON.stringify({ id: `msg_other_${seen.length}`, type: 'message', role: 'assistant', model: 'vendor/test',
+        content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn', stop_sequence: null, usage: { input_tokens: 1, output_tokens: 1 } }));
+    }
+    if (kind === 'main') requests++;
+    seen.push({ kind, ttls: marks(body) });
+    const usage = { input_tokens: 100, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 20 };
+    const block = kind === 'main' && requests === 1 ? { type: 'tool_use', id: 'toolu_child', name: 'Agent',
+      input: { description: 'Cache probe', subagent_type: 'agent-router:scout', prompt: 'Reply briefly' } } : { type: 'text', text: 'done' };
+    const message = { id: `msg_${seen.length}`, type: 'message', role: 'assistant', model: 'vendor/test', content: [], stop_reason: null, stop_sequence: null, usage };
+    if (!body.stream) {
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      return response.end(JSON.stringify({ ...message, content: [block], stop_reason: block.type === 'tool_use' ? 'tool_use' : 'end_turn' }));
+    }
+    const start = block.type === 'tool_use' ? { ...block, input: {} } : { ...block, text: '' };
+    const delta = block.type === 'tool_use' ? { type: 'input_json_delta', partial_json: JSON.stringify(block.input) } : { type: 'text_delta', text: block.text };
+    const events = [{ type: 'message_start', message }, { type: 'content_block_start', index: 0, content_block: start },
+      { type: 'content_block_delta', index: 0, delta }, { type: 'content_block_stop', index: 0 },
+      { type: 'message_delta', delta: { stop_reason: block.type === 'tool_use' ? 'tool_use' : 'end_turn', stop_sequence: null }, usage }, { type: 'message_stop' }];
+    response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    response.end(events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''));
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const env = { ...process.env, ANTHROPIC_BASE_URL: `http://127.0.0.1:${server.address().port}`, ANTHROPIC_API_KEY: 'dummy-test-key',
+    CLAUDE_CONFIG_DIR: join(temporary, 'config'), CLAUDE_PLUGIN_DATA: join(temporary, 'data'),
+    CLAUDE_CODE_ENABLE_FUNCTION_HOOKS: '1', DISABLE_TELEMETRY: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' };
+  for (const key of ['ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_SUBAGENT_MODEL_FORCE', 'CLAUDE_CODE_SUBAGENT_MODEL', 'ANTHROPIC_CUSTOM_HEADERS',
+    'CLAUDE_CODE_PROMPT_CACHE_TTL', 'CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL', 'ENABLE_PROMPT_CACHING_1H', 'FORCE_PROMPT_CACHING_5M']) delete env[key];
+  const childProcess = spawn(process.env.CLAUDE_BINARY || 'claude', ['-p', 'Use a scout to reply briefly.', '--model', 'vendor/test',
+    '--permission-mode', 'default', '--allowedTools', 'Agent,Task', '--output-format', 'json', '--plugin-dir', plugin], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  t.after(() => childProcess.kill());
+  let stderr = '';
+  childProcess.stderr.on('data', chunk => { stderr += chunk; });
+  assert.equal(await new Promise((resolve, reject) => { childProcess.once('error', reject); childProcess.once('close', resolve); }), 0, stderr);
+  const main = seen.filter(request => request.kind === 'main');
+  const subagent = seen.filter(request => request.kind === 'subagent');
+  assert.ok(main.length >= 2 && subagent.length >= 1, JSON.stringify(seen));
+  for (const request of main) assert.deepEqual(request.ttls, ['1h'], JSON.stringify(seen));
+  for (const request of subagent) assert.deepEqual(request.ttls, ['5m'], JSON.stringify(seen));
+});

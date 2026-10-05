@@ -3,7 +3,9 @@ import { routeAgent, routeTeammate, validatePolicy, sameModel, isTruthy } from '
 import { createModelPicker, type ModelPickerHost } from './model-picker';
 import { createStatsPanel } from './stats-panel';
 import { agentBadge, sameSent, type Sent } from './agent-badge';
-import { createCachePanel, CACHE_PANE, upkeepMode } from './cache-panel';
+import { createCachePanel, CACHE_PANE, upkeepMode, ttlOption } from './cache-panel';
+import { resolveDefaultTtl } from '../lib/cache-ttl.js';
+import type { TtlAuth } from '../lib/cache-ttl.js';
 
 type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 type Policy = { version: number; roles: Record<string, { model: string; aliases: string[]; effort?: Effort }>; teammate?: { model?: string; effort?: Effort } };
@@ -186,6 +188,24 @@ export function register(on: On, options: PluginOptions = {}) {
     });
     await ready;
     $.ui.invalidate('ui.render');
+    const cacheEnv = {
+      DISABLE_PROMPT_CACHING: await $.env.get('DISABLE_PROMPT_CACHING').catch(() => undefined),
+      DISABLE_PROMPT_CACHING_HAIKU: await $.env.get('DISABLE_PROMPT_CACHING_HAIKU').catch(() => undefined),
+      DISABLE_PROMPT_CACHING_SONNET: await $.env.get('DISABLE_PROMPT_CACHING_SONNET').catch(() => undefined),
+      DISABLE_PROMPT_CACHING_OPUS: await $.env.get('DISABLE_PROMPT_CACHING_OPUS').catch(() => undefined),
+      COLORFGBG: await $.env.get('COLORFGBG').catch(() => undefined),
+      CLAUDE_CODE_PROMPT_CACHE_TTL: await $.env.get('CLAUDE_CODE_PROMPT_CACHE_TTL').catch(() => undefined),
+      CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: await $.env.get('CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL').catch(() => undefined),
+      ENABLE_PROMPT_CACHING_1H: await $.env.get('ENABLE_PROMPT_CACHING_1H').catch(() => undefined),
+      ENABLE_PROMPT_CACHING_1H_BEDROCK: await $.env.get('ENABLE_PROMPT_CACHING_1H_BEDROCK').catch(() => undefined),
+      CLAUDE_CODE_USE_BEDROCK: await $.env.get('CLAUDE_CODE_USE_BEDROCK').catch(() => undefined),
+      FORCE_PROMPT_CACHING_5M: await $.env.get('FORCE_PROMPT_CACHING_5M').catch(() => undefined),
+    };
+    const auth = async (): Promise<TtlAuth> => {
+      const credential = await $.session.authorize().catch(() => null);
+      if (credential?.kind === 'bearer') return 'subscription';
+      return credential ? 'api-key' : 'gateway';
+    };
     pickerHost = {
       plugin: { name: $.plugin.name, root: $.plugin.root },
       ui: {
@@ -205,6 +225,11 @@ export function register(on: On, options: PluginOptions = {}) {
       command: { register: input => $.command.register(input) },
       session: { id: () => $.session.id() },
       endpoint: () => $.env.get('ANTHROPIC_BASE_URL'),
+      ttlDefaults: async () => {
+        const [settings, kind] = await Promise.all([$.settings.read().catch(() => ({})), auth().catch((): TtlAuth => 'gateway')]);
+        const resolve = (scope: 'main' | 'subagent') => resolveDefaultTtl({ scope, env: cacheEnv, settings: settings as Record<string, unknown>, auth: kind });
+        return { main: resolve('main'), subagent: resolve('subagent') };
+      },
     };
     await $.command.register({ name: 'agent-models-apply', immediate: true,
       description: 'Apply saved Agent Router role models and efforts to this session now.' });
@@ -221,18 +246,20 @@ export function register(on: On, options: PluginOptions = {}) {
         ui: { invalidate: event => $.ui.invalidate(event), open: input => $.ui.open(input),
           close: input => $.ui.close(input), log: (text, settings) => $.ui.log(text, settings) },
         command: { register: input => $.command.register(input) },
+        env: { set: (name, value) => name === 'CLAUDE_CODE_PROMPT_CACHE_TTL' ? $.env.set('CLAUDE_CODE_PROMPT_CACHE_TTL', value)
+          : $.env.set('CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL', value) },
+        settings: { read: input => $.settings.read(input) },
+        auth,
       }, bridge, await $.session.id(), await $.env.get('ANTHROPIC_BASE_URL'),
         snapshot?.active && snapshot.teammate ? snapshot.teammate.name ?? snapshot.teammate.agentId : undefined, {
-          env: {
-            DISABLE_PROMPT_CACHING: await $.env.get('DISABLE_PROMPT_CACHING').catch(() => undefined),
-            DISABLE_PROMPT_CACHING_HAIKU: await $.env.get('DISABLE_PROMPT_CACHING_HAIKU').catch(() => undefined),
-            DISABLE_PROMPT_CACHING_SONNET: await $.env.get('DISABLE_PROMPT_CACHING_SONNET').catch(() => undefined),
-            DISABLE_PROMPT_CACHING_OPUS: await $.env.get('DISABLE_PROMPT_CACHING_OPUS').catch(() => undefined),
-            COLORFGBG: await $.env.get('COLORFGBG').catch(() => undefined),
-          },
+          env: cacheEnv,
+          ttl: snapshot?.active && (snapshot.self || snapshot.teammate)
+            ? { main: ttlOption(options.teammate_cache_ttl), subagent: ttlOption(options.subagent_cache_ttl), teammate: ttlOption(options.teammate_cache_ttl) }
+            : { main: ttlOption(options.cache_ttl), subagent: ttlOption(options.subagent_cache_ttl), teammate: ttlOption(options.teammate_cache_ttl) },
           upkeep: snapshot?.active && (snapshot.self || snapshot.teammate) ? upkeepMode(options.teammate_cache_upkeep) : undefined,
         });
       if (e.isInteractive && e.surface === 'terminal') {
+        await cachePanel.introduce();
         cacheTicks = 0;
         cacheTimer = $.clock.every(1000, async () => {
           await cachePanel.tick();
@@ -377,6 +404,7 @@ export function register(on: On, options: PluginOptions = {}) {
     const content = await next(e);
     const viewed = e.props.view.agentId;
     const elements = $.ui.resolve(e);
+    await cachePanel.view(viewed);
     if (failure || !snapshot?.active) return cachePanel.renderBand(elements, content, viewed);
     // Only an in-process teammate not yet stepped needs the roster to find it.
     const agent = viewed && !agents.has(viewed) && !sent.has(viewed) ? (await $.agent.list()).find(item => item.id === viewed) : undefined;
@@ -385,7 +413,7 @@ export function register(on: On, options: PluginOptions = {}) {
 
   on('session.compact', async ($, e, next) => {
     const startedAt = await $.clock.now();
-    const result = await next(e);
+    const result = e.trigger === 'precompute' ? await next(e) : await cachePanel.holdTtlFor(e.agentId ?? null, () => next(e));
     if (result.messages && e.trigger !== 'precompute') await cachePanel.compacted(e.agentId ?? null, startedAt, result).catch(() => undefined);
     return result;
   });

@@ -101,3 +101,10 @@ test('listings with no input price or no cache price are ignored', () => {
   assert.equal(matchPrices(priceIndex([['x', 'pond-1', null, 1, 4, null, null]]), 'pond-1'), null);
   assert.equal(matchPrices(priceIndex([['x', 'pond-1', null, 'free', 4, 0.1, null], ['y', 'pond-1', null, -1, 4, 0.1, null]]), 'pond-1'), null);
 });
+
+test('a listing with a 1h write price passes it on as a multiple of input', () => {
+  const priced = priceIndex([['maker', 'pond-2', 'maker', 4, 20, 0.2, 5, 8]]);
+  assert.deepEqual(matchPrices(priced, 'pond-2'), { read: 0.05, fiveMinute: 1.25, oneHour: 2, output: 5, provider: 'maker', id: 'pond-2' });
+  assert.equal(matchPrices(priceIndex([['maker', 'pond-2', 'maker', 4, 20, 0.2, 5]]), 'pond-2').oneHour, undefined);
+  assert.equal(matchPrices(priceIndex([['maker', 'pond-2', 'maker', 4, 20, 0.2, 5, -8]]), 'pond-2').oneHour, undefined);
+});

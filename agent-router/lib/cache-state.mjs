@@ -5,7 +5,7 @@ import { transcriptTail, transcriptCreation } from './cache-transcript.mjs';
 export async function recordCacheSample(root, sessionId, input, transcriptPath) {
   let sample = Object.fromEntries(['agentId', 'turnId', 'index', 'model', 'startedAt', 'read', 'write', 'fresh', 'output', 'ttlMs', 'ttlSource', 'disabled'].map(k => [k, input?.[k]]));
   sample.sessionId = sessionId;
-  for (const key of ['completedAt', 'tokensBefore', 'tokensAfter']) if (input?.[key] !== undefined) sample[key] = input[key];
+  for (const key of ['completedAt', 'tokensBefore', 'tokensAfter', 'requested']) if (input?.[key] !== undefined) sample[key] = input[key];
   if (validCreation(input?.cacheCreation, sample.write)) sample = applyCacheCreation(sample, input.cacheCreation);
   if (!validSample(sample)) throw new Error('Invalid cache sample.');
   if (!sample.cacheCreation) sample = { ...sample, ttlMs: null, ttlSource: 'response TTL metadata absent' };

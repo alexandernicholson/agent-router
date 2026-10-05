@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { cachePolicy, cacheRows, cacheStatus, cacheBar, cacheClock, loopKey, applyCacheCreation, cacheGrade, cachePercent, lifeGrade, isKeepalive, keepaliveWorthwhile, keepalivesLeft, cacheDial, cacheBarParts, isCompaction } from '../lib/cache.js';
+import { cachePolicy, validSample, validPrices, cacheRows, cacheStatus, cacheBar, cacheClock, loopKey, applyCacheCreation, cacheGrade, cachePercent, lifeGrade, isKeepalive, keepaliveWorthwhile, keepalivesLeft, cacheDial, cacheBarParts, isCompaction } from '../lib/cache.js';
 import { recordCacheSample, resetCache, cacheSnapshot } from '../lib/cache-state.mjs';
 import { recordPath, writeRecord, linkTeammate } from '../lib/state.mjs';
 import { handleRequest } from '../lib/bridge.mjs';
@@ -21,7 +21,7 @@ test('missing response metadata stays unknown and local flags only indicate disa
   assert.equal(cachePolicy({ ENABLE_PROMPT_CACHING_1H: '1', FORCE_PROMPT_CACHING_5M: 'true',
     CLAUDE_CODE_PROMPT_CACHE_TTL: '1h', CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: '1h' }, 'claude-opus-5').ttlMs, null);
   assert.equal(cachePolicy({ DISABLE_PROMPT_CACHING_OPUS: '1' }, 'claude-opus-5').disabled, true);
-  assert.equal(cacheStatus(cacheRows([sample()])[0], 1000).state, 'TTL unknown');
+  assert.equal(cacheStatus(cacheRows([sample()])[0], 1000).state, 'TTL not reported');
   assert.equal(cacheStatus(cacheRows([sample()])[0], 9999999).leftMs, null);
   const old = cacheRows([sample()])[0].last;
   assert.equal(old.ttlMs, null);
@@ -35,7 +35,7 @@ test('read ratio excludes output and countdown starts at dispatch, not response 
   assert.equal(status(reported, 101000).leftMs, 200000);
   assert.equal(status(reported, 101000).state, 'warm');
   assert.equal(status(reported, 301000).state, 'expired');
-  assert.equal(status(sample({ ttlMs: null }), 9999999).state, 'TTL unknown');
+  assert.equal(status(sample({ ttlMs: null }), 9999999).state, 'TTL not reported');
   assert.equal(status(sample({ read: 0, write: 0 }), 1000).state, 'uncached');
   assert.equal(status(sample({ read: 0, write: 0, fresh: 0 }), 1000).ratio, null);
   assert.equal(status(sample({ disabled: true }), 1000).state, 'caching disabled');
@@ -232,7 +232,7 @@ test("a compaction shows its own request and sizes until the loop's next request
   assert.equal(status.leftMs, null);
   const after = sample({ turnId: 'next', startedAt: 9000, read: 48000, write: 20000, fresh: 2 });
   const next = cacheRows([before, compaction, after], resets)[0];
-  assert.equal(cacheStatus(next, 9500).state, 'TTL unknown');
+  assert.equal(cacheStatus(next, 9500).state, 'TTL not reported');
   assert.equal(next.last.miss, undefined);
   const bare = sample({ turnId: 'compaction:2000', startedAt: 2000, read: 0, write: 0, fresh: 0, output: 0 });
   const quiet = cacheRows([before, bare], resets)[0];
@@ -290,4 +290,33 @@ test('the keepalives left count down to the point where warming stops', () => {
   assert.equal(keepalivesLeft(cacheRows(samples.slice(0, 1))[0], null), 0);
   assert.equal(keepalivesLeft(cacheRows([sample({ read: 0, write: 0 })])[0], standard), null);
   assert.equal(keepalivesLeft(undefined, standard), null);
+});
+
+test('requests remember the TTL they asked for, and moving up to 1h is named as the miss', () => {
+  assert.equal(validSample(sample({ requested: '1h' })), true);
+  assert.equal(validSample(sample({ requested: '2h' })), false);
+  const warm = applyCacheCreation(sample({ startedAt: 0, read: 340000, write: 3000, requested: '5m' }), { fiveMinute: 3000, oneHour: 0 });
+  const label = next => cacheRows([warm, sample({ turnId: 'next', startedAt: 26000, ...next })])[0].last.miss;
+  assert.equal(label({ read: 48648, write: 297000, requested: '1h' }), 'TTL changed');
+  assert.equal(label({ read: 48648, write: 297000, requested: '5m' }), 'prefix changed');
+  assert.equal(label({ read: 48648, write: 297000 }), 'prefix changed');
+});
+
+test('a 1h cache is costed at its own write price, and a missing 1h price errs toward fewer keepalives', () => {
+  const listed = { read: 0.1, fiveMinute: 1.25, oneHour: 2, output: 5 };
+  const unlisted = { read: 0.1, fiveMinute: 1.25, output: 5 };
+  const allowed = (creation, prices) => {
+    const samples = [applyCacheCreation(sample({ read: 9000, write: 1000, fresh: 0 }), creation)];
+    for (let i = 1; i < 100; i++) {
+      if (!keepaliveWorthwhile(cacheRows(samples)[0], prices)) return i - 1;
+      samples.push(sample({ turnId: `keepalive:${i}`, startedAt: 1000 + i, read: 10000, write: 0, fresh: 10, output: 2 }));
+    }
+    return Infinity;
+  };
+  const oneHour = { fiveMinute: 0, oneHour: 1000 };
+  assert.equal(allowed({ fiveMinute: 1000, oneHour: 0 }, listed), 11);
+  assert.equal(allowed(oneHour, listed), 18);
+  assert.equal(allowed(oneHour, unlisted), 11);
+  assert.equal(keepalivesLeft(cacheRows([applyCacheCreation(sample({ read: 9000, write: 1000, fresh: 0 }), oneHour)])[0], listed), 19);
+  assert.equal(validPrices({ ...listed, oneHour: -1 }), false);
 });

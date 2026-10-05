@@ -317,3 +317,14 @@ test('a lead keeps its own cache upkeep, whatever teammates start in', async ($,
   await lead($, on);
   expect(upkeepMode(await $.ui.render(band()))).toBe('off');
 });
+
+test('a split-pane teammate starts its own conversation in the teammate TTL, and its lead does not', async ($, on) => {
+  const self = { role: 'task', type: 'agent-router:task', model: 'vendor/task-v1' };
+  const world = await lead($, on, { active: true, policy, leadSessionId: 'lead-of-mate', self, teammate: { agentId: 'worker@session-lead' } });
+  expect(world.env.filter(item => item.name === 'CLAUDE_CODE_PROMPT_CACHE_TTL').at(-1)?.value).toBe('1h');
+});
+
+test('a lead session leaves the main conversation TTL to Claude Code by default', async ($, on) => {
+  const world = await lead($, on);
+  expect(world.env.some(item => item.name === 'CLAUDE_CODE_PROMPT_CACHE_TTL' && item.value !== undefined)).toBe(false);
+});

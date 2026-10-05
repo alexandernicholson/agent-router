@@ -21,9 +21,22 @@ function text(node: RenderNode): string {
   return label || ('children' in node && Array.isArray(node.children) ? node.children.map(text).join(' ') : '');
 }
 
-async function setup($: Engine, on: On, endpoint = 'https://gateway.example', stored?: Record<string, unknown>) {
+const ttlSeen: { at: string; agentId: string | null; value?: string }[] = [];
+let liveEnv: Record<string, string | undefined> = {};
+
+async function setup($: Engine, on: On, endpoint = 'https://gateway.example', stored?: Record<string, unknown>,
+  extra: { settings?: Record<string, unknown>; env?: Record<string, string>; auth?: 'bearer' | 'api-key'; refuseEnv?: boolean } = {}) {
   mock.store(on, stored);
-  mock.env(on, { ANTHROPIC_BASE_URL: endpoint });
+  ttlSeen.length = 0;
+  const env: Record<string, string | undefined> = { ...(endpoint ? { ANTHROPIC_BASE_URL: endpoint } : {}), ...extra.env };
+  const envSets: [string, string | undefined][] = [];
+  liveEnv = env;
+  on('env.get', ($, e) => ({ value: env[e.name] }));
+  on('env.set', ($, e) => {
+    if (extra.refuseEnv) throw new Error('env.set refused');
+    envSets.push([e.name, e.value]); env[e.name] = e.value; return { value: undefined };
+  });
+  on('session.authorize', () => ({ value: extra.auth ? { handle: 'opaque', kind: extra.auth } : null }));
   const clock = mock.clock(on);
   const world = { samples: [] as Record<string, any>[], resets: [] as Record<string, any>[], calls: [] as Record<string, any>[],
     roster: [] as AgentInfo[], sessionId: 'cache-session', failSave: false, failRead: false, logs: [] as string[],
@@ -32,13 +45,13 @@ async function setup($: Engine, on: On, endpoint = 'https://gateway.example', st
     forks: [] as string[], compactions: [] as string[], theme: 'dark',
     forkUsage: { input_tokens: 10, output_tokens: 2, cache_read_input_tokens: 900, cache_creation_input_tokens: 0 },
     compaction: {} as Record<string, unknown>,
-    prices: { 'vendor/main': { read: 0.1, fiveMinute: 1.25, output: 5, provider: 'example', id: 'main-1' } } as Record<string, unknown>,
+    prices: { 'vendor/main': { read: 0.1, fiveMinute: 1.25, output: 5, provider: 'example', id: 'main-1', source: 'models.dev' } } as Record<string, unknown>,
     priceLookups: [] as string[][], pricesFail: false,
-    linked: [] as Record<string, any>[], labels: [] as [string, string][] };
+    linked: [] as Record<string, any>[], labels: [] as [string, string][], env, envSets };
   const policy = { version: 1, roles: Object.fromEntries(ROLES.map(role => [role, { model: `vendor/${role}`, aliases: [role] }])) };
   on('session.id', () => ({ value: world.sessionId }));
   on('session.start', ($, e) => ({ cwd: e.cwd }));
-  on('settings.read', () => ({ value: {} }));
+  on('settings.read', () => ({ value: extra.settings ?? {} }));
   on('command.register', ($, e) => ({ value: { command: e.name } }));
   on('ui.open', () => ({ value: { isPlaced: true } }));
   on('ui.close', () => ({ value: undefined }));
@@ -50,10 +63,12 @@ async function setup($: Engine, on: On, endpoint = 'https://gateway.example', st
   on('classic.Stop', () => ({}));
   on('model.fork', ($, e) => {
     world.forks.push(e.prompt);
+    ttlSeen.push({ at: 'keepalive', agentId: null, value: env.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL });
     return { value: { isAnswered: true as const, text: 'OK', usage: world.forkUsage } };
   });
   on('session.compact', ($, e) => {
     world.compactions.push('instructions' in e && e.instructions ? e.instructions : 'default');
+    ttlSeen.push({ at: 'compaction', agentId: e.agentId ?? null, value: env.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL });
     return { messages: [{ role: 'assistant' as const, text: 'Summary', toolUses: [] }], ...world.compaction };
   });
   on('config.list', () => ({ value: [{ key: 'theme', label: 'Theme', kind: 'enum', value: world.theme, provider: { plugin: 'engine', tier: 'core' }, isLocked: false }] as any }));
@@ -95,6 +110,7 @@ async function setup($: Engine, on: On, endpoint = 'https://gateway.example', st
 
 function response(on: On, read = 800, write = 100, fresh = 100, missing = false) {
   on('turn.step', async function* ($, e) {
+    ttlSeen.push({ at: 'step', agentId: e.agentId ?? null, value: e.agentId ? liveEnv.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL : liveEnv.CLAUDE_CODE_PROMPT_CACHE_TTL });
     yield { kind: 'text' as const, index: 0, text: 'PRIVATE_ANSWER' };
     return { turnId: e.turnId, index: e.index, answer: 'PRIVATE_ANSWER', toolUses: [], stopReason: 'end_turn' as const,
       usage: missing ? null : { model: e.model, cache_read_input_tokens: read, cache_creation_input_tokens: write, input_tokens: fresh, output_tokens: 20 } };
@@ -133,7 +149,7 @@ test('main and child cache bars remain distinct and native stream and response s
   expect(contents.includes('1 request ')).toBe(true);
   expect(contents.includes('child')).toBe(true);
   expect(contents.includes('80%')).toBe(true);
-  expect(contents.includes('TTL unknown')).toBe(true);
+  expect(contents.includes('not reported')).toBe(true);
   expect(contents.includes('Recent requests')).toBe(true);
   const rendered = text(await $.ui.render(band('child')));
   expect(rendered.includes('Existing prompt content')).toBe(true);
@@ -223,8 +239,8 @@ test('absent metadata is unknown for main and child on an Anthropic endpoint', a
   await step($, { agentId: 'child' });
   expect(world.samples.every(sample => sample.ttlMs === null)).toBe(true);
   await clock.advance(301000);
-  expect(text(await $.ui.render(band())).includes('TTL unknown')).toBe(true);
-  expect(text(await $.ui.render(band('child'))).includes('TTL unknown')).toBe(true);
+  expect(text(await $.ui.render(band())).includes('not reported')).toBe(true);
+  expect(text(await $.ui.render(band('child'))).includes('not reported')).toBe(true);
   const contents = await dashboard($);
   expect(contents.includes('Estimated lifetime')).toBe(false);
   expect(contents.includes('expired')).toBe(false);
@@ -239,12 +255,12 @@ test('a final response flushed to the transcript after Stop still gets its repor
   await $.classic.SessionStart({ source: 'startup', session_id: world.sessionId, transcript_path: transcript });
   await step($);
   await $.classic.Stop({ stop_hook_active: false, session_id: world.sessionId, transcript_path: transcript });
-  expect(text(await $.ui.render(band())).includes('TTL unknown')).toBe(true);
+  expect(text(await $.ui.render(band())).includes('not reported')).toBe(true);
   world.flushed = { fiveMinute: 100, oneHour: 0 };
   await clock.advance(1000);
   const rendered = text(await $.ui.render(band()));
   expect(rendered.includes('TTL 5m')).toBe(true);
-  expect(rendered.includes('TTL unknown')).toBe(false);
+  expect(rendered.includes('not reported')).toBe(false);
 });
 
 test('a response whose TTL never reaches the transcript stops being rechecked', async ($, on) => {
@@ -257,7 +273,7 @@ test('a response whose TTL never reaches the transcript stops being rechecked', 
   expect(checks > 0).toBe(true);
   await clock.advance(60000);
   expect(enrichments(world)).toBe(checks);
-  expect(text(await $.ui.render(band())).includes('TTL unknown')).toBe(true);
+  expect(text(await $.ui.render(band())).includes('not reported')).toBe(true);
 });
 
 function labelled(on: On, label: (model: string) => string) {
@@ -419,7 +435,7 @@ test('the band opens with a bordered dial and the bare upkeep mode', async ($, o
   const shown = text(rendered);
   expect(shown.includes('Cache')).toBe(false);
   expect(shown.includes('ttl')).toBe(false);
-  expect(/◌ ⬦ off █{8} ░{2}\s+80%/.test(shown)).toBe(true);
+  expect(/◌ ⬦ off TTL 5m █{8} ░{2}\s+80%/.test(shown)).toBe(true);
   expect(button(rendered, 'agent-cache-open')?.plain).toBe(undefined);
   await $.ui.press({ plugin: 'agent-router', key: 'agent-cache-open', requestId: 'cache-band' });
   expect(text(await $.ui.render(pane)).includes('Prompt cache')).toBe(true);
@@ -663,8 +679,8 @@ test('the band and dashboard dial follow each agent', async ($, on) => {
   expect(await dial($)).toBe('◑');
   expect(await dial($, 'child')).toBe('◌');
   const contents = await dashboard($);
-  expect(/Main ◑\s+⬦\s+off\s+█/.test(contents)).toBe(true);
-  expect(/\(child\)\s+◌\s+–\s+█/.test(contents)).toBe(true);
+  expect(/Main ◑\s+⬦\s+off\s+TTL 5m\s+█/.test(contents)).toBe(true);
+  expect(/\(child\)\s+◌\s+–\s+TTL 5m\s+█/.test(contents)).toBe(true);
 });
 
 test('keepalives are priced from the models.dev listing matched to the model', async ($, on) => {
@@ -675,7 +691,7 @@ test('keepalives are priced from the models.dev listing matched to the model', a
   await step($);
   await clock.advance(2000);
   expect(world.priceLookups).toEqual([['vendor/main']]);
-  expect((await dashboard($)).includes('prices from models.dev example/main-1')).toBe(true);
+  expect((await dashboard($)).includes('priced by models.dev (example/main-1)')).toBe(true);
   await step($, { index: 1 });
   await clock.advance(2000);
   expect(world.priceLookups.length).toBe(1);
@@ -690,8 +706,8 @@ test('a model models.dev does not list gets no keepalives, and warmcomp compacts
   await step($, { model: 'gateway/alias-code' });
   await clock.advance(400000);
   expect(world.forks.length).toBe(0);
-  expect(world.logs.some(log => log.includes('no models.dev price for gateway/alias-code'))).toBe(true);
-  expect((await dashboard($)).includes('no models.dev price')).toBe(true);
+  expect(world.logs.some(log => log.includes('no price found for gateway/alias-code'))).toBe(true);
+  expect((await dashboard($)).includes('no price found')).toBe(true);
   await cycleTo($, 'warmcomp');
   await step($, { model: 'gateway/alias-code', index: 1 });
   await clock.advance(280000);
@@ -772,7 +788,7 @@ test('viewing an agent that cannot be warmed shows a dash in place of the mode b
   await step($, { agentId: 'child' });
   const child = await $.ui.render(band('child'));
   expect(button(child, 'agent-cache-upkeep')).toBe(undefined);
-  expect(/◌ – █/.test(text(child))).toBe(true);
+  expect(/◌ – TTL 5m █/.test(text(child))).toBe(true);
   expect(button(await $.ui.render(band()), 'agent-cache-upkeep')?.label).toBe('warm');
 });
 
@@ -804,7 +820,7 @@ test('the dashboard draws every agent as a tree with its kind and upkeep mode', 
   expect(contents.includes('Worker (worker@team) · split-pane teammate')).toBe(true);
   expect(/Main\s+●\s+⬦\s+off/.test(contents)).toBe(true);
   expect(/Worker \(worker@team\) · split-pane teammate\s+●\s+⬥\s+warm/.test(contents)).toBe(true);
-  expect(/\(scout1\)\s+│?\s+●\s+–\s+█/.test(contents)).toBe(true);
+  expect(/\(scout1\)\s+│?\s+●\s+–\s+TTL 5m\s+█/.test(contents)).toBe(true);
   expect(contents.includes('– can\'t be kept warm')).toBe(true);
   const lines = treeLines(await $.ui.render(pane));
   const scout = lines.findIndex(line => line.includes('(scout1)'));
@@ -865,5 +881,191 @@ test('only the main conversation names the keepalive prices it is warmed at', as
   await dashboard($);
   const lines = treeLines(await $.ui.render(pane));
   expect(lines.filter(line => line.includes('vendor/main · response')).length).toBe(2);
-  expect(lines.filter(line => line.includes('prices from models.dev')).length).toBe(1);
+  expect(lines.filter(line => line.includes('priced by')).length).toBe(1);
+});
+
+const intro = (world: { logs: string[] }) => world.logs.filter(log => log.startsWith('Prompt cache'));
+
+test('the first session with the cache bar shows a short intro, once', async ($, on) => {
+  response(on);
+  const { world } = await setup($, on);
+  const lines = intro(world);
+  expect(lines.length).toBe(1);
+  const all = world.logs.slice(world.logs.indexOf(lines[0])).filter(log => !log.startsWith('Agent Router'));
+  const words = all.join(' ').split(/\s+/).filter(Boolean).length;
+  expect(words <= 220).toBe(true);
+  for (const part of ['/agent-cache', 'off', 'warm', 'compact', 'warmcomp', '/agent-models']) expect(all.join(' ').includes(part)).toBe(true);
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true });
+  world.sessionId = 'another-session';
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true });
+  expect(intro(world).length).toBe(1);
+});
+
+test('a returning user does not see the intro', async ($, on) => {
+  response(on);
+  const { world } = await setup($, on, undefined, { 'cache-intro': 1 });
+  expect(intro(world).length).toBe(0);
+});
+
+test('the intro is never sent to the model', async ($, on) => {
+  response(on);
+  const { world } = await setup($, on);
+  expect(intro(world).length).toBe(1);
+  expect(world.calls.some(call => JSON.stringify(call).includes('Prompt cache'))).toBe(false);
+});
+
+const ttlButton = async ($: Engine, agentId?: string) => button(await $.ui.render(band(agentId)), 'agent-cache-ttl')?.label;
+const pressTtl = async ($: Engine, agentId?: string) => {
+  await $.ui.render(band(agentId));
+  await $.ui.press({ plugin: 'agent-router', key: 'agent-cache-ttl', requestId: 'cache-band' });
+};
+const seen = (at: string, agentId: string | null) => ttlSeen.filter(entry => entry.at === at && entry.agentId === agentId).map(entry => entry.value);
+
+test('the TTL button shows what Claude Code would use before any request is sent', async ($, on) => {
+  response(on);
+  await setup($, on);
+  expect(await ttlButton($)).toBe('TTL 5m');
+  expect((await dashboard($)).includes('TTL 5m · Claude Code default for API keys and gateways')).toBe(true);
+});
+
+test('Claude Code settings and a subscription change the default the button shows', async ($, on) => {
+  response(on);
+  await setup($, on, undefined, undefined, { settings: { promptCacheTtl: '1h' } });
+  expect(await ttlButton($)).toBe('TTL 1h');
+  expect((await dashboard($)).includes('TTL 1h · promptCacheTtl in your Claude Code settings')).toBe(true);
+});
+
+test('a Claude subscription defaults the main conversation to 1h and its subagents to 5m', async ($, on) => {
+  response(on);
+  const { world } = await setup($, on, '', undefined, { auth: 'bearer' });
+  world.roster = [{ id: 'child', type: 'agent-router:scout', description: 'Search', status: 'running' }];
+  await step($, { agentId: 'child' });
+  expect(await ttlButton($)).toBe('TTL 1h');
+  expect(await ttlButton($, 'child')).toBe('TTL 5m');
+});
+
+test('switching the main conversation TTL never reaches its subagents', async ($, on) => {
+  response(on);
+  const { world } = await setup($, on);
+  world.roster = [{ id: 'child', type: 'agent-router:scout', description: 'Search', status: 'running' }];
+  await pressTtl($);
+  expect(await ttlButton($)).toBe('TTL 1h');
+  expect(world.env.CLAUDE_CODE_PROMPT_CACHE_TTL).toBe('1h');
+  await step($);
+  await step($, { agentId: 'child' });
+  expect(seen('step', null)).toEqual(['1h']);
+  expect(seen('step', 'child')).toEqual([undefined]);
+  expect(world.samples.find(sample => sample.agentId === null)?.requested).toBe('1h');
+  expect(await ttlButton($, 'child')).toBe('TTL 5m');
+  await pressTtl($);
+  expect(await ttlButton($)).toBe('TTL 5m');
+  expect(world.env.CLAUDE_CODE_PROMPT_CACHE_TTL).toBe(undefined);
+});
+
+test('a subagent keeps its own TTL, carried only by its own requests', async ($, on) => {
+  response(on);
+  const { world } = await setup($, on);
+  world.roster = [{ id: 'child', type: 'agent-router:scout', description: 'Search', status: 'running' },
+    { id: 'other', type: 'agent-router:task', description: 'Other', status: 'running' }];
+  await pressTtl($, 'child');
+  expect(await ttlButton($, 'child')).toBe('TTL 1h');
+  expect(await ttlButton($, 'other')).toBe('TTL 5m');
+  expect(await ttlButton($)).toBe('TTL 5m');
+  await step($, { agentId: 'child' });
+  await step($, { agentId: 'other' });
+  await step($);
+  expect(seen('step', 'child')).toEqual(['1h']);
+  expect(seen('step', 'other')).toEqual([undefined]);
+  expect(seen('step', null)).toEqual([undefined]);
+  expect(world.env.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL).toBe(undefined);
+  expect(world.env.CLAUDE_CODE_PROMPT_CACHE_TTL).toBe(undefined);
+});
+
+test('in-process teammates start in the teammate TTL setting, subagents in the subagent one', async ($, on) => {
+  response(on);
+  const { world } = await setup($, on);
+  world.roster = [{ id: 'mate', type: 'teammate', description: 'Probe', status: 'running', name: 'probe' },
+    { id: 'child', type: 'agent-router:scout', description: 'Search', status: 'running' }];
+  expect(await ttlButton($, 'mate')).toBe('TTL 1h');
+  expect(await ttlButton($, 'child')).toBe('TTL 5m');
+  await step($, { agentId: 'mate' });
+  await step($, { agentId: 'child' });
+  expect(seen('step', 'mate')).toEqual(['1h']);
+  expect(seen('step', 'child')).toEqual([undefined]);
+  expect((await dashboard($)).includes('TTL 1h · teammate TTL in /agent-models')).toBe(true);
+});
+
+test('keepalives and compaction use the main conversation TTL, and a different reported TTL shows', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 100, oneHour: 0 };
+  await pressTtl($);
+  await cycleTo($, 'warm');
+  await step($);
+  expect(/TTL 1h\s+█+\s*░+\s+80%\s+· 5m reported/.test(text(await $.ui.render(band())))).toBe(true);
+  await clock.advance(275000);
+  expect(world.forks.length).toBe(1);
+  expect(seen('keepalive', null)).toEqual(['1h']);
+  expect(world.env.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL).toBe(undefined);
+  await $.session.compact({ trigger: 'manual', messages: [{ role: 'assistant', text: 'Summary', toolUses: [] }] });
+  expect(seen('compaction', null)).toEqual(['1h']);
+  expect(world.env.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL).toBe(undefined);
+});
+
+test('a TTL choice lasts for its own conversation across a reload, and a new session starts from the defaults', async ($, on) => {
+  response(on);
+  const { world } = await setup($, on);
+  world.roster = [{ id: 'child', type: 'agent-router:scout', description: 'Search', status: 'running' }];
+  await pressTtl($, 'child');
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true });
+  expect(await ttlButton($, 'child')).toBe('TTL 1h');
+  expect(await ttlButton($)).toBe('TTL 5m');
+  world.sessionId = 'another-session';
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true });
+  expect(await ttlButton($, 'child')).toBe('TTL 5m');
+});
+
+test('a variable you set yourself stays the default, and switching back restores it', async ($, on) => {
+  response(on);
+  const { world } = await setup($, on, undefined, undefined, { env: { CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' } });
+  expect(await ttlButton($)).toBe('TTL 1h');
+  await pressTtl($);
+  expect(world.env.CLAUDE_CODE_PROMPT_CACHE_TTL).toBe('5m');
+  await pressTtl($);
+  expect(world.env.CLAUDE_CODE_PROMPT_CACHE_TTL).toBe('1h');
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true });
+  expect(await ttlButton($)).toBe('TTL 1h');
+});
+
+test('FORCE_PROMPT_CACHING_5M locks every TTL at 5m', async ($, on) => {
+  response(on);
+  const { world } = await setup($, on, undefined, undefined, { env: { FORCE_PROMPT_CACHING_5M: '1' } });
+  world.roster = [{ id: 'mate', type: 'teammate', description: 'Probe', status: 'running', name: 'probe' }];
+  const rendered = await $.ui.render(band());
+  expect(button(rendered, 'agent-cache-ttl')).toBe(undefined);
+  expect(text(rendered).includes('TTL 5m')).toBe(true);
+  await step($, { agentId: 'mate' });
+  expect(seen('step', 'mate')).toEqual([undefined]);
+  expect((await dashboard($)).includes('TTL 5m · FORCE_PROMPT_CACHING_5M')).toBe(true);
+});
+
+test('a session that cannot set environment variables still routes and draws the bar', async ($, on) => {
+  response(on);
+  const { world } = await setup($, on, undefined, undefined, { settings: { promptCacheTtl: '1h' }, refuseEnv: true });
+  await pressTtl($);
+  await step($);
+  expect(world.samples.length).toBe(1);
+  expect(world.logs.some(log => log.includes('cache TTL could not be applied'))).toBe(true);
+  expect(world.logs.some(log => log.includes('cache observation could not be saved'))).toBe(false);
+});
+
+test('the dashboard names Anthropic pricing for a Claude model', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 100, oneHour: 0 };
+  world.prices['claude-opus-5-5'] = { read: 0.05, fiveMinute: 1.25, oneHour: 2, output: 5, provider: 'anthropic', id: 'claude-opus-5-5', source: 'Anthropic pricing' };
+  await cycleTo($, 'warm');
+  await step($, { model: 'claude-opus-5-5' });
+  await clock.advance(2000);
+  expect((await dashboard($)).includes('priced by Anthropic pricing (claude-opus-5-5)')).toBe(true);
 });

@@ -51,10 +51,10 @@ export function priceIndex(entries) {
   const index = new Map();
   for (const entry of Array.isArray(entries) ? entries : []) {
     if (!Array.isArray(entry) || !usable(entry)) continue;
-    const [provider, id, owner, input, output, read, write] = entry;
+    const [provider, id, owner, input, output, read, write, hour] = entry;
     const parsed = parse(id);
     if (!parsed) continue;
-    const listing = { provider, id, owner: typeof owner === 'string' ? owner : null, date: parsed.date, input, output, read, write: price(write) ? write : null };
+    const listing = { provider, id, owner: typeof owner === 'string' ? owner : null, date: parsed.date, input, output, read, write: price(write) ? write : null, hour: price(hour) ? hour : null };
     index.set(parsed.key, [...(index.get(parsed.key) ?? []), listing]);
   }
   return index;
@@ -89,7 +89,8 @@ export function matchPrices(index, model) {
   }
   if (agreed.length * 3 < pool.length * 2) return null;
   const writes = agreed.filter(listing => listing.write !== null).map(listing => listing.write / listing.input);
+  const hours = agreed.filter(listing => listing.hour !== null).map(listing => listing.hour / listing.input);
   const [chosen] = agreed;
-  return { read: median(agreed.map(read)), ...(writes.length ? { fiveMinute: median(writes) } : {}),
+  return { read: median(agreed.map(read)), ...(writes.length ? { fiveMinute: median(writes) } : {}), ...(hours.length ? { oneHour: median(hours) } : {}),
     output: median(agreed.map(listing => listing.output / listing.input)), provider: chosen.provider, id: chosen.id };
 }

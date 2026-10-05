@@ -1,5 +1,6 @@
 import type { Args, ConfigRow, EngineInterface, PluginOptions } from 'claude-code';
 import { filterModels } from '../lib/catalog.js';
+import type { TtlDefault } from '../lib/cache-ttl.js';
 
 export type ModelPickerHost = {
   plugin: Pick<EngineInterface['plugin'], 'name' | 'root'>;
@@ -10,6 +11,7 @@ export type ModelPickerHost = {
   command: Pick<EngineInterface['command'], 'register'>;
   session: Pick<EngineInterface['session'], 'id'>;
   endpoint: () => Promise<string | undefined>;
+  ttlDefaults: () => Promise<{ main: TtlDefault; subagent: TtlDefault }>;
 };
 
 type ModelEntry = { id: string; name: string; description: string; contextWindow?: number; outputLimit?: number };
@@ -23,7 +25,8 @@ const roles = [
 ];
 // Optional: an unset teammate override means each teammate uses its role's.
 const teammateEntry = { value: 'teammate_model', label: 'Teammates' };
-const entries = [...roles, teammateEntry];
+const cacheEntry = { value: 'cache_ttl', label: 'Prompt cache' };
+const entries = [...roles, teammateEntry, cacheEntry];
 const entryLabel = (field: string) => entries.find(item => item.value === field)!.label;
 const pageSize = 3;
 // The picker's controls need this many columns; a fullscreen dock opens this wide.
@@ -43,6 +46,8 @@ const effortField = (field: string) => field.replace(/_model$/, '_effort');
 const effortRow = (rows: ConfigRow[], plugin: string, field: string) => ownedRow(rows, plugin, effortField(field), 'choice');
 const effortLabel = (value: string) => value === 'default' ? 'Default (engine effort)' : value;
 const upkeepRow = (rows: ConfigRow[], plugin: string) => ownedRow(rows, plugin, 'teammate_cache_upkeep', 'choice');
+const TTL_FIELDS: Record<string, string> = { 'cache-ttl': 'cache_ttl', 'subagent-ttl': 'subagent_cache_ttl', 'teammate-ttl': 'teammate_cache_ttl' };
+const ttlRow = (rows: ConfigRow[], plugin: string, key: string) => ownedRow(rows, plugin, TTL_FIELDS[key], 'choice');
 
 export function createModelPicker(options: PluginOptions) {
   let session = '';
@@ -64,6 +69,7 @@ export function createModelPicker(options: PluginOptions) {
   let error = '';
   let notice = '';
   let generation = 0;
+  let defaults: { main: TtlDefault; subagent: TtlDefault } | undefined;
 
   const redraw = (host: ModelPickerHost) => host.ui.invalidate('ui.render');
   const intent = (host: ModelPickerHost, selected = role) => host.store.set(intentKey, { session, open: true, role: selected });
@@ -85,13 +91,15 @@ export function createModelPicker(options: PluginOptions) {
     rows = [];
     redraw(host);
     try {
-      const [discovery, settings] = await Promise.allSettled([
+      const [discovery, settings, resolved] = await Promise.allSettled([
         host.process.run(['node', `${host.plugin.root}/scripts/bridge.mjs`], {
           stdin: JSON.stringify({ action: 'catalog' }), timeoutMs: 20_000,
         }),
         host.config.list(),
+        host.ttlDefaults(),
       ]);
       if (request !== generation || !open) return;
+      if (resolved.status === 'fulfilled') defaults = resolved.value;
       if (settings.status === 'fulfilled') {
         rows = settings.value;
         configLoaded = true;
@@ -236,6 +244,31 @@ export function createModelPicker(options: PluginOptions) {
     }
   }
 
+  async function saveTtl(host: ModelPickerHost, key: string, value: string, renderedGeneration: number) {
+    if (!open || saving || loading || renderedGeneration !== generation) return;
+    saving = true;
+    error = '';
+    notice = '';
+    redraw(host);
+    try {
+      rows = await host.config.list();
+      if (!open) return;
+      const row = ttlRow(rows, host.plugin.name, key);
+      if (row.isLocked) throw new Error('Your administrator manages this setting. Ask them to update the prompt cache TTL.');
+      if (!row.options?.includes(value)) return;
+      const result = await host.config.set({ key: row.key, value });
+      if (result.deny !== undefined) throw new Error(result.deny);
+      if (result.value !== value) throw new Error('The config writer returned a different value. Open /config to inspect the saved setting.');
+      rows = rows.map(item => item.key === row.key ? { ...item, value } : item);
+      notice = 'Saved the prompt cache TTL. Conversations that start from now on use it; each one\'s TTL button can change it.';
+    } catch (cause) {
+      error = message(cause);
+    } finally {
+      saving = false;
+      redraw(host);
+    }
+  }
+
   async function initialize(host: ModelPickerHost, e: Args<'session.start'>) {
     interactive = e.isInteractive && (e.surface === 'terminal' || e.surface === 'desktop');
     terminal = e.surface === 'terminal';
@@ -298,6 +331,35 @@ export function createModelPicker(options: PluginOptions) {
     const renderedGeneration = generation;
     const search = (text: string) => { if (!saving) { query = text; page = 0; redraw(host); } };
     const act = (operation: () => Promise<void>) => operation().catch(cause => { error = message(cause); redraw(host); });
+    const ttlLabel = (fallback?: string) => fallback ? `Default (${fallback})` : 'Default (Claude Code)';
+    const ttlSelect = (key: string, label: string, fallback?: string) => {
+      let row: ConfigRow | undefined;
+      try { row = ttlRow(rows, host.plugin.name, key); } catch (cause) { return <Text>{message(cause)}</Text>; }
+      const name = (value: string) => value === 'default' ? ttlLabel(fallback) : value;
+      if (row.isLocked || saving) return <Text>{`${label}: ${name(String(row.value))}${row.isLocked ? ' · managed by your administrator' : ''}`}</Text>;
+      return <Select key={key} label={label} value={String(row.value)} options={(row.options || []).map(value => ({ value, label: name(value) }))}
+        onSelect={value => act(() => saveTtl(host, key, value, renderedGeneration))} />;
+    };
+    const teammateDefault = defaults && (defaults.main.ttl === defaults.subagent.ttl ? defaults.main.ttl : `${defaults.main.ttl} split-pane, ${defaults.subagent.ttl} in-process`);
+    if (role === cacheEntry.value) {
+      return <Box flexDirection="column">
+        <Text>Prompt cache TTL: how long the cache lasts between requests. 1h survives longer breaks; each 1h cache write costs 2× instead of 1.25×.</Text>
+        {notice ? <Text>{notice}</Text> : null}
+        {error ? <Text>{error}</Text> : null}
+        {configError ? <Text>{configError}</Text> : null}
+        <Box flexDirection="row" gap={1}><Button key="close" label="Close" onPress={() => act(() => close(host))} /></Box>
+        <Select key="role" label="Role" value={role} options={entries} onSelect={value => {
+          if (saving || !entries.some(item => item.value === value)) return;
+          role = value; page = 0; error = ''; notice = ''; redraw(host);
+          return act(() => intent(host));
+        }} />
+        {loading ? <Text>Loading settings…</Text> : configLoaded ? <Box flexDirection="column">
+          {ttlSelect('cache-ttl', 'Main conversation', defaults?.main.ttl)}
+          {ttlSelect('subagent-ttl', 'Subagents', defaults?.subagent.ttl)}
+        </Box> : null}
+        <Text dimColor>Default is what Claude Code uses for that conversation with your current settings and sign-in. Each conversation starts in its own setting and its TTL button changes it for that conversation only. Teammates have their own setting under Teammates.</Text>
+      </Box>;
+    }
     const navigate = (offset: number) => {
       if (saving || loading) return;
       page = (page + offset + pages) % pages;
@@ -335,6 +397,7 @@ export function createModelPicker(options: PluginOptions) {
         : upkeep ? <Text>{`Cache upkeep: ${String(upkeep.value)}${upkeep.isLocked ? ' · managed by your administrator' : ''}`}</Text> : null}
       {upkeep ? <Text dimColor>Split-pane teammates start in this cache upkeep and can change it from their own bar. In-process teammates and subagents can't be kept warm.</Text> : null}
       {upkeepError ? <Text>{upkeepError}</Text> : null}
+      {role === teammateEntry.value && configLoaded && !loading ? ttlSelect('teammate-ttl', 'Cache TTL', teammateDefault) : null}
       <Input key="search" label="Search" placeholder="Name, exact ID, or description" value={query} autoFocus onInput={search} onSubmit={search} />
       {loading ? <Text>Loading endpoint catalog…</Text> : saving ? <Text>Saving model selection…</Text> : !catalogLoaded ? <Text>Catalog unavailable. Resolve the discovery error, then refresh.</Text> : <Box flexDirection="column" gap={1}>
         <Text>{`${filtered.length} matching models · page ${page + 1} of ${pages}`}</Text>

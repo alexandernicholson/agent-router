@@ -5,6 +5,8 @@ import type { CachePrices, CacheRow, CacheSample, CacheReset, CacheStatus } from
 import { CACHE_COLORS, themeFamily } from '../lib/cache-colors.js';
 import { displayText } from '../lib/catalog.js';
 import { sameModel } from '../lib/routing.js';
+import { createTtlGate, isTtl, resolveDefaultTtl } from '../lib/cache-ttl.js';
+import type { Ttl, TtlAuth, TtlDefault } from '../lib/cache-ttl.js';
 
 export const CACHE_PANE = 'agent-cache';
 const RECHECK_MS = [1000, 3000, 10000, 30000];
@@ -14,6 +16,25 @@ const UPKEEP = ['off', 'warm', 'compact', 'warmcomp'] as const;
 const UPKEEP_KEY = 'cache-upkeep';
 const KEEPALIVE_PROMPT = 'Reply with only: OK';
 const PRICES_MS = 3600000;
+const TTL_KEY = 'cache-ttl';
+const TTL_ENV = { main: 'CLAUDE_CODE_PROMPT_CACHE_TTL', subagent: 'CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL' } as const;
+type TtlScope = keyof typeof TTL_ENV;
+type TtlChoice = { ttl: Ttl; reason: string; locked: boolean; chosen: boolean };
+export type TtlDefaults = { main?: Ttl; subagent?: Ttl; teammate?: Ttl };
+export const ttlOption = (value: unknown): Ttl | undefined => isTtl(value) ? value : undefined;
+const INTRO_KEY = 'cache-intro';
+const INTRO = [
+  'Prompt cache bar: Agent Router shows how well each conversation reuses its prompt cache.',
+  '  [ ◕ ] dial: time until the cache expires; it refills with each request. Click it, or run /agent-cache, for every agent\'s cache and request history.',
+  '  96%: share of the last request served from cache, coloured blue (good), yellow (fair) or red (poor) for the context size.',
+  '  TTL 5m: this conversation\'s cache lifetime; click to switch between 5m and 1h. ETA ~3:44 is the time left.',
+  '  Mode button: click to cycle what happens 30 seconds before an idle main conversation\'s cache expires:',
+  '    off (default) sends nothing.',
+  '    warm sends a cheap keepalive request while that costs less than rewriting the cache; ↻ shows how many are left.',
+  '    compact summarises a conversation of 100k+ tokens while it is still cached.',
+  '    warmcomp warms first, then compacts.',
+  '  Keepalives and compactions are billed. Teammates\' starting mode is under /agent-models → Teammates.',
+];
 type Upkeep = typeof UPKEEP[number];
 export const upkeepMode = (value: unknown): Upkeep | undefined => UPKEEP.find(mode => mode === value);
 const AGENT_FILTERS = ['all', 'main', 'subagents', 'teammates'] as const;
@@ -34,6 +55,9 @@ export type CachePanelHost = {
   store: Pick<EngineInterface['store'], 'get' | 'set'>;
   ui: Pick<EngineInterface['ui'], 'invalidate' | 'open' | 'close' | 'log'>;
   command: Pick<EngineInterface['command'], 'register'>;
+  env: Pick<EngineInterface['env'], 'set'>;
+  settings: Pick<EngineInterface['settings'], 'read'>;
+  auth: () => Promise<TtlAuth>;
 };
 type Context = {
   host: CachePanelHost;
@@ -58,6 +82,12 @@ type Context = {
   upkeeping?: Promise<void>;
   refresh?: Promise<void>;
   available: boolean;
+  defaults: Record<TtlScope, TtlDefault>;
+  ttlDefaults: TtlDefaults;
+  ttls: Map<string, Ttl>;
+  kinds: Map<string, 'subagent' | 'teammate'>;
+  gate: ReturnType<typeof createTtlGate>;
+  mainApplied: string | undefined;
 };
 
 export function createCachePanel() {
@@ -202,7 +232,8 @@ export function createCachePanel() {
       return [...result, { text: ` · cmpt ✓${before !== undefined && after !== undefined ? ` ${cacheTokens(before)} → ${cacheTokens(after)}` : ''}` }];
     }
     if (!status.ttl) return [...result, { text: ` · ${status.state}` }];
-    result.push({ text: ` · TTL ${status.ttl}` });
+    const wanted = row.sessionId === current.sessionId ? ttlChoice(current, row.agentId).ttl : undefined;
+    if (wanted && status.ttl !== wanted) result.push({ text: ` · ${status.ttl} reported` });
     const life = lifeGrade(status.leftMs);
     result.push(status.leftMs && life ? { text: ` · ETA ~${cacheClock(status.leftMs)}`, color: palette(current)[life] }
       : { text: ' · expired', color: palette(current).poor });
@@ -256,17 +287,115 @@ export function createCachePanel() {
     } catch { current.host.ui.log('Agent Router: cache upkeep choice could not be saved.', { to: 'debug' }); }
   }
 
+  function ttlKind(current: Context, agentId: string | null): 'main' | 'subagent' | 'teammate' {
+    if (agentId === null) return 'main';
+    const known = current.kinds.get(agentId);
+    if (known) return known;
+    return current.roster.find(agent => agent.id === agentId)?.type === 'teammate' ? 'teammate' : 'subagent';
+  }
+
+  async function learnKind(current: Context, agentId: string) {
+    if (current.kinds.has(agentId)) return;
+    let agent = current.roster.find(item => item.id === agentId);
+    if (!agent) {
+      const roster = await current.host.agent.list().catch(() => undefined);
+      if (roster) { current.roster = roster; agent = roster.find(item => item.id === agentId); }
+    }
+    if (agent) current.kinds.set(agentId, agent.type === 'teammate' ? 'teammate' : 'subagent');
+  }
+
+  function ttlChoice(current: Context, agentId: string | null): TtlChoice {
+    const scope: TtlScope = agentId === null ? 'main' : 'subagent';
+    const base = current.defaults[scope];
+    if (base.locked) return { ...base, chosen: false };
+    const own = current.ttls.get(loopKey(current.sessionId, agentId));
+    if (own) return { ttl: own, reason: 'chosen with the TTL button', locked: false, chosen: true };
+    const kind = ttlKind(current, agentId);
+    const configured = kind === 'main' ? current.ttlDefaults.main : kind === 'teammate' ? current.ttlDefaults.teammate : current.ttlDefaults.subagent;
+    if (configured) return { ttl: configured, reason: `${kind} TTL in /agent-models`, locked: false, chosen: false };
+    return { ...base, chosen: false };
+  }
+
+  async function savedTtls(host: CachePanelHost): Promise<[string, string, Ttl][]> {
+    try {
+      const saved = await host.store.get(TTL_KEY);
+      return Array.isArray(saved) ? saved.filter((entry): entry is [string, string, Ttl] =>
+        Array.isArray(entry) && typeof entry[0] === 'string' && typeof entry[1] === 'string' && isTtl(entry[2])) : [];
+    } catch { return []; }
+  }
+
+  async function saveTtls(current: Context) {
+    try {
+      const others = (await savedTtls(current.host)).filter(([id]) => id !== current.sessionId);
+      const mine = [...current.ttls].map(([key, ttl]) => [current.sessionId, key, ttl] as [string, string, Ttl]);
+      await current.host.store.set(TTL_KEY, [...others, ...mine].slice(-64));
+    } catch { current.host.ui.log('Agent Router: cache TTL choice could not be saved.', { to: 'debug' }); }
+  }
+
+  async function setTtlEnv(host: CachePanelHost, name: string, value: string | undefined) {
+    try { await host.env.set(name, value); }
+    catch { host.ui.log('Agent Router: cache TTL could not be applied; Claude Code keeps its own.', { to: 'debug' }); }
+  }
+
+  async function applyMainTtl(current: Context) {
+    const choice = ttlChoice(current, null);
+    if (choice.locked) return;
+    const value = choice.ttl === current.defaults.main.ttl && !choice.chosen && !current.ttlDefaults.main ? current.env[TTL_ENV.main] : choice.ttl;
+    if (value === current.mainApplied) return;
+    current.mainApplied = value;
+    await setTtlEnv(current.host, TTL_ENV.main, value);
+  }
+
+  async function cycleTtl(agentId: string | null) {
+    const current = context;
+    if (!current) return;
+    const choice = ttlChoice(current, agentId);
+    if (choice.locked) return;
+    const key = loopKey(current.sessionId, agentId);
+    const next: Ttl = choice.ttl === '5m' ? '1h' : '5m';
+    const kind = ttlKind(current, agentId);
+    const configured = kind === 'main' ? current.ttlDefaults.main : kind === 'teammate' ? current.ttlDefaults.teammate : current.ttlDefaults.subagent;
+    if (next === (configured ?? current.defaults[agentId === null ? 'main' : 'subagent'].ttl)) current.ttls.delete(key);
+    else current.ttls.set(key, next);
+    if (agentId === null) await applyMainTtl(current);
+    redraw(current);
+    await saveTtls(current);
+  }
+
+  async function holdSubagentTtl(current: Context, agentId: string | null) {
+    const choice = ttlChoice(current, agentId);
+    if (choice.locked) return async () => {};
+    const base = current.defaults.subagent;
+    return current.gate.acquire(choice.ttl === base.ttl && !choice.chosen ? null : choice.ttl);
+  }
+
+  async function introduce(host: CachePanelHost) {
+    try {
+      if (await host.store.get(INTRO_KEY)) return;
+      await host.store.set(INTRO_KEY, 1);
+    } catch { return; }
+    for (const line of INTRO) host.ui.log(line);
+  }
+
   async function initialize(host: CachePanelHost, bridge: Bridge, sessionId: string, endpoint?: string, selfLabel?: string,
-    configuration: { env: Record<string, string | undefined>; upkeep?: Upkeep } = { env: {} }) {
+    configuration: { env: Record<string, string | undefined>; upkeep?: Upkeep; ttl?: TtlDefaults } = { env: {} }) {
     const saved = (await savedUpkeep(host)).find(([id]) => id === sessionId)?.[1];
+    const [settings, auth] = await Promise.all([host.settings.read().catch(() => ({})), host.auth().catch((): TtlAuth => 'gateway')]);
+    const resolve = (scope: TtlScope) => resolveDefaultTtl({ scope, env: configuration.env, settings: settings as Record<string, unknown>, auth });
+    const subagent = resolve('subagent');
     const current: Context = { host, bridge, sessionId, endpoint, selfLabel, env: configuration.env, upkeep: saved ?? configuration.upkeep ?? 'off',
       family: themeFamily(undefined, configuration.env.COLORFGBG),
-      samples: new Map(), resets: [], labels: new Map(), roster: [], now: 0, pending: new Map(), requested: new Map(), rechecks: new Map(), prices: new Map(), available: true };
+      samples: new Map(), resets: [], labels: new Map(), roster: [], now: 0, pending: new Map(), requested: new Map(), rechecks: new Map(), prices: new Map(), available: true,
+      defaults: { main: resolve('main'), subagent }, ttlDefaults: configuration.ttl ?? {},
+      ttls: new Map((await savedTtls(host)).filter(([id]) => id === sessionId).map(([, key, ttl]) => [key, ttl])), kinds: new Map(),
+      gate: createTtlGate(value => setTtlEnv(host, TTL_ENV.subagent, value ?? configuration.env[TTL_ENV.subagent])),
+      mainApplied: configuration.env[TTL_ENV.main] };
     context = current;
     selected = undefined;
     open = false;
     lastDisplay = '';
     if (!saved && current.upkeep !== 'off') await saveUpkeep(current);
+    await applyMainTtl(current);
     await refresh();
     if (context !== current) return;
     await host.command.register({ name: CACHE_PANE, immediate: true, description: 'Cache bars, token counts and request history for the main agent and subagents.' });
@@ -276,7 +405,7 @@ export function createCachePanel() {
     const prior = context ?? previous;
     if (prior) {
       const id = await prior.host.session.id();
-      if (!context || id !== prior.sessionId) await initialize(prior.host, prior.bridge, id, prior.endpoint, undefined, { env: prior.env, upkeep: prior.upkeep });
+      if (!context || id !== prior.sessionId) await initialize(prior.host, prior.bridge, id, prior.endpoint, undefined, { env: prior.env, upkeep: prior.upkeep, ttl: prior.ttlDefaults });
     }
     return context;
   }
@@ -294,7 +423,11 @@ export function createCachePanel() {
     current.requested.set(key, request.model);
     current.pending.set(key, { request: identity, changed, startedAt });
     if (changed) redraw(current);
-    return { current, startedAt, key, identity, changed };
+    const agentId = request.agentId ?? null;
+    if (agentId !== null) await learnKind(current, agentId);
+    const ttl = ttlChoice(current, agentId);
+    const release = agentId === null ? async () => {} : await holdSubagentTtl(current, agentId);
+    return { current, startedAt, key, identity, changed, release, ttl: ttl.locked ? undefined : ttl.ttl };
   }
 
   async function observe(current: Context, sample: CacheSample, transcriptPath?: string) {
@@ -308,7 +441,9 @@ export function createCachePanel() {
   }
 
   async function finish(ticket: Awaited<ReturnType<typeof begin>>, request: TurnStepInput, usage?: TurnUsage | null) {
-    if (!ticket || context !== ticket.current) return;
+    if (!ticket) return;
+    await ticket.release();
+    if (context !== ticket.current) return;
     const { current, startedAt, key, identity } = ticket;
     if (current.pending.get(key)?.request === identity) current.pending.delete(key);
     if (usage) {
@@ -316,7 +451,7 @@ export function createCachePanel() {
       let sample: CacheSample = { sessionId: current.sessionId, agentId: request.agentId ?? null, turnId: request.turnId,
         index: request.index, model, startedAt, read: usage.cache_read_input_tokens, write: usage.cache_creation_input_tokens,
         completedAt: await current.host.clock.now(), fresh: usage.input_tokens, output: usage.output_tokens,
-        ...cachePolicy(current.env, model) };
+        ...cachePolicy(current.env, model), ...(ticket.ttl ? { requested: ticket.ttl } : {}) };
       const reported = reportedCacheCreation(usage);
       if (reported) sample = applyCacheCreation(sample, reported);
       await observe(current, sample, transcript(current, sample.agentId));
@@ -354,7 +489,10 @@ export function createCachePanel() {
 
   async function warm(current: Context, model: string) {
     const startedAt = await current.host.clock.now();
-    const result = await current.host.model.fork({ prompt: KEEPALIVE_PROMPT });
+    const release = await holdSubagentTtl(current, null);
+    let result;
+    try { result = await current.host.model.fork({ prompt: KEEPALIVE_PROMPT }); }
+    finally { await release(); }
     if (context !== current) return;
     if (!result.isAnswered) current.host.ui.log(`Agent Router: cache keepalive did not answer (${result.reason}).`, { to: 'debug' });
     if (!('usage' in result)) return;
@@ -386,7 +524,7 @@ export function createCachePanel() {
   async function compact(current: Context) {
     try {
       const startedAt = await current.host.clock.now();
-      const result = await current.host.session.compact();
+      const result = await holdTtlFor(null, () => current.host.session.compact());
       if (context !== current) return;
       if (!result.messages) { current.host.ui.log(`Agent Router: cache compaction skipped: ${result.skip}`, { to: 'debug' }); return; }
       current.host.ui.log('Agent Router compacted the conversation before its prompt cache expired.');
@@ -394,6 +532,13 @@ export function createCachePanel() {
     } catch {
       current.host.ui.log('Agent Router: cache compaction could not run during a turn.', { to: 'debug' });
     }
+  }
+
+  async function holdTtlFor<T>(agentId: string | null, run: () => Promise<T>): Promise<T> {
+    const current = context;
+    if (!current) return run();
+    const release = await holdSubagentTtl(current, agentId);
+    try { return await run(); } finally { await release(); }
   }
 
   function lookUpPrices(current: Context, model: string) {
@@ -411,7 +556,7 @@ export function createCachePanel() {
       if (found) current.prices.set(model, { at: current.now, value, settled: true });
       else if (known) current.prices.set(model, { ...known, lookup: undefined });
       else current.prices.delete(model);
-      if (found && !value) current.host.ui.log(`Agent Router: no models.dev price for ${displayText(model, 160)}; keepalives are off for it.`, { to: 'debug' });
+      if (found && !value) current.host.ui.log(`Agent Router: no price found for ${displayText(model, 160)}; keepalives are off for it.`, { to: 'debug' });
       redraw(current);
     })();
     current.prices.set(model, { at: known?.at ?? current.now, value: known?.value ?? null, settled: known?.settled ?? false, lookup });
@@ -464,6 +609,11 @@ export function createCachePanel() {
     return true;
   }
 
+  async function view(agentId?: string) {
+    const current = context;
+    if (current && agentId) await learnKind(current, agentId);
+  }
+
   function renderBand(elements: Elements[RenderSurface], content: RenderElement, agentId?: string): RenderElement {
     const current = context;
     if (!current) return content;
@@ -474,10 +624,13 @@ export function createCachePanel() {
     const note = row && keepaliveNote(current, row, true);
     const counts = `${note ? ` · ${note}` : ''}${latest ? ` · read ${cacheTokens(latest.read)} · write ${cacheTokens(latest.write)} · new ${cacheTokens(latest.fresh)}` : ''}`;
     const upkeeps = !agentId;
+    const ttl = ttlChoice(current, agentId ?? null);
     return Box({ flexDirection: 'column', children: [content, Box({ flexDirection: 'row', gap: 1, children: [
       Button({ key: 'agent-cache-open', label: cacheDial(status), onPress: show }),
       Box({ flexDirection: 'row', children: marker(elements, current, upkeeps ? current.upkeep : undefined) }),
       ...(upkeeps ? [Button({ key: 'agent-cache-upkeep', label: current.upkeep, plain: true, onPress: cycle })] : []),
+      ttl.locked ? Text({ dimColor: true, children: [`TTL ${ttl.ttl}`] })
+        : Button({ key: 'agent-cache-ttl', label: `TTL ${ttl.ttl}`, plain: true, onPress: () => cycleTtl(agentId ?? null) }),
       Box({ flexDirection: 'row', children: [...paint(elements, row ? segments(current, row) : [{ text: 'no observation' }]),
         Text({ wrap: 'truncate-end', children: [`${counts}${current.available ? '' : ' · storage unavailable'}`] })] }),
     ] })] });
@@ -507,10 +660,17 @@ export function createCachePanel() {
     return left ? `${plural(left, 'keepalive')}, then compact` : 'compact next';
   }
 
+  function ttlLabel(current: Context, row: CacheRow) {
+    if (row.sessionId === current.sessionId) return ttlChoice(current, row.agentId).ttl;
+    return row.last?.requested ?? '5m';
+  }
+
   function priceNote(current: Context, row: CacheRow) {
     const known = row.last && current.prices.get(row.last.model);
     if (!known?.settled) return '';
-    return known.value ? ` · prices from models.dev ${displayText(`${known.value.provider}/${known.value.id}`, 120)}` : ' · no models.dev price';
+    if (!known.value) return ' · no price found';
+    const listing = known.value.provider && known.value.id ? ` (${displayText(known.value.provider === 'anthropic' ? known.value.id : `${known.value.provider}/${known.value.id}`, 120)})` : '';
+    return ` · priced by ${displayText(known.value.source ?? 'models.dev', 40)}${listing}`;
   }
 
   const shown = (node: Node) => agentFilter === 'all' || agentFilter === 'main' && node.kind === 'main' ||
@@ -555,7 +715,8 @@ export function createCachePanel() {
         Box({ flexDirection: 'row', children: [Text({ dimColor: true, children: [node.prefix] }),
           Button({ key: `cache-agent:${key}`, label: `${displayText(row.label, 120)}${kind}`, plain: true, onPress: () => { selected = key; historyScope = 'agent'; redraw(current); } })] }),
         Box({ flexDirection: 'row', children: [Text({ children: [`${indent}${cacheDial(state(current, row))} `] }), ...marker(elements, current, node.upkeep),
-          Text({ children: [node.upkeep ? ` ${node.upkeep} ` : ' '] }), ...paint(elements, segments(current, row))] }),
+          Text({ children: [node.upkeep ? ` ${node.upkeep} ` : ' '] }), Text({ children: [`TTL ${ttlLabel(current, row)} `] }), ...paint(elements, segments(current, row))] }),
+        ...(row.sessionId === current.sessionId ? [Text({ dimColor: true, children: [`${indent}TTL ${ttlChoice(current, row.agentId).ttl} · ${ttlChoice(current, row.agentId).reason}`] })] : []),
         ...life,
         ...keepalives,
         Text({ dimColor: true, children: [`${indent}${plural(counts.requests, 'request')} · read ${cacheTokens(counts.read)} · write ${cacheTokens(counts.write)} · new ${cacheTokens(counts.fresh)} · out ${cacheTokens(counts.output)}`] }),
@@ -587,6 +748,7 @@ export function createCachePanel() {
     if (current) await recheck(current, true).catch(() => undefined);
   }
 
-  return { initialize, begin, finish, reset, compacted, refresh, tick, show, settle, renderBand, renderPane, setTranscript, enrich, close: () => { open = false; },
+  return { initialize, begin, finish, reset, compacted, refresh, tick, show, settle, renderBand, renderPane, setTranscript, enrich, holdTtlFor, view,
+    introduce: () => context ? introduce(context.host) : Promise.resolve(), close: () => { open = false; },
     clear: () => { previous = context ?? previous; context = undefined; open = false; selected = undefined; } };
 }
