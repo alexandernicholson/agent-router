@@ -1,6 +1,6 @@
 import { open } from 'node:fs/promises';
 import { reportedCacheCreation } from './cache.js';
-import { sameModel } from './routing.js';
+import { sameModel } from './shared/models.js';
 
 export async function transcriptTail(path) {
   if (typeof path !== 'string' || !path.endsWith('.jsonl')) return '';

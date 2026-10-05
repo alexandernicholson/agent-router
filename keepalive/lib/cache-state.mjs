@@ -1,4 +1,4 @@
-import { recordPath, readRecord, writeRecord, listRecords, linkedTeammates, agentAssignments, idKey } from './state.mjs';
+import { recordPath, readRecord, writeRecord, listRecords, idKey, linkedSessions, routerRoutes } from './state.mjs';
 import { validSample, validCreation, loopKey, applyCacheCreation } from './cache.js';
 import { transcriptTail, transcriptCreation } from './cache-transcript.mjs';
 
@@ -51,30 +51,40 @@ export async function resetCache(root, sessionId, agentId, resetAt) {
   return {};
 }
 
-export async function cacheSnapshot(root, sessionId) {
+export async function linkSession(root, leadSessionId, sessionId, label) {
+  idKey(leadSessionId);
   idKey(sessionId);
-  const links = await linkedTeammates(root, sessionId);
-  const sessions = [sessionId, ...new Set(links.map(link => link.sessionId))];
+  if (leadSessionId === sessionId) throw new Error('A session cannot link to itself.');
+  await writeRecord(recordPath(root, 'links', leadSessionId, sessionId),
+    { leadSessionId, sessionId, ...(typeof label === 'string' && label ? { label: label.slice(0, 200) } : {}) });
+  return {};
+}
+
+export async function cacheSnapshot(root, sessionId, router) {
+  idKey(sessionId);
+  const routes = await routerRoutes(router, sessionId);
+  const own = await linkedSessions(root, sessionId);
+  const linked = new Map(own.map(link => [link.sessionId, link.label]));
+  for (const id of routes?.teammates ?? []) if (!linked.has(id)) linked.set(id, null);
+  const sessions = [sessionId, ...linked.keys()];
   const data = await Promise.all(sessions.map(async id => ({
     id, samples: await listRecords(root, 'cache-samples', id), resets: await listRecords(root, 'cache-resets', id),
-    agents: await agentAssignments(root, id),
+    routes: id === sessionId ? routes : await routerRoutes(router, id),
   })));
   const labels = new Map([[loopKey(sessionId, null), 'Main']]);
-  for (const { id, agents } of data) {
-    for (const agent of agents) labels.set(loopKey(id, agent.agentId), `${agent.name || agent.role} (${agent.agentId})`);
+  for (const { id, routes: routed } of data) {
+    for (const agent of routed?.agents ?? []) labels.set(loopKey(id, agent.agentId), `${agent.name || agent.role} (${agent.agentId})`);
   }
-  const leadAgents = data[0].agents;
   for (const id of sessions.slice(1)) {
-    const records = await listRecords(root, 'sessions', id);
-    const mate = records.find(r => r.sessionId === id && r.leadSessionId === sessionId)?.teammate;
-    if (mate) {
-      const assigned = leadAgents.find(a => a.agentId === mate.agentId);
-      labels.set(loopKey(id, null), `${mate.name || assigned?.name || 'Teammate'} (${mate.agentId})`);
-    }
+    const mate = data.find(d => d.id === id)?.routes?.teammate;
+    const label = linked.get(id);
+    if (label) labels.set(loopKey(id, null), label);
+    else if (mate) labels.set(loopKey(id, null), `${mate.name || 'Teammate'} (${mate.agentId})`);
   }
   return {
     samples: data.flatMap(d => d.samples.filter(s => s.sessionId === d.id && validSample(s))),
     resets: data.flatMap(d => d.resets.filter(r => r.sessionId === d.id && (r.agentId === null || typeof r.agentId === 'string') && Number.isSafeInteger(r.resetAt) && r.resetAt >= 0)),
     labels: [...labels],
+    routes: routes ? { self: routes.self, agents: routes.agents.map(({ agentId, model, effort, kind }) => ({ agentId, model, kind, ...(effort ? { effort } : {}) })) } : null,
   };
 }

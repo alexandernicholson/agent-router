@@ -1,0 +1,14 @@
+{
+  "name": "agent-router-tools",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "sync": "node scripts/sync-shared.mjs",
+    "check": "node scripts/sync-shared.mjs --check",
+    "test": "npm run check && node --test shared/tests/*.test.mjs && npm --prefix agent-router test && npm --prefix keepalive test",
+    "test:mod": "npm --prefix agent-router run test:mod && npm --prefix keepalive run test:mod",
+    "typecheck": "npm --prefix agent-router run typecheck && npm --prefix keepalive run typecheck"
+  }
+}

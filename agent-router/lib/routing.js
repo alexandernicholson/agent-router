@@ -82,17 +82,4 @@ export function routeTeammate(policy, input) {
   return effort === undefined ? routed : { ...routed, effort };
 }
 
-/** @param {{id: string, type: string, teammateId?: string} | undefined} agent */
-export const isTeammate = agent => !!agent && (agent.type === 'teammate' || typeof agent.teammateId === 'string');
-/** @param {{id: string, type: string, teammateId?: string} | undefined} agent */
-export const isPaneTeammate = agent => !!agent && typeof agent.teammateId === 'string' && agent.id === agent.teammateId;
-
-export function isTruthy(value) {
-  return typeof value === 'string' && !['', '0', 'false', 'no', 'off'].includes(value.toLowerCase());
-}
-
-// Context suffixes affect request options; Claude sometimes omits them in telemetry.
-export function sameModel(left, right) {
-  return typeof left === 'string' && typeof right === 'string' &&
-    left.replace(/\[1m\]$/i, '') === right.replace(/\[1m\]$/i, '');
-}
+export { isTruthy, sameModel, isTeammate, isPaneTeammate } from './shared/models.js';

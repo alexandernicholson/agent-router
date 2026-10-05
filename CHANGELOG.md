@@ -2,6 +2,14 @@
 
 Each release explains what changed for you, in 120 words or less.
 
+## Agent Router 0.17.0 · Keepalive 0.1.0
+
+- **Two plugins.** The cache bar is now **Keepalive**, a separate plugin in the same marketplace: `/plugin install keepalive@agent-router-tools`. Agent Router keeps model routing. Either works without the other.
+- **Nothing lost.** Keepalive copies your cache history and keeps your saved cache settings. Its settings are in `/keepalive-settings`; `/agent-cache` still opens the dashboard, now also `/keepalive`.
+- **The whole session at a glance.** The dashboard opens with the hit rate now and overall, and one coloured dot per request.
+- **Clearer filters.** The option in use is highlighted.
+- **Denser history.** One line per request, in columns, with the time between requests in the gap.
+
 ## 0.16.2
 
 - **No vanishing countdowns on gateway models.** Some gateway models never report how long their cache lasts. Their bar now says `TTL not reported` from the start instead of counting down for 30 seconds and then switching.

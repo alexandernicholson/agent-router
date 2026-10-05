@@ -16,7 +16,7 @@ const usage = (fiveMinute = 100, oneHour = 0) => ({ input_tokens: 100, output_to
 const record = (extra = {}, reported = usage()) => ({ type: 'assistant', sessionId: 'lead', timestamp: new Date(1500).toISOString(),
   message: { id: 'msg_one', model: 'vendor/worker', usage: reported, content: [{ type: 'text', text: 'PRIVATE_ANSWER' }] }, ...extra });
 async function fixture(t) {
-  const root = await mkdtemp(join(tmpdir(), 'agent-router-cache-response-'));
+  const root = await mkdtemp(join(tmpdir(), 'keepalive-cache-response-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   return root;
 }

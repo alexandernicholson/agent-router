@@ -1,16 +1,7 @@
 import { isExactModelId } from './routing.js';
+import { displayText } from './shared/text.js';
 
-export function displayText(value, limit) {
-  if (typeof value !== 'string') return '';
-  return value
-    // Consume terminal strings (OSC/DCS/SOS/PM/APC), CSI, and single ESC commands.
-    .replace(/(?:\u001b\]|\u009d)[\s\S]*?(?:\u0007|\u001b\\|\u009c|$)/g, '')
-    .replace(/(?:\u001b[PX^_]|[\u0090\u0098\u009e\u009f])[\s\S]*?(?:\u001b\\|\u009c|$)/g, '')
-    .replace(/(?:\u001b\[|\u009b)[0-?]*[ -/]*[@-~]/g, '')
-    .replace(/\u001b[ -/]*[@-~]/g, '')
-    .replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '')
-    .replace(/\s+/g, ' ').trim().slice(0, limit).replace(/[\ud800-\udbff]$/, '');
-}
+export { displayText };
 
 function positiveLimit(...values) {
   return values.find(value => Number.isSafeInteger(value) && value > 0);

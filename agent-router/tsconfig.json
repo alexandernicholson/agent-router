@@ -3,7 +3,9 @@
     "target": "ES2023",
     "module": "ESNext",
     "moduleResolution": "Bundler",
-    "lib": ["ES2023"],
+    "lib": [
+      "ES2023"
+    ],
     "types": [],
     "jsx": "react",
     "jsxFactory": "h",
@@ -14,5 +16,13 @@
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["types/*.d.ts", "hooks/*.ts", "hooks/*.tsx", "tests/*.ts", "lib/routing.js", "lib/catalog.js"]
+  "include": [
+    "../shared/types/*.d.ts",
+    "hooks/*.ts",
+    "hooks/*.tsx",
+    "hooks/shared/*.ts",
+    "tests/*.ts",
+    "lib/routing.js",
+    "lib/catalog.js"
+  ]
 }

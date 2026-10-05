@@ -7,7 +7,7 @@
 /** @typedef {{read: number, write: number, fresh: number, requests: number}} CacheUsage */
 /** @typedef {'good' | 'fair' | 'poor'} CacheGrade */
 
-import { sameModel } from './routing.js';
+import { sameModel } from './shared/models.js';
 
 const on = value => value === '1' || value?.toLowerCase() === 'true';
 const count = value => value === undefined || Number.isSafeInteger(value) && value >= 0;
@@ -304,4 +304,48 @@ export function cacheClock(ms) {
 }
 export function cacheTokens(value) {
   return value < 1000 ? String(value) : `${Number((value / (value >= 1e6 ? 1e6 : 1000)).toFixed(1))}${value >= 1e6 ? 'm' : 'k'}`;
+}
+
+const MATRIX_GLYPHS = { good: '●', fair: '◐', poor: '○', miss: '✕', keepalive: '·', compaction: '◆' };
+
+/**
+ * @param {CacheRow[]} rows
+ * @returns {{glyph: string, tone: CacheGrade | 'quiet', at: number}[]}
+ */
+export function sessionMatrix(rows) {
+  const cells = [];
+  for (const row of rows) for (const s of row.samples) {
+    const at = s.startedAt;
+    if (isKeepalive(s)) cells.push({ glyph: MATRIX_GLYPHS.keepalive, tone: 'quiet', at });
+    else if (isCompaction(s)) { if (s.read + s.write + s.fresh + s.output > 0) cells.push({ glyph: MATRIX_GLYPHS.compaction, tone: 'quiet', at }); }
+    else {
+      const grade = cacheGrade(s);
+      if (!grade) continue;
+      cells.push({ glyph: s.miss ? MATRIX_GLYPHS.miss : MATRIX_GLYPHS[grade], tone: grade, at });
+    }
+  }
+  return cells.sort((a, b) => a.at - b.at);
+}
+
+/**
+ * @param {CacheRow[]} rows
+ * @param {number} [recent]
+ */
+export function sessionUsage(rows, recent = RATE_REQUESTS) {
+  const real = rows.flatMap(row => row.samples.filter(s => !isKeepalive(s) && !isCompaction(s) && s.read + s.write + s.fresh > 0))
+    .sort((a, b) => a.startedAt - b.startedAt);
+  const sum = list => list.reduce((total, s) => ({ read: total.read + s.read, write: total.write + s.write, fresh: total.fresh + s.fresh }), { read: 0, write: 0, fresh: 0 });
+  const last = real.slice(-recent);
+  const mean = list => { const total = sum(list); return { read: total.read / list.length, write: total.write / list.length, fresh: total.fresh / list.length }; };
+  return real.length ? { session: { ...sum(real), requests: real.length }, recent: { ...mean(last), requests: last.length } } : undefined;
+}
+
+/** @param {number} ms */
+export function cacheGap(ms) {
+  const value = Math.max(0, ms);
+  if (value < 1000) return `${(value / 1000).toFixed(1)}s`;
+  const seconds = Math.round(value / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, '0')}s`;
+  return `${Math.floor(seconds / 3600)}h ${String(Math.floor(seconds % 3600 / 60)).padStart(2, '0')}m`;
 }

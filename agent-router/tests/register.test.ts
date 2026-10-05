@@ -264,3 +264,52 @@ test('apply reports when the session already uses the saved settings', async ($,
   expect(calls.some(call => call.action === 'apply')).toBe(false);
   expect(typeof result.text === 'string' && result.text.includes('already')).toBe(true);
 });
+
+function moved(on: On, stored: Record<string, unknown>, rows: unknown[] = [], calls: Record<string, any>[] = []) {
+  const logs: string[] = [];
+  mock.store(on, stored);
+  mock.env(on, {});
+  mock.clock(on);
+  on('command.register', ($, e) => ({ value: { command: e.name } }));
+  on('session.id', () => ({ value: 'session' }));
+  on('session.start', ($, e) => ({ cwd: e.cwd }));
+  on('ui.status', () => ({ value: undefined }));
+  on('ui.log', ($, e) => { logs.push(e.text); return { value: undefined }; });
+  on('ui.invalidate', () => ({ value: undefined }));
+  on('config.list', () => ({ value: rows as any }));
+  on('process.run', ($, e) => {
+    calls.push(JSON.parse(e.init?.stdin || '{}'));
+    return { value: { isStdoutTruncated: false, isStderrTruncated: false, exitCode: 0, stderr: '',
+      stdout: JSON.stringify({ active: false, policy: null, sessionId: 'session', agents: [] }) } };
+  });
+  return logs;
+}
+const notices = (logs: string[]) => logs.filter(line => line.includes('moved to the Keepalive plugin')).length;
+const start2 = ($: Engine) => $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true });
+
+test('a user who had the cache bar is told once where it went', async ($, on) => {
+  const logs = moved(on, { 'cache-intro': 1 });
+  await start2($);
+  await start2($);
+  expect(notices(logs)).toBe(1);
+});
+
+test('nobody is told about Keepalive when it is installed or they never had the cache bar', async ($, on) => {
+  const logs = moved(on, { 'cache-intro': 1 }, [{ key: 'keepalive@agent-router-tools.cache_ttl', label: 'cache_ttl', kind: 'choice', value: 'default',
+    provider: { plugin: 'keepalive@agent-router-tools', tier: 'user' }, isLocked: false }]);
+  await start2($);
+  expect(notices(logs)).toBe(0);
+});
+
+test('a new user who never had the cache bar is not told it moved', async ($, on) => {
+  const logs = moved(on, {});
+  await start2($);
+  expect(notices(logs)).toBe(0);
+});
+
+test('the cache choices saved before the split are handed to Keepalive through the bridge', async ($, on) => {
+  const calls: Record<string, any>[] = [];
+  moved(on, { 'cache-intro': 1, 'cache-ttl': [['s', 'k', '1h']], 'stats-view': 'usage' }, [], calls);
+  await start2($);
+  expect(calls.find(call => call.action === 'handover')?.values).toEqual({ 'cache-intro': 1, 'cache-ttl': [['s', 'k', '1h']] });
+});

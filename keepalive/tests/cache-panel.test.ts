@@ -1,14 +1,13 @@
 import { test, expect, mock, tier } from 'claude-code/testing';
 import type { Engine } from 'claude-code/testing';
 import type { AgentInfo, On, RenderInput, RenderNode, TurnStepInput } from 'claude-code';
-import { ROLES } from '../lib/routing.js';
 import { applyCacheCreation, loopKey } from '../lib/cache.js';
 import { CACHE_COLORS } from '../lib/cache-colors.js';
 
 tier('user');
 const DARK = CACHE_COLORS.dark;
 
-const pane: RenderInput<'Pane', 'terminal'> = { component: 'Pane', surface: 'terminal', requestId: 'agent-cache',
+const pane: RenderInput<'Pane', 'terminal'> = { component: 'Pane', surface: 'terminal', requestId: 'keepalive',
   props: { title: 'Agent cache', isFocused: true, bodyColumns: 110, placement: 'dock', scroll: { offset: 0, bodyRows: 24 }, view: {} } };
 function band(agentId?: string): RenderInput<'AbovePrompt', 'terminal'> {
   return { component: 'AbovePrompt', surface: 'terminal', requestId: 'cache-band', props: {
@@ -25,7 +24,8 @@ const ttlSeen: { at: string; agentId: string | null; value?: string }[] = [];
 let liveEnv: Record<string, string | undefined> = {};
 
 async function setup($: Engine, on: On, endpoint = 'https://gateway.example', stored?: Record<string, unknown>,
-  extra: { settings?: Record<string, unknown>; env?: Record<string, string>; auth?: 'bearer' | 'api-key'; refuseEnv?: boolean } = {}) {
+  extra: { settings?: Record<string, unknown>; env?: Record<string, string>; auth?: 'bearer' | 'api-key'; refuseEnv?: boolean;
+    teammate?: { agentId: string; agentName?: string; parentSessionId: string }; handover?: Record<string, unknown> } = {}) {
   mock.store(on, stored);
   ttlSeen.length = 0;
   const env: Record<string, string | undefined> = { ...(endpoint ? { ANTHROPIC_BASE_URL: endpoint } : {}), ...extra.env };
@@ -47,8 +47,10 @@ async function setup($: Engine, on: On, endpoint = 'https://gateway.example', st
     compaction: {} as Record<string, unknown>,
     prices: { 'vendor/main': { read: 0.1, fiveMinute: 1.25, output: 5, provider: 'example', id: 'main-1', source: 'models.dev' } } as Record<string, unknown>,
     priceLookups: [] as string[][], pricesFail: false,
-    linked: [] as Record<string, any>[], labels: [] as [string, string][], env, envSets };
-  const policy = { version: 1, roles: Object.fromEntries(ROLES.map(role => [role, { model: `vendor/${role}`, aliases: [role] }])) };
+    linked: [] as Record<string, any>[], labels: [] as [string, string][], env, envSets,
+    teammate: extra.teammate ?? null as null | { agentId: string; agentName?: string; parentSessionId: string }, links: [] as Record<string, any>[],
+    routes: null as null | { self: { model: string } | null; agents: { agentId: string; model: string }[] },
+    handover: (extra.handover ?? null) as Record<string, unknown> | null };
   on('session.id', () => ({ value: world.sessionId }));
   on('session.start', ($, e) => ({ cwd: e.cwd }));
   on('settings.read', () => ({ value: extra.settings ?? {} }));
@@ -72,7 +74,6 @@ async function setup($: Engine, on: On, endpoint = 'https://gateway.example', st
     return { messages: [{ role: 'assistant' as const, text: 'Summary', toolUses: [] }], ...world.compaction };
   });
   on('config.list', () => ({ value: [{ key: 'theme', label: 'Theme', kind: 'enum', value: world.theme, provider: { plugin: 'engine', tier: 'core' }, isLocked: false }] as any }));
-  on('agent.spawn', ($, e) => ({ model: e.model!, agentId: 'child' }));
   on('ui.render', { component: 'AbovePrompt' }, ($, e) => $.ui.resolve(e).Text({ children: ['Existing prompt content'] }));
   on('process.run', ($, e) => {
     const request = JSON.parse(e.init?.stdin || '{}');
@@ -98,10 +99,12 @@ async function setup($: Engine, on: On, endpoint = 'https://gateway.example', st
     }
     if (request.action === 'cache-reset') world.resets.push({ sessionId: request.session_id, agentId: request.agent_id ?? null, resetAt: request.reset_at });
     if (request.action === 'cache-snapshot' && world.failRead) return { value: { isStdoutTruncated: false, isStderrTruncated: false, exitCode: 1, stderr: 'storage failed', stdout: '' } };
-    const output = request.action === 'bootstrap' ? { active: true, policy, agents: [] }
-      : request.action === 'cache-sample' ? { sample: world.samples.at(-1) }
-      : request.action === 'cache-snapshot' ? { samples: [...world.samples.filter(s => s.sessionId === request.session_id), ...world.linked], resets: world.resets, labels: world.labels }
-      : request.action === 'stats' ? { routed: 0, overrides: 0, mismatches: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 } : {};
+    if (request.action === 'identity') return { value: { isStdoutTruncated: false, isStderrTruncated: false, exitCode: 0, stderr: '', stdout: JSON.stringify({ teammate: world.teammate }) } };
+    if (request.action === 'link') world.links.push(request);
+    if (request.action === 'migrate') return { value: { isStdoutTruncated: false, isStderrTruncated: false, exitCode: 0, stderr: '', stdout: JSON.stringify({ migrated: false, handover: world.handover }) } };
+    const output = request.action === 'cache-sample' ? { sample: world.samples.at(-1) }
+      : request.action === 'cache-snapshot' ? { samples: [...world.samples.filter(s => s.sessionId === request.session_id), ...world.linked], resets: world.resets, labels: world.labels, routes: world.routes }
+      : {};
     return { value: { isStdoutTruncated: false, isStderrTruncated: false, exitCode: 0, stderr: '', stdout: JSON.stringify(output) } };
   });
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true });
@@ -126,7 +129,7 @@ async function step($: Engine, extra: Partial<TurnStepInput> = {}) {
   }
 }
 async function dashboard($: Engine) {
-  await $.command.run({ command: 'agent-cache', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } });
+  await $.command.run({ command: 'keepalive', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } });
   return text(await $.ui.render(pane));
 }
 
@@ -137,10 +140,8 @@ test('main and child cache bars remain distinct and native stream and response s
   expect(main.chunks).toEqual([{ kind: 'text', index: 0, text: 'PRIVATE_ANSWER' }]);
   expect(main.result.answer).toBe('PRIVATE_ANSWER');
   await step($, { index: 1 });
-  await $.agent.spawn({ tool_use_id: 'spawn', description: 'Search', prompt: 'PRIVATE_PROMPT', subagentType: 'agent-router:scout',
-    provider: { plugin: 'engine', tier: 'core' }, parentModel: 'vendor/main', background: true, fork: false });
   world.roster = [{ id: 'child', type: 'agent-router:scout', description: 'Search', status: 'running' }];
-  await step($, { agentId: 'child' });
+  await step($, { agentId: 'child', model: 'vendor/scout' });
   expect(world.samples.length).toBe(3);
   expect(world.samples[2].model).toBe('vendor/scout');
   expect(JSON.stringify(world.samples).includes('PRIVATE')).toBe(false);
@@ -212,7 +213,7 @@ test('clear separates new session usage and does not reuse a warm bar', async ($
 test('cache panel close button releases the pane', async ($, on) => {
   const { world } = await setup($, on);
   await dashboard($);
-  await $.ui.press({ plugin: 'agent-router', key: 'agent-cache-close', requestId: 'agent-cache' });
+  await $.ui.press({ plugin: 'keepalive', key: 'agent-cache-close', requestId: 'keepalive' });
   expect(world.calls.some(call => call.action === 'cache-snapshot')).toBe(true);
 });
 
@@ -338,7 +339,7 @@ function colors(node: RenderNode, found: [string, string][] = []): [string, stri
   return found;
 }
 const colorOf = (node: RenderNode, pattern: RegExp) => colors(node).find(([value]) => pattern.test(value))?.[1];
-const upkeep = ($: Engine) => $.ui.press({ plugin: 'agent-router', key: 'agent-cache-upkeep', requestId: 'cache-band' });
+const upkeep = ($: Engine) => $.ui.press({ plugin: 'keepalive', key: 'agent-cache-upkeep', requestId: 'cache-band' });
 function markers(node: RenderNode, found: { glyph: string; color?: string; dim?: boolean }[] = []) {
   if (typeof node === 'string' || !('props' in node)) return found;
   const props = node.props as { color?: string; dimColor?: boolean };
@@ -452,7 +453,7 @@ test('the band opens with a bordered dial and the bare upkeep mode', async ($, o
   expect(shown.includes('ttl')).toBe(false);
   expect(/● ⬦ off TTL 5m █{8} ░{2}\s+80%/.test(shown)).toBe(true);
   expect(button(rendered, 'agent-cache-open')?.plain).toBe(undefined);
-  await $.ui.press({ plugin: 'agent-router', key: 'agent-cache-open', requestId: 'cache-band' });
+  await $.ui.press({ plugin: 'keepalive', key: 'agent-cache-open', requestId: 'cache-band' });
   expect(text(await $.ui.render(pane)).includes('Prompt cache')).toBe(true);
 });
 
@@ -516,7 +517,7 @@ test('a cache rewritten while it was still warm is labelled a prefix change', as
   expect(button(await $.ui.render(band()), 'agent-cache-misses')?.label).toBe('2 expired·prefix');
   const contents = await dashboard($);
   expect(contents.includes('prefix changed')).toBe(true);
-  expect(contents.includes('· expired ·')).toBe(true);
+  expect(/same-turn:2\s+\S+\s+0%\s+5m\s+expired\s/.test(contents)).toBe(true);
 });
 
 function flatBand(node: RenderNode): string {
@@ -573,7 +574,7 @@ test('the miss chip opens the dashboard on the misses, with their causes and how
   await step($, { index: 1 });
   await clock.advance(64000);
   await $.ui.render(band());
-  await $.ui.press({ plugin: 'agent-router', key: 'agent-cache-misses', requestId: 'cache-band' });
+  await $.ui.press({ plugin: 'keepalive', key: 'agent-cache-misses', requestId: 'cache-band' });
   const contents = text(await $.ui.render(pane));
   expect(contents.includes('✕ 1 cache miss in the last 15 min: 1 prefix changed · latest 1:04 ago')).toBe(true);
   expect(contents.includes('Recent requests · all agents (last 30 misses)')).toBe(true);
@@ -586,7 +587,7 @@ test('a new write shows the TTL it asked for until the transcript reports one, n
   const { world, clock } = await setup($, on);
   await $.classic.SessionStart({ source: 'startup', session_id: world.sessionId, transcript_path: transcript });
   await $.ui.render(band());
-  await $.ui.press({ plugin: 'agent-router', key: 'agent-cache-ttl', requestId: 'cache-band' });
+  await $.ui.press({ plugin: 'keepalive', key: 'agent-cache-ttl', requestId: 'cache-band' });
   await step($);
   let shown = text(await $.ui.render(band()));
   expect(shown.includes('not reported')).toBe(false);
@@ -612,15 +613,18 @@ test('recent requests show the TTL each one asked for, and a different one the r
   world.reported = { fiveMinute: 100, oneHour: 0 };
   await step($);
   await $.ui.render(band());
-  await $.ui.press({ plugin: 'agent-router', key: 'agent-cache-ttl', requestId: 'cache-band' });
+  await $.ui.press({ plugin: 'keepalive', key: 'agent-cache-ttl', requestId: 'cache-band' });
   world.reported = { fiveMinute: 0, oneHour: 100 };
   await step($, { index: 1 });
   world.reported = { fiveMinute: 100, oneHour: 0 };
   await step($, { index: 2 });
   const contents = await dashboard($);
-  expect(/same-turn:0 [^\n]*· TTL 5m ·/.test(contents)).toBe(true);
-  expect(/same-turn:1 [^\n]*· TTL 1h ·/.test(contents)).toBe(true);
-  expect(contents.includes('· TTL 1h (5m reported) ·')).toBe(true);
+  const lines = treeLines(await $.ui.render(pane));
+  const ttl = (name: string) => lines.find(line => line.startsWith(name))?.match(/%\s+(\S+(?: \(\S+ reported\))?)/)?.[1];
+  expect(ttl('same-turn:0')).toBe('5m');
+  expect(ttl('same-turn:1')).toBe('1h');
+  expect(ttl('same-turn:2')).toBe('1h (5m reported)');
+  expect(lines.some(line => /^request\s+hit\s+TTL\s+miss\s+read\s+write\s+new\s+out\s+model$/.test(line))).toBe(true);
 });
 
 test('the bar shows the hit rate over the last 10 requests, not just the last one', async ($, on) => {
@@ -988,7 +992,7 @@ function keys(node: RenderNode, prefix: string, found: string[] = []): string[] 
   if ('children' in node && Array.isArray(node.children)) for (const child of node.children) keys(child, prefix, found);
   return found;
 }
-const press = ($: Engine, key: string) => $.ui.press({ plugin: 'agent-router', key, requestId: 'agent-cache' });
+const press = ($: Engine, key: string) => $.ui.press({ plugin: 'keepalive', key, requestId: 'keepalive' });
 
 test('viewing an agent that cannot be warmed shows a dash in place of the mode button', async ($, on) => {
   response(on);
@@ -1054,9 +1058,9 @@ test('the dashboard names what cannot be kept warm only when the tree shows such
   world.roster.push({ id: 'mate1', type: 'teammate', description: 'Probe', status: 'running', name: 'probe' });
   await step($, { agentId: 'mate1' });
   expect((await dashboard($)).includes('for subagents and in-process teammates.')).toBe(true);
-  await $.ui.press({ plugin: 'agent-router', key: 'cache-agents:main', requestId: 'agent-cache' });
+  await $.ui.press({ plugin: 'keepalive', key: 'cache-agents:main', requestId: 'keepalive' });
   expect(text(await $.ui.render(pane)).includes('kept warm')).toBe(false);
-  await $.ui.press({ plugin: 'agent-router', key: 'cache-agents:teammates', requestId: 'agent-cache' });
+  await $.ui.press({ plugin: 'keepalive', key: 'cache-agents:teammates', requestId: 'keepalive' });
   expect(text(await $.ui.render(pane)).includes('– can\'t be kept warm: Claude Code has no keepalive or compaction for in-process teammates.')).toBe(true);
 });
 
@@ -1088,7 +1092,7 @@ test('the dashboard filters agents by kind and requests by type, across all agen
   await press($, 'cache-agents:all');
   await press($, 'cache-requests:keepalives');
   drawn = await $.ui.render(pane);
-  expect(text(drawn).includes('keepalive ')).toBe(true);
+  expect(treeLines(drawn).some(line => line.startsWith('keepalive '))).toBe(true);
   expect(text(drawn).includes('same-turn:0')).toBe(false);
   await press($, 'cache-requests:all');
   await press($, 'cache-history:all');
@@ -1127,7 +1131,7 @@ test('the first session with the cache bar shows a short intro, once', async ($,
   const all = world.logs.slice(world.logs.indexOf(lines[0])).filter(log => !log.startsWith('Agent Router'));
   const words = all.join(' ').split(/\s+/).filter(Boolean).length;
   expect(words <= 220).toBe(true);
-  for (const part of ['/agent-cache', 'off', 'warm', 'compact', 'warmcomp', '/agent-models']) expect(all.join(' ').includes(part)).toBe(true);
+  for (const part of ['/keepalive', 'off', 'warm', 'compact', 'warmcomp', '/keepalive-settings']) expect(all.join(' ').includes(part)).toBe(true);
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true });
   world.sessionId = 'another-session';
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true });
@@ -1150,7 +1154,7 @@ test('the intro is never sent to the model', async ($, on) => {
 const ttlButton = async ($: Engine, agentId?: string) => button(await $.ui.render(band(agentId)), 'agent-cache-ttl')?.label;
 const pressTtl = async ($: Engine, agentId?: string) => {
   await $.ui.render(band(agentId));
-  await $.ui.press({ plugin: 'agent-router', key: 'agent-cache-ttl', requestId: 'cache-band' });
+  await $.ui.press({ plugin: 'keepalive', key: 'agent-cache-ttl', requestId: 'cache-band' });
 };
 const seen = (at: string, agentId: string | null) => ttlSeen.filter(entry => entry.at === at && entry.agentId === agentId).map(entry => entry.value);
 
@@ -1225,7 +1229,7 @@ test('in-process teammates start in the teammate TTL setting, subagents in the s
   await step($, { agentId: 'child' });
   expect(seen('step', 'mate')).toEqual(['1h']);
   expect(seen('step', 'child')).toEqual([undefined]);
-  expect((await dashboard($)).includes('TTL 1h · teammate TTL in /agent-models')).toBe(true);
+  expect((await dashboard($)).includes('TTL 1h · teammate TTL in /keepalive-settings')).toBe(true);
 });
 
 test('an in-process teammate launched with a role is still a teammate, by its team address', async ($, on) => {
@@ -1237,7 +1241,7 @@ test('an in-process teammate launched with a role is still a teammate, by its te
   expect(seen('step', 'amate-1')).toEqual(['1h']);
   const contents = await dashboard($);
   expect(contents.includes('probe (amate-1) · in-process teammate')).toBe(true);
-  expect(contents.includes('TTL 1h · teammate TTL in /agent-models')).toBe(true);
+  expect(contents.includes('TTL 1h · teammate TTL in /keepalive-settings')).toBe(true);
   expect(contents.includes('for in-process teammates.')).toBe(true);
 });
 
@@ -1332,4 +1336,140 @@ test('the dashboard names Anthropic pricing for a Claude model', async ($, on) =
   await step($, { model: 'claude-opus-5-5' });
   await clock.advance(2000);
   expect((await dashboard($)).includes('priced by Anthropic pricing (claude-opus-5-5)')).toBe(true);
+});
+
+function chipStates(node: RenderNode, prefix: string, found: Record<string, string> = {}) {
+  if (typeof node === 'string') return found;
+  if (node.type === 'Button' && typeof node.props.key === 'string' && node.props.key.startsWith(prefix)) {
+    const props = node.props as { key: string; variant?: string; dimColor?: boolean };
+    found[props.key.slice(prefix.length)] = props.variant === 'primary' ? 'chosen' : props.dimColor ? 'dim' : 'plain';
+  }
+  if ('children' in node && Array.isArray(node.children)) for (const child of node.children) chipStates(child, prefix, found);
+  return found;
+}
+
+test('the dashboard opens with the rate now, the session rate and one dot per request', async ($, on) => {
+  const usage = missWorld(on);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 5000, oneHour: 0 };
+  await step($);
+  Object.assign(usage, { read: 48648, write: 257000 });
+  world.reported = { fiveMinute: 257000, oneHour: 0 };
+  await clock.advance(26000);
+  await step($, { index: 1 });
+  world.roster = [{ id: 'child', type: 'agent-router:scout', description: 'Search', status: 'running' }];
+  Object.assign(usage, { read: 0, write: 3000, fresh: 10 });
+  world.reported = { fiveMinute: 3000, oneHour: 0 };
+  await step($, { agentId: 'child' });
+  const contents = await dashboard($);
+  expect(contents.indexOf('Now') < contents.indexOf('Main')).toBe(true);
+  expect(/Now\s+[█▓▒░\s]+\d+%\s+over the last 3 requests/.test(contents)).toBe(true);
+  expect(/Session\s+[█▓▒░\s]+\d+%\s+over 3 requests · read 348.6k/.test(contents)).toBe(true);
+  expect(contents.includes('One dot per request, oldest first: ● good ◐ fair ○ poor ✕ miss · keepalive ◆ compaction')).toBe(true);
+  const drawn = await $.ui.render(pane);
+  expect(treeLines(drawn).includes('●✕◐')).toBe(true);
+  expect(colorOf(drawn, /^●$/)).toBe(DARK.good);
+  expect(colorOf(drawn, /^✕$/)).toBe(DARK.poor);
+  expect(colorOf(drawn, /^◐$/)).toBe(DARK.fair);
+});
+
+test('an empty session says what the dots will show', async ($, on) => {
+  await setup($, on);
+  expect((await dashboard($)).includes('No requests yet. Each request this session gets a dot here.')).toBe(true);
+});
+
+test('filters sit under one heading, the chosen option stands out and the rest are dim', async ($, on) => {
+  response(on);
+  await setup($, on);
+  await step($);
+  await dashboard($);
+  let drawn = await $.ui.render(pane);
+  expect(treeLines(drawn).includes('Show')).toBe(true);
+  expect(chipStates(drawn, 'cache-requests:')).toEqual({ all: 'chosen', real: 'dim', keepalives: 'dim', compactions: 'dim', misses: 'dim' });
+  expect(chipStates(drawn, 'cache-history:')).toEqual({ agent: 'chosen', all: 'dim' });
+  expect(treeLines(drawn).some(line => /^From\s+\[ this agent \] all agents$/.test(line))).toBe(true);
+  await press($, 'cache-requests:misses');
+  expect(chipStates(await $.ui.render(pane), 'cache-requests:').misses).toBe('chosen');
+});
+
+test('recent requests are one line each, with the time between them in the gap', async ($, on) => {
+  const usage = missWorld(on);
+  Object.assign(usage, { read: 800, write: 100, fresh: 100 });
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 100, oneHour: 0 };
+  Object.assign(usage, { read: 0, write: 900, fresh: 100 });
+  world.reported = { fiveMinute: 900, oneHour: 0 };
+  await step($);
+  Object.assign(usage, { read: 800, write: 100, fresh: 100 });
+  world.reported = { fiveMinute: 100, oneHour: 0 };
+  await clock.advance(12400);
+  await step($, { index: 1 });
+  await clock.advance(252000);
+  await step($, { index: 2 });
+  await dashboard($);
+  const lines = treeLines(await $.ui.render(pane));
+  const first = lines.findIndex(line => line.startsWith('same-turn:2'));
+  expect(first > 0).toBe(true);
+  expect(lines[first - 1].trimStart().startsWith('request')).toBe(true);
+  expect(lines[first + 1].trim()).toBe('↕ 4m 12s');
+  expect(lines[first + 2].startsWith('same-turn:1')).toBe(true);
+  expect(lines[first + 3].trim()).toBe('↕ 12s');
+  expect(lines[first + 4].startsWith('same-turn:0')).toBe(true);
+  expect(lines[first + 4].includes('  0%')).toBe(true);
+  for (const line of [lines[first], lines[first + 2]]) {
+    expect(line.includes('5m')).toBe(true);
+    expect(line.includes('800')).toBe(true);
+    expect(line.includes('vendor/main')).toBe(true);
+  }
+  const header = lines[first - 1];
+  for (const line of [lines[first], lines[first + 2], lines[first + 4]]) expect(line.indexOf('5m')).toBe(header.indexOf('TTL'));
+  const gapColor = colorOf(await $.ui.render(pane), /↕/);
+  expect(gapColor).toBe(undefined);
+});
+
+test('with Agent Router installed, a routed request is measured against its routed model, not a false model change', async ($, on) => {
+  labelled(on, () => 'vendor/search-v1');
+  const { world } = await setup($, on);
+  world.routes = { self: null, agents: [{ agentId: 'child', model: 'vendor/search-v1' }] };
+  await $.command.run({ command: 'keepalive', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } });
+  world.roster = [{ id: 'child', type: 'agent-router:scout', description: 'Search', status: 'running' }];
+  await step($, { agentId: 'child', model: 'claude-opus-5-5' });
+  expect(world.samples[0].model).toBe('vendor/search-v1');
+  const stream = $.turn.step({ turnId: 'same-turn', index: 1, messageCount: 1, model: 'claude-opus-5-5', agentId: 'child' });
+  await stream.next();
+  expect(text(await $.ui.render(band('child'))).includes('model changed')).toBe(false);
+  while (!(await stream.next()).done);
+});
+
+test('a split-pane teammate links itself to its lead and starts in the teammate defaults, with or without Agent Router', async ($, on) => {
+  response(on);
+  const { world } = await setup($, on, undefined, undefined, { teammate: { agentId: 'worker@team', agentName: 'worker', parentSessionId: 'lead-session' } });
+  expect(world.links).toEqual([expect.objectContaining({ action: 'link', lead_session_id: 'lead-session', label: 'worker (worker@team)' })]);
+  expect(await mode($)).toBe('warm');
+  expect(await ttlButton($)).toBe('TTL 1h');
+});
+
+test('settings saved under Agent Router before the split keep applying until changed here', { options: {} }, async ($, on) => {
+  response(on);
+  await setup($, on, undefined, undefined, { settings: { pluginConfigs: { 'agent-router@agent-router-tools': { options: { cache_ttl: '1h' } } } } });
+  expect(await ttlButton($)).toBe('TTL 1h');
+});
+
+test('a returning user keeps the TTL choices and intro they had under Agent Router', async ($, on) => {
+  response(on);
+  const { world } = await setup($, on, undefined, undefined, { handover: { 'cache-intro': 1, 'cache-ttl': [['cache-session', loopKey('cache-session', null), '1h']] } });
+  expect(await ttlButton($)).toBe('TTL 1h');
+  expect(world.logs.some(log => log.startsWith('Prompt cache'))).toBe(false);
+});
+
+test('a handover that arrives on a later start is still taken, since Keepalive may start before Agent Router', async ($, on) => {
+  response(on);
+  const { world } = await setup($, on);
+  expect(await ttlButton($)).toBe('TTL 5m');
+  world.handover = { 'cache-ttl': [['cache-session', loopKey('cache-session', null), '1h']] };
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true });
+  expect(await ttlButton($)).toBe('TTL 1h');
+  world.handover = { 'cache-ttl': [['cache-session', loopKey('cache-session', null), '5m']] };
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true });
+  expect(await ttlButton($)).toBe('TTL 1h');
 });

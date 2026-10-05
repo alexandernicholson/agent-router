@@ -307,31 +307,6 @@ test('a reloaded lead resumes polling for its split-pane teammates', async ($, o
   expect(statsReads(world) > started).toBe(true);
 });
 
-function upkeepMode(node: RenderNode): string | undefined {
-  if (typeof node !== 'object' || node === null) return undefined;
-  const props = ('props' in node ? node.props : {}) as { key?: string; label?: string };
-  if ('type' in node && node.type === 'Button' && props.key === 'agent-cache-upkeep') return props.label;
-  if (!('children' in node) || !Array.isArray(node.children)) return undefined;
-  for (const child of node.children) { const found = upkeepMode(child); if (found !== undefined) return found; }
-  return undefined;
-}
-
-test('a split-pane teammate starts in the teammate cache upkeep its lead set', async ($, on) => {
-  const self = { role: 'task', type: 'agent-router:task', model: 'vendor/task-v1' };
-  await lead($, on, { active: true, policy, leadSessionId: 'lead-of-mate', self, teammate: { agentId: 'worker@session-lead' } });
-  expect(upkeepMode(await $.ui.render(band()))).toBe('warm');
-});
-
-test('a lead keeps its own cache upkeep, whatever teammates start in', async ($, on) => {
-  await lead($, on);
-  expect(upkeepMode(await $.ui.render(band()))).toBe('off');
-});
-
-test('a split-pane teammate starts its own conversation in the teammate TTL, and its lead does not', async ($, on) => {
-  const self = { role: 'task', type: 'agent-router:task', model: 'vendor/task-v1' };
-  const world = await lead($, on, { active: true, policy, leadSessionId: 'lead-of-mate', self, teammate: { agentId: 'worker@session-lead' } });
-  expect(world.env.filter(item => item.name === 'CLAUDE_CODE_PROMPT_CACHE_TTL').at(-1)?.value).toBe('1h');
-});
 
 test('a lead session leaves the main conversation TTL to Claude Code by default', async ($, on) => {
   const world = await lead($, on);
@@ -356,7 +331,7 @@ test('an in-process teammate launched with a role steps on the teammate model, f
     .toEqual([{ kind: 'text', index: 0, text: 'vendor/mate-v1|high' }]);
 });
 
-test('a split-pane teammate request sent while its session is still starting waits, so it is pinned and measured', async ($, on) => {
+test('a split-pane teammate request sent while its session is still starting waits, so it is pinned', async ($, on) => {
   on('turn.step', async function* ($, e) {
     yield { kind: 'text' as const, index: 0, text: `${e.model}|${e.effort ?? 'none'}` };
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn' as const,
@@ -371,7 +346,6 @@ test('a split-pane teammate request sent while its session is still starting wai
   release();
   expect(await first).toEqual([{ kind: 'text', index: 0, text: 'vendor/mate-v1|high' }]);
   await world.started;
-  expect(world.calls.filter(item => item.action === 'cache-sample').length).toBe(1);
 });
 
 test('a split-pane teammate session runs at its pinned effort, so keepalives and compactions match its requests', async ($, on) => {

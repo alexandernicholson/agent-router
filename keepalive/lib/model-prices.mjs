@@ -2,7 +2,7 @@ import { open, readFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { catalogEntries, priceIndex, matchPrices } from './model-match.js';
 import { writeRecord } from './state.mjs';
-import { isTruthy } from './routing.js';
+import { isTruthy } from './shared/models.js';
 
 export const MODELS_DEV_URL = 'https://models.dev/api.json';
 const FRESH_MS = 24 * 3600000;

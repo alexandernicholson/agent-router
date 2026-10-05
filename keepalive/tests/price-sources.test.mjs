@@ -71,15 +71,15 @@ test('the default sources put Anthropic before models.dev', () => {
 });
 
 test('the bridge prices Claude models without downloading models.dev', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'agent-router-price-sources-'));
+  const root = await mkdtemp(join(tmpdir(), 'keepalive-price-sources-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const calls = [];
   const fetcher = async url => { calls.push(String(url)); return new Response(JSON.stringify({ openai: { models: { 'gpt-5': { cost: { input: 1.25, output: 10, cache_read: 0.125 } } } } })); };
   const env = { CLAUDE_PLUGIN_DATA: root };
-  const claude = await handleRequest({ action: 'cache-prices', session_id: 's', models: ['us.anthropic.claude-opus-5-5-v1:0'] }, env, undefined, undefined, fetcher);
+  const claude = await handleRequest({ action: 'cache-prices', session_id: 's', models: ['us.anthropic.claude-opus-5-5-v1:0'] }, env, {}, fetcher);
   assert.equal(claude.prices['us.anthropic.claude-opus-5-5-v1:0'].source, 'Anthropic pricing');
   assert.equal(calls.length, 0);
-  const other = await handleRequest({ action: 'cache-prices', session_id: 's', models: ['gpt-5'] }, env, undefined, undefined, fetcher);
+  const other = await handleRequest({ action: 'cache-prices', session_id: 's', models: ['gpt-5'] }, env, {}, fetcher);
   assert.equal(other.prices['gpt-5'].source, 'models.dev');
   assert.equal(other.prices['gpt-5'].oneHour, undefined);
   assert.equal(calls.length, 1);

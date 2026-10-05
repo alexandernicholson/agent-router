@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
-import { modelOptions, upkeepOptions } from './fixtures.mjs';
+import { modelOptions } from './fixtures.mjs';
 
 // The native test runner takes options from manifest defaults, not user settings.
 // Supply synthetic options ONLY in a disposable copy; the published manifest
@@ -15,12 +15,12 @@ try {
   const config = join(temporary, 'config');
   await mkdir(plugin, { mode: 0o700 });
   await mkdir(config, { mode: 0o700 });
-  for (const name of ['.claude-plugin', 'agents', 'commands', 'hooks', 'lib', 'scripts', 'tests', 'types', 'package.json']) {
+  for (const name of ['.claude-plugin', 'agents', 'commands', 'hooks', 'lib', 'scripts', 'tests', 'package.json']) {
     await cp(join(root, name), join(plugin, name), { recursive: true });
   }
   const manifestPath = join(plugin, '.claude-plugin', 'plugin.json');
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
-  for (const [key, value] of Object.entries({ ...modelOptions, ...upkeepOptions })) manifest.userConfig[key].default = value;
+  for (const [key, value] of Object.entries(modelOptions)) manifest.userConfig[key].default = value;
   await writeFile(manifestPath, JSON.stringify(manifest), { mode: 0o600 });
   const env = { ...process.env, CLAUDE_CONFIG_DIR: config, CLAUDE_CODE_ENABLE_FUNCTION_HOOKS: '1', DISABLE_TELEMETRY: '1' };
   delete env.ANTHROPIC_API_KEY;

@@ -1,6 +1,3 @@
-// Split-pane teammates are separate Claude processes. The launch flags are
-// the only identity they carry, so the bridge reads them from its ancestors
-// and confirms them against the team config Claude Code writes before launch.
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -22,8 +19,6 @@ export function parseTeammateArgs(argv) {
   return found;
 }
 
-// macOS and Linux `ps` report a process's argv joined by spaces; flag values
-// Claude Code writes here never contain spaces (ids, names, team, type).
 export function readTeammateIdentity(pid = process.ppid, run = execFileSync) {
   for (let depth = 0; depth < 4 && pid > 1; depth++) {
     let line;
@@ -48,7 +43,5 @@ export function teamMember(identity, env = process.env) {
   const member = config.members.find(item => item?.agentId === identity.agentId);
   if (!member || member.agentType === 'team-lead') return null;
   if ((member.agentType ?? undefined) !== (identity.agentType ?? undefined)) return null;
-  // A resumed lead keeps the team it started with, recorded under that first
-  // session's id, while its teammates' launch flag names the resumed session.
   return { member, leadConfirmed: config.leadSessionId === identity.parentSessionId };
 }

@@ -4,15 +4,17 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { cachePolicy, validSample, validPrices, cacheRows, cacheStatus, cacheBar, cacheClock, loopKey, applyCacheCreation, cacheGrade, cachePercent, lifeGrade, isKeepalive, keepaliveWorthwhile, keepalivesLeft, cacheDial, cacheBarParts, isCompaction,
-  recentUsage, recentMisses, sampleTtl, unreportedModels, MISS_WINDOW_MS, TTL_REPORT_MS } from '../lib/cache.js';
-import { recordCacheSample, resetCache, cacheSnapshot } from '../lib/cache-state.mjs';
-import { recordPath, writeRecord, linkTeammate } from '../lib/state.mjs';
+  recentUsage, recentMisses, sampleTtl, unreportedModels, sessionMatrix, sessionUsage, cacheGap, MISS_WINDOW_MS, TTL_REPORT_MS } from '../lib/cache.js';
+import { recordCacheSample, resetCache, cacheSnapshot, linkSession } from '../lib/cache-state.mjs';
+import { recordPath, writeRecord, routerData } from '../lib/state.mjs';
 import { handleRequest } from '../lib/bridge.mjs';
+import { writeRoutes } from '../lib/shared/routes.mjs';
+import { migrateFromRouter } from '../lib/migrate.mjs';
 
 const sample = (extra = {}) => ({ sessionId: 'lead', agentId: null, turnId: 'turn', index: 0, model: 'vendor/main',
   startedAt: 1000, read: 800, write: 100, fresh: 100, output: 20, ttlMs: 300000, ttlSource: 'plugin estimate', disabled: false, ...extra });
 async function fixture(t) {
-  const root = await mkdtemp(join(tmpdir(), 'agent-router-cache-'));
+  const root = await mkdtemp(join(tmpdir(), 'keepalive-cache-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   return root;
 }
@@ -104,14 +106,46 @@ test('lead observes linked pane teammates and their nested agents without counti
   await recordCacheSample(root, 'pane', sample({ agentId: null }));
   await recordCacheSample(root, 'pane', sample({ agentId: 'nested' }));
   await recordCacheSample(root, 'unrelated', sample());
-  await linkTeammate(root, 'lead', 'pane');
-  await writeRecord(recordPath(root, 'sessions', 'pane'), { sessionId: 'pane', leadSessionId: 'lead', teammate: { agentId: 'mate', name: 'Worker' } });
+  await linkSession(root, 'lead', 'pane', 'Worker (mate)');
   const snapshot = await cacheSnapshot(root, 'lead');
   assert.equal(snapshot.samples.length, 3);
   assert.equal(new Map(snapshot.labels).get(loopKey('pane', null)), 'Worker (mate)');
   const rows = cacheRows(snapshot.samples, snapshot.resets, new Map(snapshot.labels));
   assert.equal(rows.length, 3);
   assert.equal(rows.find(r => r.sessionId === 'pane' && r.agentId === null).label, 'Worker (mate)');
+});
+
+test('without its own link, a pane teammate the router published still joins its lead, with the router labels', async t => {
+  const root = await fixture(t);
+  const config = await fixture(t);
+  const router = routerData(config);
+  await recordCacheSample(root, 'lead', sample());
+  await recordCacheSample(root, 'lead', sample({ agentId: 'scout1' }));
+  await recordCacheSample(root, 'pane', sample({ agentId: null }));
+  await writeRoutes(router, { sessionId: 'lead', leadSessionId: null, self: null, teammate: null, teammates: ['pane'],
+    agents: [{ agentId: 'scout1', kind: 'subagent', role: 'scout', model: 'vendor/search-v1' }] });
+  await writeRoutes(router, { sessionId: 'pane', leadSessionId: 'lead', self: { role: 'task', model: 'vendor/task-v1', effort: 'low' },
+    teammate: { agentId: 'worker@team', name: 'worker' }, teammates: [], agents: [] });
+  const snapshot = await cacheSnapshot(root, 'lead', router);
+  const labels = new Map(snapshot.labels);
+  assert.equal(snapshot.samples.length, 3);
+  assert.equal(labels.get(loopKey('lead', 'scout1')), 'scout (scout1)');
+  assert.equal(labels.get(loopKey('pane', null)), 'worker (worker@team)');
+  assert.deepEqual(snapshot.routes, { self: null, agents: [{ agentId: 'scout1', model: 'vendor/search-v1', kind: 'subagent' }] });
+  assert.equal((await cacheSnapshot(root, 'lead')).routes, null);
+});
+
+test('the first run copies the cache history Agent Router kept, once, without overwriting', async t => {
+  const root = await fixture(t);
+  const config = await fixture(t);
+  const router = routerData(config);
+  await recordCacheSample(router, 'lead', sample({ turnId: 'old' }));
+  await recordCacheSample(root, 'lead', sample({ turnId: 'new' }));
+  assert.deepEqual(await migrateFromRouter(root, router), { migrated: true, copied: ['cache-samples'] });
+  assert.deepEqual((await cacheSnapshot(root, 'lead')).samples.map(s => s.turnId).sort(), ['new', 'old']);
+  await recordCacheSample(router, 'lead', sample({ turnId: 'later' }));
+  assert.deepEqual(await migrateFromRouter(root, router), { migrated: false });
+  assert.equal((await cacheSnapshot(root, 'lead')).samples.length, 2);
 });
 
 test('cache bridge records new clear-session identities without depending on routing bootstrap', async t => {
@@ -398,4 +432,38 @@ test('a 1h cache is costed at its own write price, and a missing 1h price errs t
   assert.equal(allowed(oneHour, unlisted), 11);
   assert.equal(keepalivesLeft(cacheRows([applyCacheCreation(sample({ read: 9000, write: 1000, fresh: 0 }), oneHour)])[0], listed), 19);
   assert.equal(validPrices({ ...listed, oneHour: -1 }), false);
+});
+
+test('the session matrix has one cell per request, in time order, with a shape for each grade and kind', () => {
+  const warm = applyCacheCreation(sample({ turnId: 'a', startedAt: 0, read: 340000, write: 3000 }), { fiveMinute: 3000, oneHour: 0 });
+  const miss = applyCacheCreation(sample({ turnId: 'b', startedAt: 26000, read: 48648, write: 297000 }), { fiveMinute: 297000, oneHour: 0 });
+  const keepalive = sample({ turnId: 'keepalive:30000', startedAt: 30000, read: 345000, write: 0, fresh: 10 });
+  const fair = sample({ agentId: 'child', turnId: 'c', startedAt: 10000, read: 6000, write: 3500, fresh: 500 });
+  const compaction = sample({ turnId: 'compaction:40000', startedAt: 40000, read: 345000, write: 0, fresh: 10, output: 9000 });
+  const cells = sessionMatrix(cacheRows([warm, miss, keepalive, fair, compaction]));
+  assert.deepEqual(cells.map(cell => cell.glyph).join(''), '●◐✕·◆');
+  assert.deepEqual(cells.map(cell => cell.tone), ['good', 'fair', 'poor', 'quiet', 'quiet']);
+  assert.deepEqual(sessionMatrix([]), []);
+});
+
+test('the session rate weighs every real request, and the recent rate the last 10 across all loops', () => {
+  const rows = cacheRows([
+    sample({ turnId: 'a', startedAt: 1, read: 0, write: 10000, fresh: 0 }),
+    ...Array.from({ length: 10 }, (_, i) => sample({ agentId: i % 2 ? 'child' : null, turnId: `b${i}`, startedAt: 10 + i, read: 10000, write: 0, fresh: 0 })),
+    sample({ turnId: 'keepalive:50', startedAt: 50, read: 10000, write: 0, fresh: 0 }),
+  ]);
+  const usage = sessionUsage(rows);
+  assert.equal(usage.session.requests, 11);
+  assert.equal(cachePercent(usage.session), 90);
+  assert.equal(usage.recent.requests, 10);
+  assert.equal(cachePercent(usage.recent), 100);
+  assert.equal(sessionUsage([]), undefined);
+});
+
+test('time between requests reads in seconds, minutes or hours', () => {
+  assert.equal(cacheGap(420), '0.4s');
+  assert.equal(cacheGap(12400), '12s');
+  assert.equal(cacheGap(252000), '4m 12s');
+  assert.equal(cacheGap(3780000), '1h 03m');
+  assert.equal(cacheGap(-5), '0.0s');
 });

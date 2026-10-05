@@ -1,6 +1,6 @@
 {
   "name": "agent-router-tools",
-  "description": "Agent Router plugins for Claude Code.",
+  "description": "Agent Router and Keepalive plugins for Claude Code.",
   "owner": {
     "name": "Alexander Nicholson"
   },
@@ -8,7 +8,12 @@
     {
       "name": "agent-router",
       "source": "./agent-router",
-      "description": "Choose models for five agent roles, inspect routing and usage, and monitor prompt cache bars for the main agent and every subagent with /agent-cache."
+      "description": "Choose a model and effort for five agent roles and for agent team teammates, and inspect routing and usage."
+    },
+    {
+      "name": "keepalive",
+      "source": "./keepalive",
+      "description": "A prompt cache bar and dashboard for every conversation, subagent and teammate, per-conversation TTLs, and upkeep that keeps an idle cache warm or compacts it."
     }
   ]
 }

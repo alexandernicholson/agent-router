@@ -31,7 +31,7 @@ function server(body = catalog(), { status = 200, etag = '"v1"', delay = 0 } = {
   return { fetcher, calls };
 }
 async function fixture(t) {
-  const root = await mkdtemp(join(tmpdir(), 'agent-router-prices-'));
+  const root = await mkdtemp(join(tmpdir(), 'keepalive-prices-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   return root;
 }

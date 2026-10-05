@@ -1,0 +1,67 @@
+{
+  "name": "keepalive",
+  "version": "0.1.0",
+  "license": "MIT",
+  "description": "A prompt cache bar for every conversation, subagent and teammate, a dashboard with /keepalive, per-conversation cache TTLs, and upkeep that keeps an idle cache warm or compacts it before it expires. Requires Claude Code Mod function hooks enabled.",
+  "author": {
+    "name": "Alexander Nicholson"
+  },
+  "userConfig": {
+    "cache_ttl": {
+      "type": "string",
+      "title": "Prompt cache TTL",
+      "description": "Prompt cache lifetime the main conversation starts in. Default keeps Claude Code's own choice; the cache bar's TTL button changes it for the session.",
+      "options": [
+        "default",
+        "5m",
+        "1h"
+      ],
+      "default": "default",
+      "required": false
+    },
+    "subagent_cache_ttl": {
+      "type": "string",
+      "title": "Subagent prompt cache TTL",
+      "description": "Prompt cache lifetime each subagent starts in. Default keeps Claude Code's own choice; each subagent's TTL button changes it for that subagent.",
+      "options": [
+        "default",
+        "5m",
+        "1h"
+      ],
+      "default": "default",
+      "required": false
+    },
+    "teammate_cache_ttl": {
+      "type": "string",
+      "title": "Teammate prompt cache TTL",
+      "description": "Prompt cache lifetime each teammate starts in. Default keeps Claude Code's own choice; each teammate's TTL button changes it for that teammate.",
+      "options": [
+        "default",
+        "5m",
+        "1h"
+      ],
+      "default": "default",
+      "required": false
+    },
+    "teammate_cache_upkeep": {
+      "type": "string",
+      "title": "Teammate cache upkeep",
+      "description": "Prompt cache upkeep that split-pane teammates start in. Each teammate's own mode button can change it. In-process teammates and subagents cannot be kept warm.",
+      "options": [
+        "off",
+        "warm",
+        "compact",
+        "warmcomp"
+      ],
+      "default": "off",
+      "required": false
+    },
+    "keepalive_limit": {
+      "type": "string",
+      "title": "Keepalive limit",
+      "description": "Keepalives warm and warmcomp send after each request before warming stops; warmcomp then compacts. default sends them while each costs less than rewriting the cache, infinite never stops, and a number sends exactly that many.",
+      "default": "default",
+      "required": false
+    }
+  }
+}

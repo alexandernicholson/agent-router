@@ -1,11 +1,11 @@
 import { policyFromOptions, policyDigest } from './policy.mjs';
 import { routeAgent, routeTeammate, isTruthy, ROLES, sameModel } from './routing.js';
-import { teamMember } from './teammate.mjs';
+import { teamMember } from './shared/teammate.mjs';
 import { fetchModels, normalizeBaseUrl } from './connection.mjs';
 import { normalizeCatalog } from './catalog.js';
-import { recordCacheSample, enrichCacheSamples, resetCache, cacheSnapshot } from './cache-state.mjs';
-import { lookUpPrices } from './price-sources.mjs';
 import { stateDirectory, recordPath, readRecord, writeRecord, agentAssignments, sessionStats, idKey, linkTeammate, USAGE_KEYS } from './state.mjs';
+import { publishRoutes } from './published.mjs';
+import { writeHandover } from './shared/routes.mjs';
 
 
 function assertOverrides(env) {
@@ -36,6 +36,8 @@ async function bootstrap(input, env, discover, timing) {
       const pinned = await readRecord(file);
       if (pinned.leadSessionId !== inherited.snapshot.leadSessionId) throw new Error('Conflicting concurrent Agent Router bootstrap.');
       await linkTeammate(root, pinned.leadSessionId, input.session_id);
+      const lead = await readRecord(recordPath(root, 'sessions', pinned.leadSessionId));
+      if (lead) await publishRoutes(root, lead, await agentAssignments(root, pinned.leadSessionId)).catch(() => undefined);
       return { ...pinned, pendingConfiguration: false, agents: await agentAssignments(root, input.session_id) };
     }
     teammateNotice = inherited.notice;
@@ -186,6 +188,13 @@ async function recordResult(input, env) {
   return {};
 }
 
+async function published(env, result, sessionId = result.sessionId) {
+  const root = stateDirectory(env);
+  const session = await readRecord(recordPath(root, 'sessions', sessionId));
+  if (session) await publishRoutes(root, session, await agentAssignments(root, sessionId)).catch(() => undefined);
+  return result;
+}
+
 async function observe(input, env) {
   const identity = `${idKey(input.agent_id)}:${idKey(input.turn_id)}`;
   const observation = {
@@ -202,26 +211,16 @@ async function observe(input, env) {
   return {};
 }
 
-export async function handleRequest(input, env = process.env, discover = fetchModels, timing = { confirmMs: 5000, stepMs: 250 }, pricesFetch = fetch) {
+export async function handleRequest(input, env = process.env, discover = fetchModels, timing = { confirmMs: 5000, stepMs: 250 }) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Expected a bridge JSON object.');
-  if (!['bootstrap', 'catalog', 'route', 'result', 'observe', 'stats', 'apply', 'cache-sample', 'cache-snapshot', 'cache-reset', 'cache-enrich', 'cache-prices'].includes(input.action)) throw new Error('Unknown Agent Router bridge action.');
-  if (input.action === 'cache-prices') {
-    const { models } = input;
-    if (!Array.isArray(models) || models.length > 16 || models.some(model => typeof model !== 'string' || !model || model.length > 200)) {
-      throw new Error('cache-prices takes up to 16 model names in models.');
-    }
-    return lookUpPrices(models, { root: stateDirectory(env), env, fetcher: pricesFetch });
-  }
+  if (!['bootstrap', 'catalog', 'route', 'result', 'observe', 'stats', 'apply', 'handover'].includes(input.action)) throw new Error('Unknown Agent Router bridge action.');
+  if (input.action === 'handover') return writeHandover(stateDirectory(env), input.values);
   if (input.action === 'catalog') return catalog(env, discover);
   if (input.action === 'stats') return sessionStats(stateDirectory(env), input.session_id);
-  if (input.action === 'cache-snapshot') return cacheSnapshot(stateDirectory(env), input.session_id);
-  if (input.action === 'cache-sample') return recordCacheSample(stateDirectory(env), input.session_id, input.sample, input.transcript_path);
-  if (input.action === 'cache-enrich') return enrichCacheSamples(stateDirectory(env), input.session_id, input.agent_id ?? null, input.transcript_path);
-  if (input.action === 'cache-reset') return resetCache(stateDirectory(env), input.session_id, input.agent_id ?? null, input.reset_at);
-  if (input.action === 'bootstrap') return bootstrap(input, env, discover, timing);
+  if (input.action === 'bootstrap') return published(env, await bootstrap(input, env, discover, timing));
   const snapshot = await snapshotFor(input, env);
-  if (input.action === 'apply') return apply(input, env, discover, snapshot);
+  if (input.action === 'apply') return published(env, await apply(input, env, discover, snapshot));
   if (input.action === 'route') return recordRoute(input, env, snapshot);
-  if (input.action === 'result') return recordResult(input, env);
+  if (input.action === 'result') return published(env, await recordResult(input, env), input.session_id);
   return observe(input, env);
 }

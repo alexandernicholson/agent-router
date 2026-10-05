@@ -7,7 +7,7 @@ import { handleRequest } from '../lib/bridge.mjs';
 import { policyFromOptions, policyDigest } from '../lib/policy.mjs';
 import { routeTeammate, validatePolicy } from '../lib/routing.js';
 import { routingStatus, recordPath, readRecord, sessionStats } from '../lib/state.mjs';
-import { parseTeammateArgs, readTeammateIdentity } from '../lib/teammate.mjs';
+import { parseTeammateArgs, readTeammateIdentity } from '../lib/shared/teammate.mjs';
 import { modelOptions } from './fixtures.mjs';
 
 const lead = 'aaaaaaaa-1111-4222-8333-444444444444';

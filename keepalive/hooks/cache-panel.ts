@@ -1,14 +1,15 @@
 import type { AgentInfo, Elements, EngineInterface, RenderElement, RenderSurface, SessionCompactResult, TurnStepInput, TurnUsage } from 'claude-code';
-import { applyCacheCreation, reportedCacheCreation, cacheBar, cacheBarParts, cacheClock, cacheDial, cacheGrade, cachePercent, cachePolicy, cacheRows, cacheStatus, cacheTokens, isCompaction, isKeepalive, keepaliveWorthwhile, keepalivesLeft, lifeGrade, loopKey, recentMisses, recentUsage, sampleKey, sampleTtl, unreportedModels, validSample, MISS_WINDOW_MS, RATE_REQUESTS } from '../lib/cache.js';
+import { applyCacheCreation, reportedCacheCreation, cacheBar, cacheBarParts, cacheClock, cacheDial, cacheGrade, cachePercent, cachePolicy, cacheRows, cacheStatus, cacheTokens, isCompaction, isKeepalive, keepaliveWorthwhile, keepalivesLeft, lifeGrade, loopKey, recentMisses, recentUsage, sampleKey, sampleTtl, unreportedModels, validSample, sessionMatrix, sessionUsage, cacheGap, MISS_WINDOW_MS, RATE_REQUESTS } from '../lib/cache.js';
 import { validPrices } from '../lib/cache.js';
 import type { CachePrices, CacheRow, CacheSample, CacheReset, CacheStatus } from '../lib/cache.js';
 import { CACHE_COLORS, themeFamily } from '../lib/cache-colors.js';
-import { displayText } from '../lib/catalog.js';
-import { isPaneTeammate, isTeammate, sameModel } from '../lib/routing.js';
+import { displayText } from '../lib/shared/text.js';
+import { isPaneTeammate, isTeammate, sameModel } from '../lib/shared/models.js';
 import { createTtlGate, isTtl, resolveDefaultTtl } from '../lib/cache-ttl.js';
 import type { Ttl, TtlAuth, TtlDefault } from '../lib/cache-ttl.js';
 
-export const CACHE_PANE = 'agent-cache';
+export const CACHE_PANE = 'keepalive';
+export const CACHE_COMMANDS = ['keepalive', 'agent-cache'] as const;
 const RECHECK_MS = [1000, 3000, 10000, 30000];
 const UPKEEP_MS = 30000;
 const COMPACT_MIN_TOKENS = 100000;
@@ -25,8 +26,8 @@ export type TtlDefaults = { main?: Ttl; subagent?: Ttl; teammate?: Ttl };
 export const ttlOption = (value: unknown): Ttl | undefined => isTtl(value) ? value : undefined;
 const INTRO_KEY = 'cache-intro';
 const INTRO = [
-  'Prompt cache bar: Agent Router shows how well each conversation reuses its prompt cache.',
-  '  [ ◕ ] dial: time until the cache expires; it refills with each request. Click it, or run /agent-cache, for every agent\'s cache and request history.',
+  'Prompt cache bar: Keepalive shows how well each conversation reuses its prompt cache.',
+  '  [ ◕ ] dial: time until the cache expires; it refills with each request. Click it, or run /keepalive, for every agent\'s cache and request history.',
   '  96%: share of the last 10 requests served from cache, coloured blue (good), yellow (fair) or red (poor) for the context size.',
   '  ✕ 2 prefix: cache misses in the last 15 minutes and their causes; click for details. It dims after 5 minutes.',
   '  TTL 5m: this conversation\'s cache lifetime; click to switch between 5m and 1h. ETA ~3:44 is the time left.',
@@ -35,7 +36,7 @@ const INTRO = [
   '    warm sends cheap keepalive requests, by default while they cost less than rewriting the cache; ↻ shows how many are left.',
   '    compact summarises a conversation of 100k+ tokens while it is still cached.',
   '    warmcomp warms first, then compacts.',
-  '  Keepalives and compactions are billed. Set how many under /agent-models → Prompt cache; teammates\' mode is under Teammates.',
+  '  Keepalives and compactions are billed. Set how many, and each kind of conversation\'s defaults, with /keepalive-settings.',
 ];
 type Upkeep = typeof UPKEEP[number];
 export const upkeepMode = (value: unknown): Upkeep | undefined => UPKEEP.find(mode => mode === value);
@@ -53,6 +54,7 @@ type Palette = typeof CACHE_COLORS[Family];
 const MARKERS: Record<Upkeep, (keyof Palette)[]> = { off: [], warm: ['warm'], compact: ['compact'], warmcomp: ['warm', 'compact'] };
 type Segment = { text: string; color?: string; dim?: boolean };
 type Bridge = (request: Record<string, unknown>) => Promise<any>;
+type Routes = { self: { model: string } | null; agents: { agentId: string; model: string }[] } | null;
 export type CachePanelHost = {
   session: Pick<EngineInterface['session'], 'id' | 'compact'>;
   config: Pick<EngineInterface['config'], 'list'>;
@@ -80,6 +82,7 @@ type Context = {
   resets: CacheReset[];
   labels: Map<string, string>;
   roster: AgentInfo[];
+  routes: Routes;
   now: number;
   pending: Map<string, { request: string; changed: boolean; startedAt: number }>;
   requested: Map<string, string>;
@@ -224,13 +227,14 @@ export function createCachePanel() {
 
   const palette = (current: Context) => CACHE_COLORS[current.family];
 
-  function rate(current: Context, usage: Pick<CacheSample, 'read' | 'write' | 'fresh'> | undefined, width = 10): Segment[] {
+  function rate(current: Context, usage: Pick<CacheSample, 'read' | 'write' | 'fresh'> | undefined, width = 10, column = false): Segment[] {
     const total = usage ? usage.read + usage.write + usage.fresh : 0;
     const percent = cachePercent(usage);
     const grade = cacheGrade(usage);
     const color = grade ? palette(current)[grade] : undefined;
     const { fill, empty } = cacheBarParts(total ? usage!.read / total : null, width, grade);
-    return [{ text: fill, color }, { text: empty, dim: true }, { text: ` ${percent === null ? 'n/a' : `${percent}%`}`, color }];
+    const label = percent === null ? 'n/a' : `${percent}%`;
+    return [{ text: fill, color }, { text: empty, dim: true }, { text: ` ${column ? label.padStart(4) : label}`, color }];
   }
 
   function segments(current: Context, row: CacheRow): Segment[] {
@@ -270,6 +274,7 @@ export function createCachePanel() {
         for (const sample of snapshot.samples) if (validSample(sample)) current.samples.set(sampleKey(sample), sample);
         current.resets = snapshot.resets;
         current.labels = new Map(snapshot.labels);
+        current.routes = snapshot.routes ?? null;
         current.roster = roster;
         current.now = now;
         current.available = true;
@@ -293,7 +298,7 @@ export function createCachePanel() {
     try {
       const others = (await savedUpkeep(current.host)).filter(([id]) => id !== current.sessionId);
       await current.host.store.set(UPKEEP_KEY, [...others, [current.sessionId, current.upkeep]].slice(-16));
-    } catch { current.host.ui.log('Agent Router: cache upkeep choice could not be saved.', { to: 'debug' }); }
+    } catch { current.host.ui.log('Keepalive: cache upkeep choice could not be saved.', { to: 'debug' }); }
   }
 
   function ttlKind(current: Context, agentId: string | null): 'main' | 'subagent' | 'teammate' {
@@ -321,7 +326,7 @@ export function createCachePanel() {
     if (own) return { ttl: own, reason: 'chosen with the TTL button', locked: false, chosen: true };
     const kind = ttlKind(current, agentId);
     const configured = kind === 'main' ? current.ttlDefaults.main : kind === 'teammate' ? current.ttlDefaults.teammate : current.ttlDefaults.subagent;
-    if (configured) return { ttl: configured, reason: `${kind} TTL in /agent-models`, locked: false, chosen: false };
+    if (configured) return { ttl: configured, reason: `${kind} TTL in /keepalive-settings`, locked: false, chosen: false };
     return { ...base, chosen: false };
   }
 
@@ -338,12 +343,12 @@ export function createCachePanel() {
       const others = (await savedTtls(current.host)).filter(([id]) => id !== current.sessionId);
       const mine = [...current.ttls].map(([key, ttl]) => [current.sessionId, key, ttl] as [string, string, Ttl]);
       await current.host.store.set(TTL_KEY, [...others, ...mine].slice(-64));
-    } catch { current.host.ui.log('Agent Router: cache TTL choice could not be saved.', { to: 'debug' }); }
+    } catch { current.host.ui.log('Keepalive: cache TTL choice could not be saved.', { to: 'debug' }); }
   }
 
   async function setTtlEnv(host: CachePanelHost, name: string, value: string | undefined) {
     try { await host.env.set(name, value); }
-    catch { host.ui.log('Agent Router: cache TTL could not be applied; Claude Code keeps its own.', { to: 'debug' }); }
+    catch { host.ui.log('Keepalive: cache TTL could not be applied; Claude Code keeps its own.', { to: 'debug' }); }
   }
 
   async function applyMainTtl(current: Context) {
@@ -394,7 +399,7 @@ export function createCachePanel() {
     const subagent = resolve('subagent');
     const current: Context = { host, bridge, sessionId, endpoint, selfLabel, env: configuration.env, upkeep: saved ?? configuration.upkeep ?? 'off',
       limit: configuration.limit, family: themeFamily(undefined, configuration.env.COLORFGBG),
-      samples: new Map(), resets: [], labels: new Map(), roster: [], now: 0, pending: new Map(), requested: new Map(), rechecks: new Map(), prices: new Map(), available: true,
+      samples: new Map(), resets: [], labels: new Map(), roster: [], routes: null, now: 0, pending: new Map(), requested: new Map(), rechecks: new Map(), prices: new Map(), available: true,
       defaults: { main: resolve('main'), subagent }, ttlDefaults: configuration.ttl ?? {},
       ttls: new Map((await savedTtls(host)).filter(([id]) => id === sessionId).map(([, key, ttl]) => [key, ttl])), kinds: new Map(),
       gate: createTtlGate(value => setTtlEnv(host, TTL_ENV.subagent, value ?? configuration.env[TTL_ENV.subagent])),
@@ -407,7 +412,8 @@ export function createCachePanel() {
     await applyMainTtl(current);
     await refresh();
     if (context !== current) return;
-    await host.command.register({ name: CACHE_PANE, immediate: true, description: 'Cache bars, token counts and request history for the main agent and subagents.' });
+    for (const name of CACHE_COMMANDS) await host.command.register({ name, immediate: true, description: name === CACHE_PANE
+      ? 'Prompt cache bars, token counts and request history for the main conversation, subagents and teammates.' : 'Same as /keepalive.' });
   }
 
   async function active(): Promise<Context | undefined> {
@@ -419,17 +425,23 @@ export function createCachePanel() {
     return context;
   }
 
+  function routedModel(current: Context, request: TurnStepInput) {
+    const routed = request.agentId ? current.routes?.agents.find(agent => agent.agentId === request.agentId) : current.routes?.self;
+    return routed?.model ?? request.model;
+  }
+
   async function begin(request: TurnStepInput) {
     const current = await active();
     if (!current) return undefined;
     const startedAt = await current.host.clock.now();
     const key = loopKey(current.sessionId, request.agentId);
     const identity = JSON.stringify([request.turnId, request.index]);
+    const model = routedModel(current, request);
     const lastRequested = current.requested.get(key);
     const priorModel = rows(current).find(row => loopKey(row.sessionId, row.agentId) === key)?.last?.model;
-    const changed = lastRequested !== undefined ? lastRequested !== request.model
-      : priorModel !== undefined && !sameModel(priorModel, request.model);
-    current.requested.set(key, request.model);
+    const changed = lastRequested !== undefined ? lastRequested !== model
+      : priorModel !== undefined && !sameModel(priorModel, model);
+    current.requested.set(key, model);
     current.pending.set(key, { request: identity, changed, startedAt });
     if (changed) redraw(current);
     const agentId = request.agentId ?? null;
@@ -446,7 +458,7 @@ export function createCachePanel() {
       const result = await send(current, { action: 'cache-sample', sample, transcript_path: transcriptPath });
       if (context === current && validSample(result.sample)) current.samples.set(sampleKey(result.sample), result.sample);
     }
-    catch { current.available = false; current.host.ui.log('Agent Router: cache observation could not be saved.', { to: 'debug' }); }
+    catch { current.available = false; current.host.ui.log('Keepalive: cache observation could not be saved.', { to: 'debug' }); }
   }
 
   async function finish(ticket: Awaited<ReturnType<typeof begin>>, request: TurnStepInput, usage?: TurnUsage | null) {
@@ -456,7 +468,7 @@ export function createCachePanel() {
     const { current, startedAt, key, identity } = ticket;
     if (current.pending.get(key)?.request === identity) current.pending.delete(key);
     if (usage) {
-      const model = usage.model || request.model;
+      const model = usage.model || routedModel(current, request);
       let sample: CacheSample = { sessionId: current.sessionId, agentId: request.agentId ?? null, turnId: request.turnId,
         index: request.index, model, startedAt, read: usage.cache_read_input_tokens, write: usage.cache_creation_input_tokens,
         completedAt: await current.host.clock.now(), fresh: usage.input_tokens, output: usage.output_tokens,
@@ -503,7 +515,7 @@ export function createCachePanel() {
     try { result = await current.host.model.fork({ prompt: KEEPALIVE_PROMPT }); }
     finally { await release(); }
     if (context !== current) return;
-    if (!result.isAnswered) current.host.ui.log(`Agent Router: cache keepalive did not answer (${result.reason}).`, { to: 'debug' });
+    if (!result.isAnswered) current.host.ui.log(`Keepalive: cache keepalive did not answer (${result.reason}).`, { to: 'debug' });
     if (!('usage' in result)) return;
     const { usage } = result;
     if (usage.cache_read_input_tokens + usage.cache_creation_input_tokens + usage.input_tokens === 0) return;
@@ -535,11 +547,11 @@ export function createCachePanel() {
       const startedAt = await current.host.clock.now();
       const result = await holdTtlFor(null, () => current.host.session.compact());
       if (context !== current) return;
-      if (!result.messages) { current.host.ui.log(`Agent Router: cache compaction skipped: ${result.skip}`, { to: 'debug' }); return; }
-      current.host.ui.log('Agent Router compacted the conversation before its prompt cache expired.');
+      if (!result.messages) { current.host.ui.log(`Keepalive: cache compaction skipped: ${result.skip}`, { to: 'debug' }); return; }
+      current.host.ui.log('Keepalive compacted the conversation before its prompt cache expired.');
       await compacted(null, startedAt, result);
     } catch {
-      current.host.ui.log('Agent Router: cache compaction could not run during a turn.', { to: 'debug' });
+      current.host.ui.log('Keepalive: cache compaction could not run during a turn.', { to: 'debug' });
     }
   }
 
@@ -565,7 +577,7 @@ export function createCachePanel() {
       if (found) current.prices.set(model, { at: current.now, value, settled: true });
       else if (known) current.prices.set(model, { ...known, lookup: undefined });
       else current.prices.delete(model);
-      if (found && !value) current.host.ui.log(`Agent Router: no price found for ${displayText(model, 160)}; keepalives are off for it.`, { to: 'debug' });
+      if (found && !value) current.host.ui.log(`Keepalive: no price found for ${displayText(model, 160)}; keepalives are off for it.`, { to: 'debug' });
       redraw(current);
     })();
     current.prices.set(model, { at: known?.at ?? current.now, value: known?.value ?? null, settled: known?.settled ?? false, lookup });
@@ -585,8 +597,8 @@ export function createCachePanel() {
     if (warms && keepaliveWorthwhile(row, current.prices.get(sample.model)?.value, current.limit)) return warm(current, sample.model);
     if (current.upkeep !== 'warm' && sample.read + sample.write + sample.fresh >= COMPACT_MIN_TOKENS) return compact(current);
     if (warms) current.host.ui.log(current.limit !== undefined && row.keepalives.length >= current.limit
-      ? `Agent Router: cache warming stopped at the keepalive limit of ${current.limit}.`
-      : 'Agent Router: cache warming paused; another keepalive would cost more than rewriting the cache.', { to: 'debug' });
+      ? `Keepalive: cache warming stopped at the keepalive limit of ${current.limit}.`
+      : 'Keepalive: cache warming paused; another keepalive would cost more than rewriting the cache.', { to: 'debug' });
   }
 
   async function cycle() {
@@ -614,7 +626,7 @@ export function createCachePanel() {
     const current = await active();
     if (!current) return false;
     await refresh();
-    const opened = await current.host.ui.open({ id: CACHE_PANE, title: 'Agent cache', focus: true, closeOnEscape: true, columns: 100, rows: 24 });
+    const opened = await current.host.ui.open({ id: CACHE_PANE, title: 'Keepalive', focus: true, closeOnEscape: true, columns: 100, rows: 24 });
     if (!opened.isPlaced) { current.host.ui.log(`Agent cache pane: ${opened.reason}`); return false; }
     open = true;
     redraw(current);
@@ -727,9 +739,100 @@ export function createCachePanel() {
     requestFilter === 'keepalives' && isKeepalive(sample) || requestFilter === 'compactions' && isCompaction(sample) ||
     requestFilter === 'real' && !isKeepalive(sample) && !isCompaction(sample) || requestFilter === 'misses' && !!sample.miss;
 
-  function chips<T extends string>(elements: Elements[RenderSurface], current: Context, group: string, values: readonly T[], value: T, choose: (next: T) => void) {
-    return values.map(option => elements.Button({ key: `${group}:${option}`, label: option === value ? `[${option}]` : option, plain: true,
-      onPress: () => { choose(option); redraw(current); } }));
+  const HISTORY = ['agent', 'all'] as const;
+  const HISTORY_LABELS: Record<typeof HISTORY[number], string> = { agent: 'this agent', all: 'all agents' };
+
+  function chips<T extends string>(elements: Elements[RenderSurface], current: Context, group: string, values: readonly T[], value: T,
+    choose: (next: T) => void, labels: Partial<Record<T, string>> = {}) {
+    return values.map(option => {
+      const label = labels[option] ?? option;
+      const press = () => { choose(option); redraw(current); };
+      return option === value
+        ? elements.Button({ key: `${group}:${option}`, label, variant: 'primary', onPress: press })
+        : elements.Button({ key: `${group}:${option}`, label, plain: true, dimColor: true, onPress: press });
+    });
+  }
+
+  const MATRIX_ROWS = 4;
+
+  function matrix(elements: Elements[RenderSurface], current: Context, all: CacheRow[], columns: number): RenderElement[] {
+    const cells = sessionMatrix(all);
+    const width = Math.max(20, Math.min(80, columns - 2));
+    const shown = cells.slice(-width * MATRIX_ROWS);
+    const lines: RenderElement[] = [];
+    if (cells.length > shown.length) lines.push(elements.Text({ dimColor: true, children: [`… ${cells.length - shown.length} earlier`] }));
+    for (let start = 0; start < shown.length; start += width) {
+      const runs: { tone: string; text: string }[] = [];
+      for (const cell of shown.slice(start, start + width)) {
+        const last = runs.at(-1);
+        if (last && last.tone === cell.tone) last.text += cell.glyph;
+        else runs.push({ tone: cell.tone, text: cell.glyph });
+      }
+      lines.push(elements.Box({ flexDirection: 'row', children: runs.map(run => run.tone === 'quiet'
+        ? elements.Text({ dimColor: true, children: [run.text] })
+        : elements.Text({ color: palette(current)[run.tone as keyof Palette], children: [run.text] })) }));
+    }
+    return lines;
+  }
+
+  function overview(elements: Elements[RenderSurface], current: Context, all: CacheRow[], columns: number): RenderElement {
+    const { Box, Text } = elements;
+    const usage = sessionUsage(all);
+    if (!usage) return Box({ flexDirection: 'column', children: [Text({ bold: true, children: ['Prompt cache · all agents'] }),
+      Text({ dimColor: true, children: ['No requests yet. Each request this session gets a dot here.'] })] });
+    return Box({ flexDirection: 'column', children: [
+      Text({ bold: true, children: ['Prompt cache · all agents'] }),
+      Box({ flexDirection: 'row', children: [Text({ children: ['Now      '] }), ...paint(elements, rate(current, usage.recent)),
+        Text({ dimColor: true, children: [` over the last ${plural(usage.recent.requests, 'request')}`] })] }),
+      Box({ flexDirection: 'row', children: [Text({ children: ['Session  '] }), ...paint(elements, rate(current, usage.session)),
+        Text({ dimColor: true, children: [` over ${plural(usage.session.requests, 'request')} · read ${cacheTokens(usage.session.read)} · write ${cacheTokens(usage.session.write)} · new ${cacheTokens(usage.session.fresh)}`] })] }),
+      ...matrix(elements, current, all, columns),
+      Text({ dimColor: true, children: ['One dot per request, oldest first: ● good ◐ fair ○ poor ✕ miss · keepalive ◆ compaction'] }),
+    ] });
+  }
+
+  function filters(elements: Elements[RenderSurface], current: Context): RenderElement {
+    const { Box, Text } = elements;
+    const line = (label: string, controls: RenderElement[]) => Box({ flexDirection: 'row', gap: 1, children: [Text({ dimColor: true, children: [label.padEnd(8)] }), ...controls] });
+    return Box({ flexDirection: 'column', children: [
+      Text({ bold: true, children: ['Show'] }),
+      line('Agents', chips(elements, current, 'cache-agents', AGENT_FILTERS, agentFilter, next => { agentFilter = next; })),
+      line('Requests', chips(elements, current, 'cache-requests', REQUEST_FILTERS, requestFilter, next => { requestFilter = next; })),
+      line('From', chips(elements, current, 'cache-history', HISTORY, historyScope, next => { historyScope = next; }, HISTORY_LABELS)),
+    ] });
+  }
+
+  const COUNT_WIDTH = 7;
+  type Widths = { owner: number; name: number; ttl: number; miss: number };
+  const requestName = (sample: CacheSample) => isKeepalive(sample) ? 'keepalive' : isCompaction(sample) ? 'compaction' : `${displayText(sample.turnId, 12)}:${sample.index}`;
+
+  function requestLine(elements: Elements[RenderSurface], current: Context, sample: CacheSample, owner: string | undefined, widths: Widths): RenderElement {
+    const { Box, Text } = elements;
+    const counts = [sample.read, sample.write, sample.fresh, sample.output].map(value => cacheTokens(value).padStart(COUNT_WIDTH)).join('');
+    return Box({ flexDirection: 'row', children: [
+      Text({ children: [`${owner === undefined ? '' : owner.padEnd(widths.owner)}${requestName(sample).padEnd(widths.name)}`] }),
+      ...paint(elements, rate(current, sample, 6, true)),
+      Text({ wrap: 'truncate-end', children: [`  ${(sampleTtl(sample) ?? '–').padEnd(widths.ttl)}${(sample.miss ?? '').padEnd(widths.miss)}${counts}  ${displayText(sample.model, 160)}`] }),
+    ] });
+  }
+
+  function requests(elements: Elements[RenderSurface], current: Context, scope: CacheRow[], title: string): RenderElement {
+    const { Box, Text } = elements;
+    const all = historyScope === 'all';
+    const labels = new Map(scope.map(row => [loopKey(row.sessionId, row.agentId), displayText(row.label, 40)]));
+    const samples = scope.flatMap(row => row.samples).filter(wanted).sort((a, b) => b.startedAt - a.startedAt || b.index - a.index).slice(0, 30);
+    const lines: RenderElement[] = [Text({ bold: true, children: [`Recent requests · ${title} (last 30${requestFilter === 'all' ? '' : ` ${requestFilter}`})`] })];
+    if (!samples.length) return Box({ flexDirection: 'column', children: [...lines, Text({ dimColor: true, children: ['No requests match these filters.'] })] });
+    const owners = samples.map(sample => labels.get(loopKey(sample.sessionId, sample.agentId)) ?? '');
+    const widest = (values: string[], least: number) => Math.max(least, ...values.map(value => value.length)) + 2;
+    const widths: Widths = { owner: all ? widest(owners, 5) : 0, name: widest(samples.map(requestName), 7),
+      ttl: widest(samples.map(sample => sampleTtl(sample) ?? '–'), 3), miss: widest(samples.map(sample => sample.miss ?? ''), 4) };
+    lines.push(Text({ dimColor: true, children: [`${all ? 'agent'.padEnd(widths.owner) : ''}${'request'.padEnd(widths.name)}${'hit'.padEnd(11)}  ${'TTL'.padEnd(widths.ttl)}${'miss'.padEnd(widths.miss)}${['read', 'write', 'new', 'out'].map(head => head.padStart(COUNT_WIDTH)).join('')}  model`] }));
+    samples.forEach((sample, index) => {
+      if (index) lines.push(Text({ dimColor: true, children: [`${' '.repeat(widths.owner)}↕ ${cacheGap(samples[index - 1].startedAt - sample.startedAt)}`] }));
+      lines.push(requestLine(elements, current, sample, all ? owners[index] : undefined, widths));
+    });
+    return Box({ flexDirection: 'column', children: lines });
   }
 
   function coldNote(elements: Elements[RenderSurface], nodes: Node[]): RenderElement[] {
@@ -738,22 +841,20 @@ export function createCachePanel() {
     return [elements.Text({ dimColor: true, children: [`– can't be kept warm: Claude Code has no keepalive or compaction for ${kinds.map(kind => `${kind}s`).join(' and ')}.`] })];
   }
 
-  function renderPane(elements: Elements[RenderSurface], agentId?: string): RenderElement | undefined {
+  function renderPane(elements: Elements[RenderSurface], agentId?: string, columns = 100): RenderElement | undefined {
     const current = context;
     if (!current || !open) return undefined;
     const { Box, Button, Text } = elements;
     const nodes = tree(current);
     const chosen = nodes.find(node => loopKey(node.row.sessionId, node.row.agentId) === (selected ?? loopKey(current.sessionId, agentId)))?.row;
-    const children: RenderElement[] = [Text({ bold: true, children: ['Prompt cache · all agents'] }),
-      Text({ dimColor: true, children: [`Bars show each loop's hit rate over its last ${RATE_REQUESTS} requests, coloured for its context size. Time left counts from the last request that read or wrote the cache. Select an agent for recent requests.`] }),
+    const notes: RenderElement[] = [
       ...(missLine(current) ? [Text({ color: palette(current).fair, children: [missLine(current)!] })] : []),
+      ...(current.available ? [] : [Text({ color: palette(current).fair, children: ['Storage unavailable · showing last known observations'] })]),
       Text({ dimColor: true, children: [`Upkeep: ${upkeepText(current)}`] }),
       ...coldNote(elements, nodes.filter(shown)),
-      Box({ flexDirection: 'row', gap: 1, children: [Text({ children: ['Agents:'] }), ...chips(elements, current, 'cache-agents', AGENT_FILTERS, agentFilter, next => { agentFilter = next; })] }),
-      Box({ flexDirection: 'row', gap: 1, children: [Text({ children: ['Requests:'] }), ...chips(elements, current, 'cache-requests', REQUEST_FILTERS, requestFilter, next => { requestFilter = next; }),
-        Text({ children: ['·'] }), ...chips(elements, current, 'cache-history', ['agent', 'all'] as const, historyScope, next => { historyScope = next; })] })];
-    if (!current.available) children.push(Text({ color: palette(current).fair, children: ['Storage unavailable · showing last known observations'] }));
-    for (const node of nodes.filter(shown)) {
+      Text({ dimColor: true, children: [`Bars show each loop's hit rate over its last ${RATE_REQUESTS} requests, coloured for its context size. Time left counts from the last request that read or wrote the cache. Select an agent for recent requests.`] }),
+    ];
+    const agents = nodes.filter(shown).map(node => {
       const { row } = node;
       const key = loopKey(row.sessionId, row.agentId);
       const counts = row.totals;
@@ -768,7 +869,7 @@ export function createCachePanel() {
         .filter(Boolean).join(' · ');
       const keepalives = upkeepLine ? [Text({ dimColor: true, children: [`${indent}${upkeepLine}`] })] : [];
       const kind = node.kind === 'main' || node.kind === 'subagent' ? '' : ` · ${node.kind}`;
-      children.push(Box({ flexDirection: 'column', children: [
+      return Box({ flexDirection: 'column', children: [
         Box({ flexDirection: 'row', children: [Text({ dimColor: true, children: [node.prefix] }),
           Button({ key: `cache-agent:${key}`, label: `${displayText(row.label, 120)}${kind}`, plain: true, onPress: () => { selected = key; historyScope = 'agent'; redraw(current); } })] }),
         Box({ flexDirection: 'row', children: [Text({ children: [`${indent}${cacheDial(state(current, row))} `] }), ...marker(elements, current, node.upkeep),
@@ -778,26 +879,17 @@ export function createCachePanel() {
         ...keepalives,
         Text({ dimColor: true, children: [`${indent}${window ? `hit rate over the last ${plural(window, 'request')} · ` : ''}${plural(counts.requests, 'request')} · read ${cacheTokens(counts.read)} · write ${cacheTokens(counts.write)} · new ${cacheTokens(counts.fresh)} · out ${cacheTokens(counts.output)}`] }),
         Text({ dimColor: true, children: [`${indent}${row.last ? `${displayText(row.last.model, 160)} · ${displayText(row.last.ttlSource, 120)}${node.kind === 'main' ? priceNote(current, row) : ''}` : 'No usage observed in this context'}`] }),
-      ] }));
-    }
+      ] });
+    });
     const scope = historyScope === 'all' ? nodes.filter(shown).map(node => node.row) : chosen ? [chosen] : [];
-    if (scope.length) {
-      const labels = new Map(scope.map(row => [loopKey(row.sessionId, row.agentId), row.label]));
-      const samples = scope.flatMap(row => row.samples).filter(wanted).sort((a, b) => b.startedAt - a.startedAt || b.index - a.index).slice(0, 30);
-      children.push(Text({ bold: true, children: [`Recent requests · ${historyScope === 'all' ? 'all agents' : displayText(chosen!.label, 120)} (last 30${requestFilter === 'all' ? '' : ` ${requestFilter}`})`] }));
-      if (!samples.length) children.push(Text({ dimColor: true, children: ['No requests match these filters.'] }));
-      for (const sample of samples) {
-        const name = isKeepalive(sample) ? 'keepalive' : isCompaction(sample) ? 'compaction' : `${displayText(sample.turnId, 12)}:${sample.index}`;
-        const owner = historyScope === 'all' ? `${displayText(labels.get(loopKey(sample.sessionId, sample.agentId)) ?? '', 40)} · ` : '';
-        children.push(Box({ flexDirection: 'row', children: [
-          Text({ children: [`${owner}${name} `] }),
-          ...paint(elements, rate(current, sample, 6)),
-          Text({ wrap: 'truncate-end', children: [`${sample.miss ? ` · ${sample.miss}` : ''}${sampleTtl(sample) ? ` · TTL ${sampleTtl(sample)}` : ''} · read ${cacheTokens(sample.read)} · write ${cacheTokens(sample.write)} · new ${cacheTokens(sample.fresh)} · out ${cacheTokens(sample.output)} · ${displayText(sample.model, 160)}`] }),
-        ] }));
-      }
-    }
-    children.push(Button({ key: 'agent-cache-close', label: 'Close', onPress: () => current.host.ui.close({ id: CACHE_PANE }) }));
-    return Box({ flexDirection: 'column', gap: 1, children });
+    return Box({ flexDirection: 'column', gap: 1, children: [
+      overview(elements, current, nodes.map(node => node.row), columns),
+      Box({ flexDirection: 'column', children: notes }),
+      filters(elements, current),
+      ...agents,
+      ...(scope.length ? [requests(elements, current, scope, historyScope === 'all' ? 'all agents' : displayText(chosen!.label, 120))] : []),
+      Button({ key: 'agent-cache-close', label: 'Close', onPress: () => current.host.ui.close({ id: CACHE_PANE }) }),
+    ] });
   }
 
   async function settle() {
