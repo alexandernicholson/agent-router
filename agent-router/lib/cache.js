@@ -1,5 +1,5 @@
 /** Per-request evidence only. A gateway's retention policy is not inferred from token counts. */
-/** @typedef {{sessionId: string, agentId: string | null, turnId: string, index: number, model: string, startedAt: number, read: number, write: number, fresh: number, output: number, ttlMs: number | null, ttlSource: string, disabled: boolean}} CacheSample */
+/** @typedef {{sessionId: string, agentId: string | null, turnId: string, index: number, model: string, startedAt: number, completedAt?: number, read: number, write: number, fresh: number, output: number, ttlMs: number | null, ttlSource: string, disabled: boolean, cacheCreation?: {fiveMinute: number, oneHour: number}}} CacheSample */
 /** @typedef {{sessionId: string, agentId: string | null, resetAt: number}} CacheReset */
 /** @typedef {{sessionId: string, agentId: string | null, label: string, samples: CacheSample[], last?: CacheSample, totals: {requests: number, read: number, write: number, fresh: number, output: number}}} CacheRow */
 
@@ -13,7 +13,38 @@ export function validSample(s) {
     typeof s.turnId === 'string' && s.turnId.length > 0 && typeof s.model === 'string' && s.model.length > 0 &&
     ['index', 'startedAt', 'read', 'write', 'fresh', 'output'].every(k => Number.isSafeInteger(s[k]) && s[k] >= 0) &&
     (s.ttlMs === null || s.ttlMs === 300000 || s.ttlMs === 3600000) &&
-    typeof s.ttlSource === 'string' && typeof s.disabled === 'boolean';
+    typeof s.ttlSource === 'string' && typeof s.disabled === 'boolean' &&
+    (s.completedAt === undefined || Number.isSafeInteger(s.completedAt) && s.completedAt >= s.startedAt) &&
+    (s.cacheCreation === undefined || validCreation(s.cacheCreation, s.write));
+}
+
+export function validCreation(value, writes) {
+  return value && ['fiveMinute', 'oneHour'].every(key => Number.isSafeInteger(value[key]) && value[key] >= 0) &&
+    value.fiveMinute + value.oneHour === writes && writes > 0;
+}
+
+/** Write buckets are response evidence, independent of endpoint or requested TTL. */
+export function reportedCacheCreation(usage) {
+  const value = usage?.cache_creation;
+  if (!value || typeof value !== 'object') return undefined;
+  const creation = { fiveMinute: value.ephemeral_5m_input_tokens, oneHour: value.ephemeral_1h_input_tokens };
+  return validCreation(creation, usage.cache_creation_input_tokens) ? creation : undefined;
+}
+
+export function applyCacheCreation(sample, creation) {
+  if (!validCreation(creation, sample.write)) return sample;
+  return { ...sample, cacheCreation: { fiveMinute: creation.fiveMinute, oneHour: creation.oneHour },
+    ttlMs: creation.fiveMinute && creation.oneHour ? null : creation.oneHour ? 3600000 : 300000,
+    ttlSource: 'response cache_creation', disabled: false };
+}
+
+/** Mixed writes have two independently expiring portions; never flatten them into one TTL. */
+export function reportedLifetimes(sample, now) {
+  if (!sample?.cacheCreation) return [];
+  return [{ ttlMs: 300000, tokens: sample.cacheCreation.fiveMinute, ttl: '5m' },
+    { ttlMs: 3600000, tokens: sample.cacheCreation.oneHour, ttl: '1h' }]
+    .filter(part => part.tokens > 0).map(part => ({ ...part,
+      leftMs: Math.max(0, Math.min(part.ttlMs, sample.startedAt + part.ttlMs - now)) }));
 }
 
 /** Display estimate only: the native hook cannot set cache_control on the wire. */
@@ -63,9 +94,11 @@ export function cacheStatus(sample, now) {
   const ratio = total ? sample.read / total : null;
   if (sample.disabled) return { state: 'disabled', leftMs: null, ratio };
   if (sample.read + sample.write === 0) return { state: 'uncached', leftMs: null, ratio };
+  if (sample.cacheCreation?.fiveMinute && sample.cacheCreation?.oneHour) return { state: 'reported mixed 5m/1h writes', leftMs: null, ratio };
   if (sample.ttlMs === null) return { state: 'TTL unknown', leftMs: null, ratio };
   const leftMs = Math.max(0, Math.min(sample.ttlMs, sample.startedAt + sample.ttlMs - now));
-  return { state: leftMs === 0 ? 'likely expired' : 'estimated warm', leftMs, ratio };
+  const prefix = sample.cacheCreation ? `reported ${sample.cacheCreation.oneHour ? '1h' : '5m'} writes · ` : '';
+  return { state: prefix + (leftMs === 0 ? 'likely expired' : 'estimated warm'), leftMs, ratio };
 }
 
 export function cacheBar(ratio, width = 10) {

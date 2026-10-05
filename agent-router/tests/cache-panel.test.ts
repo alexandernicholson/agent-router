@@ -2,6 +2,7 @@ import { test, expect, mock, tier } from 'claude-code/testing';
 import type { Engine } from 'claude-code/testing';
 import type { AgentInfo, On, RenderInput, RenderNode, TurnStepInput } from 'claude-code';
 import { ROLES } from '../lib/routing.js';
+import { applyCacheCreation } from '../lib/cache.js';
 
 tier('user');
 
@@ -23,7 +24,8 @@ async function setup($: Engine, on: On, endpoint = 'https://gateway.example') {
   mock.env(on, { ANTHROPIC_BASE_URL: endpoint });
   const clock = mock.clock(on);
   const world = { samples: [] as Record<string, any>[], resets: [] as Record<string, any>[], calls: [] as Record<string, any>[],
-    roster: [] as AgentInfo[], sessionId: 'cache-session', failSave: false, failRead: false, logs: [] as string[] };
+    roster: [] as AgentInfo[], sessionId: 'cache-session', failSave: false, failRead: false, logs: [] as string[],
+    reported: undefined as { fiveMinute: number; oneHour: number } | undefined };
   const policy = { version: 1, roles: Object.fromEntries(ROLES.map(role => [role, { model: `vendor/${role}`, aliases: [role] }])) };
   on('session.id', () => ({ value: world.sessionId }));
   on('session.start', ($, e) => ({ cwd: e.cwd }));
@@ -42,11 +44,12 @@ async function setup($: Engine, on: On, endpoint = 'https://gateway.example') {
     world.calls.push(request);
     if (request.action === 'cache-sample') {
       if (world.failSave) return { value: { exitCode: 1, stderr: 'storage failed', stdout: '' } };
-      world.samples.push(request.sample);
+      world.samples.push(world.reported ? applyCacheCreation(request.sample, world.reported) : request.sample);
     }
     if (request.action === 'cache-reset') world.resets.push({ sessionId: request.session_id, agentId: request.agent_id ?? null, resetAt: request.reset_at });
     if (request.action === 'cache-snapshot' && world.failRead) return { value: { exitCode: 1, stderr: 'storage failed', stdout: '' } };
     const output = request.action === 'bootstrap' ? { active: true, policy, agents: [] }
+      : request.action === 'cache-sample' ? { sample: world.samples.at(-1) }
       : request.action === 'cache-snapshot' ? { samples: world.samples.filter(s => s.sessionId === request.session_id), resets: world.resets, labels: [] }
       : request.action === 'stats' ? { routed: 0, overrides: 0, mismatches: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 } : {};
     return { value: { exitCode: 0, stderr: '', stdout: JSON.stringify(output) } };
@@ -160,4 +163,20 @@ test('cache panel close button releases the pane', async ($, on) => {
   await dashboard($);
   await $.ui.press({ plugin: 'agent-router', key: 'agent-cache-close', requestId: 'agent-cache' });
   expect(world.calls.some(call => call.action === 'cache-snapshot')).toBe(true);
+});
+
+test('reported third-party mixed TTLs produce separate lifetime bars in the native pane', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 40, oneHour: 60 };
+  await step($);
+  const contents = await dashboard($);
+  expect(contents.includes('Reported 5m writes 40')).toBe(true);
+  expect(contents.includes('Reported 1h writes 60')).toBe(true);
+  expect(contents.includes('response cache_creation')).toBe(true);
+  expect(contents.includes('provider TTL unknown')).toBe(false);
+  await clock.advance(301000);
+  const later = text(await $.ui.render(pane));
+  expect(later.includes('~0:00 left')).toBe(true);
+  expect(later.includes('~54:59 left')).toBe(true);
 });

@@ -1,5 +1,5 @@
 import type { AgentInfo, Elements, EngineInterface, PluginOptions, RenderElement, RenderSurface, TurnStepInput, TurnUsage } from 'claude-code';
-import { cacheBar, cacheClock, cachePolicy, cacheRows, cacheStatus, cacheTokens, loopKey, sampleKey, validSample } from '../lib/cache.js';
+import { applyCacheCreation, reportedCacheCreation, reportedLifetimes, cacheBar, cacheClock, cachePolicy, cacheRows, cacheStatus, cacheTokens, loopKey, sampleKey, validSample } from '../lib/cache.js';
 import type { CacheRow, CacheSample, CacheReset } from '../lib/cache.js';
 import { displayText } from '../lib/catalog.js';
 
@@ -37,6 +37,32 @@ export function createCachePanel(options: PluginOptions) {
   let selected: string | undefined;
   let lastDisplay = '';
   let previous: Context | undefined;
+  const transcripts = new Map<string, string>();
+
+  function setTranscript(sessionId: string, agentId: string | null, path: string) {
+    if (path.endsWith('.jsonl')) transcripts.set(loopKey(sessionId, agentId), path);
+  }
+
+  function transcript(current: Context, agentId: string | null) {
+    const exact = transcripts.get(loopKey(current.sessionId, agentId));
+    if (exact || !agentId || !/^[A-Za-z0-9_-]+$/.test(agentId)) return exact;
+    const main = transcripts.get(loopKey(current.sessionId, null));
+    return main ? `${main.slice(0, -6)}/subagents/agent-${agentId}.jsonl` : undefined;
+  }
+
+  async function enrich(sessionId: string, agentId: string | null, path?: string) {
+    const current = context;
+    if (!current || current.sessionId !== sessionId) return;
+    if (path) setTranscript(sessionId, agentId, path);
+    const source = transcript(current, agentId);
+    if (!source) return;
+    try {
+      const result = await send(current, { action: 'cache-enrich', agent_id: agentId, transcript_path: source });
+      if (context !== current || !Array.isArray(result.samples)) return;
+      for (const sample of result.samples) if (validSample(sample)) current.samples.set(sampleKey(sample), sample);
+      if (result.samples.length) redraw(current);
+    } catch { /* Missing or delayed transcript metadata leaves the estimate intact. */ }
+  }
 
   const send = (current: Context, request: Record<string, unknown>) => current.bridge({ ...request, session_id: current.sessionId });
 
@@ -143,13 +169,18 @@ export function createCachePanel(options: PluginOptions) {
     if (current.pending.get(key)?.request === identity) current.pending.delete(key);
     if (usage) {
       const model = usage.model || request.model;
-      const sample: CacheSample = { sessionId: current.sessionId, agentId: request.agentId ?? null, turnId: request.turnId,
+      let sample: CacheSample = { sessionId: current.sessionId, agentId: request.agentId ?? null, turnId: request.turnId,
         index: request.index, model, startedAt, read: usage.cache_read_input_tokens, write: usage.cache_creation_input_tokens,
-        fresh: usage.input_tokens, output: usage.output_tokens,
+        completedAt: await current.host.clock.now(), fresh: usage.input_tokens, output: usage.output_tokens,
         ...cachePolicy(options.cache_ttl, current.endpoint, current.env, request.agentId ? current.subagentSetting : current.setting, model, request.agentId !== undefined) };
+      const reported = reportedCacheCreation(usage);
+      if (reported) sample = applyCacheCreation(sample, reported);
       if (validSample(sample)) {
         if (!current.samples.has(sampleKey(sample))) current.samples.set(sampleKey(sample), sample);
-        try { await send(current, { action: 'cache-sample', sample }); }
+        try {
+          const result = await send(current, { action: 'cache-sample', sample, transcript_path: transcript(current, sample.agentId) });
+          if (context === current && validSample(result.sample)) current.samples.set(sampleKey(result.sample), result.sample);
+        }
         catch { current.available = false; current.host.ui.log('Agent Router: cache observation could not be saved.', { to: 'debug' }); }
       }
     }
@@ -172,7 +203,7 @@ export function createCachePanel(options: PluginOptions) {
     const current = context;
     if (!current) return;
     current.now = await current.host.clock.now();
-    const display = rows(current).map(row => meter(current, row)).join('\n');
+    const display = rows(current).map(row => `${meter(current, row)} ${reportedLifetimes(row.last, current.now).map(part => cacheClock(part.leftMs)).join(' ')}`).join('\n');
     if (display !== lastDisplay) { lastDisplay = display; redraw(current); }
   }
 
@@ -218,7 +249,11 @@ export function createCachePanel(options: PluginOptions) {
       const key = loopKey(row.sessionId, row.agentId);
       const counts = row.totals;
       const status = state(current, row);
-      const life: RenderElement[] = row.last?.ttlMs && status.leftMs !== null ? [Text({
+      const reported = reportedLifetimes(row.last, current.now);
+      const life: RenderElement[] = reported.length ? reported.map(part => Text({
+        color: part.leftMs === 0 ? 'red' : part.leftMs < 60000 ? 'yellow' : 'green',
+        children: [`Reported ${part.ttl} writes ${cacheTokens(part.tokens)} · ${cacheBar(part.leftMs / part.ttlMs)} ~${cacheClock(part.leftMs)} left`],
+      })) : row.last?.ttlMs && status.leftMs !== null ? [Text({
         color: status.leftMs === 0 ? 'red' : status.leftMs < 60000 ? 'yellow' : 'green',
         children: [`Estimated lifetime ${cacheBar(status.leftMs / row.last.ttlMs)} ~${cacheClock(status.leftMs)} left`],
       })] : [];
@@ -241,6 +276,6 @@ export function createCachePanel(options: PluginOptions) {
     return Box({ flexDirection: 'column', gap: 1, children });
   }
 
-  return { initialize, begin, finish, reset, refresh, tick, show, renderBand, renderPane, close: () => { open = false; },
+  return { initialize, begin, finish, reset, refresh, tick, show, renderBand, renderPane, setTranscript, enrich, close: () => { open = false; },
     clear: () => { previous = context ?? previous; context = undefined; open = false; selected = undefined; } };
 }

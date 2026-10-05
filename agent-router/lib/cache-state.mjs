@@ -1,16 +1,49 @@
-import { recordPath, writeRecord, listRecords, linkedTeammates, agentAssignments, idKey } from './state.mjs';
-import { validSample, loopKey } from './cache.js';
+import { recordPath, readRecord, writeRecord, listRecords, linkedTeammates, agentAssignments, idKey } from './state.mjs';
+import { validSample, validCreation, loopKey, applyCacheCreation } from './cache.js';
+import { transcriptTail, transcriptCreation } from './cache-transcript.mjs';
 
-export async function recordCacheSample(root, sessionId, input) {
+export async function recordCacheSample(root, sessionId, input, transcriptPath) {
   // Whitelist fields: never persist an answer, prompt, credentials or arbitrary payload.
-  const sample = Object.fromEntries(['agentId', 'turnId', 'index', 'model', 'startedAt', 'read', 'write', 'fresh', 'output', 'ttlMs', 'ttlSource', 'disabled'].map(k => [k, input?.[k]]));
+  let sample = Object.fromEntries(['agentId', 'turnId', 'index', 'model', 'startedAt', 'read', 'write', 'fresh', 'output', 'ttlMs', 'ttlSource', 'disabled'].map(k => [k, input?.[k]]));
   sample.sessionId = sessionId;
+  if (input?.completedAt !== undefined) sample.completedAt = input.completedAt;
+  if (validCreation(input?.cacheCreation, sample.write)) sample = applyCacheCreation(sample, input.cacheCreation);
   if (!validSample(sample)) throw new Error('Invalid cache sample.');
   idKey(sample.turnId);
   if (sample.agentId !== null) idKey(sample.agentId);
   const identity = JSON.stringify([sample.agentId, sample.turnId, sample.index]);
-  await writeRecord(recordPath(root, 'cache-samples', sessionId, identity), sample, true);
-  return {};
+  const file = recordPath(root, 'cache-samples', sessionId, identity);
+  await writeRecord(file, sample, true);
+  let saved = await readRecord(file);
+  if (!saved.cacheCreation) {
+    const creation = transcriptCreation(await transcriptTail(transcriptPath), saved);
+    if (creation) {
+      saved = applyCacheCreation(saved, creation);
+      await writeRecord(file, saved);
+    }
+  }
+  return { sample: saved };
+}
+
+// Transcripts can flush after turn.step returns. Stop/PostToolUse provide a
+// second opportunity to enrich the same immutable request identities.
+export async function enrichCacheSamples(root, sessionId, agentId, transcriptPath) {
+  idKey(sessionId);
+  if (agentId !== null) idKey(agentId);
+  const text = await transcriptTail(transcriptPath);
+  const samples = (await listRecords(root, 'cache-samples', sessionId))
+    .filter(s => validSample(s) && s.sessionId === sessionId && s.agentId === agentId && !s.cacheCreation && s.write > 0)
+    .sort((a, b) => b.startedAt - a.startedAt || b.index - a.index).slice(0, 30);
+  const enriched = [];
+  for (const sample of samples) {
+    const creation = transcriptCreation(text, sample);
+    if (!creation) continue;
+    const updated = applyCacheCreation(sample, creation);
+    const identity = JSON.stringify([sample.agentId, sample.turnId, sample.index]);
+    await writeRecord(recordPath(root, 'cache-samples', sessionId, identity), updated);
+    enriched.push(updated);
+  }
+  return { samples: enriched };
 }
 
 export async function resetCache(root, sessionId, agentId, resetAt) {

@@ -48,6 +48,31 @@ export function register(on: On, options: PluginOptions = {}) {
   // The main loop is keyed '' (in a pane teammate session, that is the teammate).
   const sent = new Map<string, Sent>();
 
+  // The normalized turn.step usage omits cache_creation. Classic hooks name
+  // the transcripts preserving that API metadata, including subagent paths.
+  on('classic.SessionStart', ($, e, next) => {
+    cachePanel.setTranscript(e.session_id, null, e.transcript_path);
+    return next(e);
+  });
+  on('classic.SubagentStart', ($, e, next) => {
+    cachePanel.setTranscript(e.session_id, null, e.transcript_path);
+    return next(e);
+  });
+  on('classic.PostToolUse', async ($, e, next) => {
+    cachePanel.setTranscript(e.session_id, null, e.transcript_path);
+    await cachePanel.enrich(e.session_id, e.agent_id ?? null);
+    return next(e);
+  });
+  on('classic.Stop', async ($, e, next) => {
+    cachePanel.setTranscript(e.session_id, null, e.transcript_path);
+    await cachePanel.enrich(e.session_id, e.agent_id ?? null);
+    return next(e);
+  });
+  on('classic.SubagentStop', async ($, e, next) => {
+    await cachePanel.enrich(e.session_id, e.agent_id, e.agent_transcript_path);
+    return next(e);
+  });
+
   on('tool.call', async ($, e, next) => {
     if (!/^(Agent|Task)$/.test(e.tool)) return next(e);
     await ready;
