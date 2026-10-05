@@ -2,6 +2,11 @@
 
 Each release explains what changed for you, in 120 words or less.
 
+## 0.16.2
+
+- **No vanishing countdowns on gateway models.** Some gateway models never report how long their cache lasts. Their bar now says `TTL not reported` from the start instead of counting down for 30 seconds and then switching.
+- **A brief gateway hiccup no longer turns routing off.** If the model list check at session start gets a server error, Agent Router tries twice more before giving up.
+
 ## 0.16.1
 
 - **Teammates keep their models.** A teammate started with a role now runs on the teammate model, and on the teammate TTL, as set in `/agent-models` → Teammates.

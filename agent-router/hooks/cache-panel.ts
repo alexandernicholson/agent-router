@@ -1,5 +1,5 @@
 import type { AgentInfo, Elements, EngineInterface, RenderElement, RenderSurface, SessionCompactResult, TurnStepInput, TurnUsage } from 'claude-code';
-import { applyCacheCreation, reportedCacheCreation, cacheBar, cacheBarParts, cacheClock, cacheDial, cacheGrade, cachePercent, cachePolicy, cacheRows, cacheStatus, cacheTokens, isCompaction, isKeepalive, keepaliveWorthwhile, keepalivesLeft, lifeGrade, loopKey, recentMisses, recentUsage, sampleKey, sampleTtl, validSample, MISS_WINDOW_MS, RATE_REQUESTS } from '../lib/cache.js';
+import { applyCacheCreation, reportedCacheCreation, cacheBar, cacheBarParts, cacheClock, cacheDial, cacheGrade, cachePercent, cachePolicy, cacheRows, cacheStatus, cacheTokens, isCompaction, isKeepalive, keepaliveWorthwhile, keepalivesLeft, lifeGrade, loopKey, recentMisses, recentUsage, sampleKey, sampleTtl, unreportedModels, validSample, MISS_WINDOW_MS, RATE_REQUESTS } from '../lib/cache.js';
 import { validPrices } from '../lib/cache.js';
 import type { CachePrices, CacheRow, CacheSample, CacheReset, CacheStatus } from '../lib/cache.js';
 import { CACHE_COLORS, themeFamily } from '../lib/cache-colors.js';
@@ -215,7 +215,7 @@ export function createCachePanel() {
 
   function state(current: Context, row: CacheRow): CacheStatus {
     const pending = current.pending.get(loopKey(row.sessionId, row.agentId));
-    const value = cacheStatus(row, current.now, pending?.startedAt);
+    const value = cacheStatus(row, current.now, pending?.startedAt, unreportedModels(rows(current), current.now));
     if (pending?.changed && row.last) {
       return { ...value, state: 'model changed · awaiting usage', leftMs: null, lifetimes: [], ttl: undefined };
     }
@@ -579,7 +579,7 @@ export function createCachePanel() {
     if (!row || !sample || row.touchedAt === undefined || current.actedAt === row.touchedAt) return;
     const warms = current.upkeep === 'warm' || current.upkeep === 'warmcomp';
     if (warms && current.limit === undefined) await lookUpPrices(current, sample.model);
-    const status = cacheStatus(row, current.now);
+    const status = cacheStatus(row, current.now, undefined, unreportedModels(rows(current), current.now));
     if (!status.leftMs || status.leftMs > UPKEEP_MS) return;
     current.actedAt = row.touchedAt;
     if (warms && keepaliveWorthwhile(row, current.prices.get(sample.model)?.value, current.limit)) return warm(current, sample.model);

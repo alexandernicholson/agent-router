@@ -246,3 +246,25 @@ test('refused discovery explains missing gateway credentials without forwarding 
     assert.deepEqual(await fetchModels({ env: { ...env, ANTHROPIC_API_KEY: key }, baseUrl }), [{ id: 'vendor/code-v1' }]);
   });
 });
+
+test('a passing gateway server error is retried before discovery fails', async () => {
+  let calls = 0;
+  await withGateway((req, res) => {
+    calls++;
+    if (calls < 3) { res.writeHead(calls === 1 ? 500 : 503); return res.end('busy'); }
+    catalog(res);
+  }, async baseUrl => {
+    assert.deepEqual(await fetchModels({ env: {}, baseUrl, retryMs: 1 }), [{ id: 'vendor/code-v1' }]);
+  });
+  assert.equal(calls, 3);
+  calls = 0;
+  await withGateway((req, res) => { calls++; res.writeHead(502); res.end('down'); }, async baseUrl => {
+    await assert.rejects(fetchModels({ env: {}, baseUrl, retryMs: 1 }), /HTTP 502/);
+  });
+  assert.equal(calls, 3);
+  calls = 0;
+  await withGateway((req, res) => { calls++; res.writeHead(404); res.end(); }, async baseUrl => {
+    await assert.rejects(fetchModels({ env: {}, baseUrl, retryMs: 1 }), /HTTP 404/);
+  });
+  assert.equal(calls, 1);
+});

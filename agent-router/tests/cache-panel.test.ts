@@ -276,6 +276,21 @@ test('a response whose TTL never reaches the transcript stops being rechecked', 
   expect(text(await $.ui.render(band())).includes('not reported')).toBe(true);
 });
 
+test('a gateway model that never reports its TTL stops showing a countdown that then vanishes', async ($, on) => {
+  response(on);
+  const { clock } = await setup($, on);
+  await step($, { model: 'gateway/alias-code[1m]' });
+  expect(text(await $.ui.render(band())).includes('ETA ~5:00')).toBe(true);
+  await clock.advance(31000);
+  expect(text(await $.ui.render(band())).includes('not reported')).toBe(true);
+  await step($, { model: 'gateway/alias-code[1m]', index: 1 });
+  const shown = text(await $.ui.render(band()));
+  expect(shown.includes('not reported')).toBe(true);
+  expect(shown.includes('ETA')).toBe(false);
+  await step($, { model: 'vendor/main', index: 2 });
+  expect(text(await $.ui.render(band())).includes('ETA ~5:00')).toBe(true);
+});
+
 function labelled(on: On, label: (model: string) => string) {
   on('turn.step', async function* ($, e) {
     yield { kind: 'text' as const, index: 0, text: 'answer' };

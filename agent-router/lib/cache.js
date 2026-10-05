@@ -182,9 +182,10 @@ export function cacheRows(samples, resets = [], labels = new Map()) {
  * @param {CacheRow | undefined} row
  * @param {number} now
  * @param {number} [pendingAt]
+ * @param {Set<string>} [unreported]
  * @returns {CacheStatus}
  */
-export function cacheStatus(row, now, pendingAt) {
+export function cacheStatus(row, now, pendingAt, unreported) {
   const compaction = row?.compaction && (!row.last || row.compaction.startedAt >= row.last.startedAt) ? row.compaction : undefined;
   const sample = compaction ?? row?.last;
   if (!row || !sample) return { state: 'no observation', leftMs: null, ratio: null, lifetimes: [] };
@@ -196,7 +197,7 @@ export function cacheStatus(row, now, pendingAt) {
   const without = state => ({ state, leftMs: null, ratio, lifetimes: [], sample });
   if (sample.disabled) return without('caching disabled');
   if (sample.read + sample.write === 0) return without('uncached');
-  const creation = row.creation ?? awaitedCreation(row, sample, now);
+  const creation = row.creation ?? (unreported?.has(modelName(sample.model)) ? null : awaitedCreation(row, sample, now));
   if (!creation) return without('TTL not reported');
   const anchor = Math.max(row.touchedAt ?? sample.startedAt, pendingAt ?? 0);
   /** @type {CacheLifetime[]} */
@@ -218,6 +219,24 @@ function awaitedCreation(row, sample, now) {
   if (sample !== row.last || !sample.write || sample.cacheCreation || !sample.requested) return null;
   if (sample.completedAt !== undefined && now - sample.completedAt >= TTL_REPORT_MS) return null;
   return sample.requested === '1h' ? { fiveMinute: 0, oneHour: sample.write } : { fiveMinute: sample.write, oneHour: 0 };
+}
+
+const modelName = model => model.replace(/\[1m\]$/i, '');
+
+/**
+ * @param {CacheRow[]} rows
+ * @param {number} now
+ * @returns {Set<string>}
+ */
+export function unreportedModels(rows, now) {
+  const reported = new Set();
+  const silent = new Set();
+  for (const row of rows) for (const s of row.samples) {
+    if (!s.write || isKeepalive(s) || isCompaction(s)) continue;
+    if (s.cacheCreation) reported.add(modelName(s.model));
+    else if (s.completedAt !== undefined && now - s.completedAt >= TTL_REPORT_MS) silent.add(modelName(s.model));
+  }
+  return new Set([...silent].filter(model => !reported.has(model)));
 }
 
 /**

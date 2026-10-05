@@ -4,7 +4,7 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { cachePolicy, validSample, validPrices, cacheRows, cacheStatus, cacheBar, cacheClock, loopKey, applyCacheCreation, cacheGrade, cachePercent, lifeGrade, isKeepalive, keepaliveWorthwhile, keepalivesLeft, cacheDial, cacheBarParts, isCompaction,
-  recentUsage, recentMisses, sampleTtl, MISS_WINDOW_MS, TTL_REPORT_MS } from '../lib/cache.js';
+  recentUsage, recentMisses, sampleTtl, unreportedModels, MISS_WINDOW_MS, TTL_REPORT_MS } from '../lib/cache.js';
 import { recordCacheSample, resetCache, cacheSnapshot } from '../lib/cache-state.mjs';
 import { recordPath, writeRecord, linkTeammate } from '../lib/state.mjs';
 import { handleRequest } from '../lib/bridge.mjs';
@@ -345,6 +345,22 @@ test('a write whose TTL is not yet reported counts down from the requested TTL u
   const reported = applyCacheCreation(written, { fiveMinute: 100, oneHour: 0 });
   assert.equal(cacheStatus(cacheRows([reported])[0], 2000).ttl, '5m');
   assert.equal(cacheStatus(cacheRows([reported])[0], 2000).awaiting, undefined);
+});
+
+test('a model seen not to report its TTL gets no provisional countdown on later writes, in any loop', () => {
+  const first = sample({ turnId: 'a', startedAt: 0, completedAt: 1000, read: 0, write: 900, requested: '5m', model: 'gateway/alias[1m]' });
+  const later = sample({ turnId: 'b', startedAt: 40000, completedAt: 41000, read: 900, write: 100, requested: '5m', model: 'gateway/alias' });
+  const elsewhere = sample({ agentId: 'child', turnId: 'c', startedAt: 40000, completedAt: 41000, read: 0, write: 500, requested: '5m', model: 'gateway/alias' });
+  const rows = cacheRows([first, later, elsewhere]);
+  const quiet = unreportedModels(rows, 42000);
+  assert.deepEqual([...quiet], ['gateway/alias']);
+  for (const row of rows) assert.equal(cacheStatus(row, 42000, undefined, quiet).state, 'TTL not reported');
+  assert.equal(cacheStatus(rows[0], 42000).awaiting, true);
+  assert.deepEqual([...unreportedModels(cacheRows([first]), 2000)], []);
+  const claude = sample({ turnId: 'd', startedAt: 40000, completedAt: 41000, read: 0, write: 500, requested: '5m', model: 'claude-opus-5-5' });
+  assert.equal(cacheStatus(cacheRows([first, claude])[0], 42000, undefined, quiet).awaiting, true);
+  const reported = applyCacheCreation(sample({ turnId: 'e', startedAt: 0, completedAt: 1000, read: 0, write: 900, model: 'claude-opus-5-5' }), { fiveMinute: 900, oneHour: 0 });
+  assert.deepEqual([...unreportedModels(cacheRows([reported]), 99000)], []);
 });
 
 test('each request names the TTL it asked for, and a different reported one', () => {

@@ -44,7 +44,10 @@ function discoveryHeaders(env, gatewayDiscovery) {
   return headers;
 }
 
-async function fetchEndpointModels(env, base, gatewayDiscovery) {
+const RETRIES = 2;
+const retryable = status => status >= 500 && status <= 599;
+
+async function fetchEndpointModels(env, base, gatewayDiscovery, retryMs) {
   const headers = discoveryHeaders(env, gatewayDiscovery);
   const rows = new Map();
   const cursors = new Set();
@@ -56,8 +59,13 @@ async function fetchEndpointModels(env, base, gatewayDiscovery) {
     url.searchParams.set('limit', '1000');
     if (after) url.searchParams.set('after_id', after);
     let response;
-    try { response = await fetch(url, { headers, redirect: 'manual', signal }); }
-    catch { throw new Error('Model discovery failed or timed out; check gateway connectivity and credentials.'); }
+    for (let attempt = 0; ; attempt++) {
+      try { response = await fetch(url, { headers, redirect: 'manual', signal }); }
+      catch { throw new Error('Model discovery failed or timed out; check gateway connectivity and credentials.'); }
+      if (!retryable(response.status) || attempt >= RETRIES) break;
+      await response.body?.cancel().catch(() => {});
+      await new Promise(resolve => setTimeout(resolve, retryMs * (attempt + 1)));
+    }
     if (!response.ok) {
       await response.body?.cancel().catch(() => {});
       if (response.status === 401 || response.status === 403) {
@@ -111,12 +119,12 @@ async function readGatewayModels(env, base, gatewayDiscovery) {
   }
 }
 
-export async function fetchModels({ env = process.env, baseUrl = env.ANTHROPIC_BASE_URL } = {}) {
+export async function fetchModels({ env = process.env, baseUrl = env.ANTHROPIC_BASE_URL, retryMs = 500 } = {}) {
   const base = normalizeBaseUrl(baseUrl);
   const gatewayDiscovery = isTruthy(env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY) &&
     !PROVIDER_FLAGS.some(key => isTruthy(env[key])) && new URL(base).hostname !== 'api.anthropic.com';
   const [endpoint, discovery] = await Promise.allSettled([
-    fetchEndpointModels(env, base, gatewayDiscovery), readGatewayModels(env, base, gatewayDiscovery),
+    fetchEndpointModels(env, base, gatewayDiscovery, retryMs), readGatewayModels(env, base, gatewayDiscovery),
   ]);
   // Claude owns this optional cache, including authentication-helper discovery.
   const cached = discovery.status === 'fulfilled' ? discovery.value : [];
