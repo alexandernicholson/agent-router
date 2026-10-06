@@ -8,6 +8,7 @@ const ID = 'keepalive-settings';
 const props = { title: 'Keepalive settings', isFocused: true, bodyColumns: 100, placement: 'dock' as const, scroll: { offset: 0, bodyRows: 40 }, view: {} };
 const pane: RenderInput<'Pane', 'terminal'> = { component: 'Pane', surface: 'terminal', requestId: ID, props };
 const TTLS = ['default', '5m', '1h'];
+const UPKEEP = ['off', 'warm', 'compact', 'warmcomp'];
 
 function row(field: string, kind: ConfigRow['kind'], value: string, options?: string[]): ConfigRow {
   return { key: `owner.${field}`, label: field, kind, value, ...(options ? { options } : {}), provider: { plugin: 'keepalive@tools', tier: 'user' }, isLocked: false };
@@ -18,7 +19,8 @@ function world(on: On, extra: { auth?: 'bearer'; env?: Record<string, string> } 
     rows: [
       { key: 'theme', label: 'Theme', kind: 'enum', value: 'dark', provider: { plugin: 'engine', tier: 'core' }, isLocked: false },
       row('cache_ttl', 'choice', 'default', TTLS), row('subagent_cache_ttl', 'choice', 'default', TTLS), row('teammate_cache_ttl', 'choice', 'default', TTLS),
-      row('teammate_cache_upkeep', 'choice', 'off', ['off', 'warm', 'compact', 'warmcomp']), row('keepalive_limit', 'text', 'default'),
+      row('cache_upkeep', 'choice', 'off', UPKEEP), row('teammate_cache_upkeep', 'choice', 'off', UPKEEP), row('keepalive_limit', 'text', 'default'),
+      row('teammate_keepalive_limit', 'text', 'same'), row('compact_threshold', 'text', '100k'),
     ] as ConfigRow[],
     writes: [] as [string, unknown][], deny: '', echo: undefined as string | undefined, listFailure: undefined as unknown, openFailure: '',
     placed: true, logs: [] as string[], closed: 0, onList: undefined as undefined | (() => Promise<void>), onSet: undefined as undefined | (() => Promise<void>),
@@ -70,7 +72,7 @@ async function open($: Engine) {
   return $.ui.render(pane);
 }
 const select = ($: Engine, key: string, value: string) => $.ui.select({ plugin: 'keepalive', key, requestId: ID, value });
-const type = ($: Engine, text: string) => $.ui.input({ plugin: 'keepalive', key: 'keepalive-custom', requestId: ID, text });
+const type = ($: Engine, text: string, key = 'keepalive-limit') => $.ui.input({ plugin: 'keepalive', key: `${key}-custom`, requestId: ID, text });
 
 function text(node: RenderNode | undefined): string {
   if (!node) return '';
@@ -90,18 +92,24 @@ function find(node: RenderNode | undefined, type: string, key: string): Record<s
 }
 const labels = (node: RenderNode | undefined, key: string) => (find(node, 'Select', key)?.options as { label: string }[] | undefined)?.map(option => option.label);
 
-test('the settings pane saves the TTLs, teammate upkeep and keepalive limit new conversations start with', async ($, on) => {
+test('the settings pane saves the TTLs, upkeep modes and keepalive limit new conversations start with', async ($, on) => {
   const state = world(on);
   const drawn = await open($);
   expect(labels(drawn, 'cache-ttl')).toEqual(['Default (5m)', '5m', '1h']);
   expect(labels(drawn, 'subagent-ttl')).toEqual(['Default (5m)', '5m', '1h']);
   expect(labels(drawn, 'teammate-ttl')).toEqual(['Default (5m)', '5m', '1h']);
-  expect(labels(drawn, 'teammate-upkeep')).toEqual(['off', 'warm', 'compact', 'warmcomp']);
+  expect(labels(drawn, 'cache-upkeep')).toEqual(UPKEEP);
+  expect(labels(drawn, 'teammate-upkeep')).toEqual(UPKEEP);
   expect(labels(drawn, 'keepalive-limit')).toEqual(['Default (priced)', 'Infinite', '1', '2', '3', '4', '6', '8', '12', '16', '24']);
+  expect(labels(drawn, 'teammate-limit')).toEqual(['Same as keepalive limit', 'Default (priced)', 'Infinite', '1', '2', '3', '4', '6', '8', '12', '16', '24']);
+  expect(labels(drawn, 'compact-threshold')).toEqual(['25k', '50k', '100k (default)', '150k', '200k', '300k', '500k']);
   expect(text(drawn)).toContain('Each keepalive keeps an idle cache about 4½ minutes longer on a 5m TTL');
   await select($, 'cache-ttl', '1h');
   expect(owned(state, 'cache_ttl').value).toBe('1h');
   expect(text(await $.ui.render(pane))).toContain('Saved the prompt cache TTL. Conversations that start from now on use it');
+  await select($, 'cache-upkeep', 'warmcomp');
+  expect(owned(state, 'cache_upkeep').value).toBe('warmcomp');
+  expect(text(await $.ui.render(pane))).toContain('Saved main conversation upkeep. Sessions started from now on begin in warmcomp; this one\'s mode button changes it here.');
   await select($, 'teammate-upkeep', 'warm');
   expect(owned(state, 'teammate_cache_upkeep').value).toBe('warm');
   expect(text(await $.ui.render(pane))).toContain('Saved teammate upkeep. Split-pane teammates started from now on begin in warm.');
@@ -110,7 +118,14 @@ test('the settings pane saves the TTLs, teammate upkeep and keepalive limit new 
   expect(text(await $.ui.render(pane))).toContain('Saved the keepalive limit. It applies to warm and warmcomp after each request from now on.');
   await select($, 'keepalive-limit', 'infinite');
   expect(owned(state, 'keepalive_limit').value).toBe('infinite');
-  expect(state.writes.map(([key]) => key)).toEqual(['owner.cache_ttl', 'owner.teammate_cache_upkeep', 'owner.keepalive_limit', 'owner.keepalive_limit']);
+  await select($, 'teammate-limit', '6');
+  expect(owned(state, 'teammate_keepalive_limit').value).toBe('6');
+  expect(text(await $.ui.render(pane))).toContain('Saved the teammate keepalive limit. Split-pane teammates started from now on use it.');
+  await select($, 'compact-threshold', '50k');
+  expect(owned(state, 'compact_threshold').value).toBe('50k');
+  expect(text(await $.ui.render(pane))).toContain('Saved the compaction threshold. compact and warmcomp compact conversations of 50k tokens or more from now on.');
+  expect(state.writes.map(([key]) => key)).toEqual(['owner.cache_ttl', 'owner.cache_upkeep', 'owner.teammate_cache_upkeep', 'owner.keepalive_limit',
+    'owner.keepalive_limit', 'owner.teammate_keepalive_limit', 'owner.compact_threshold']);
 });
 
 test('each default names what Claude Code would use, with split-pane and in-process teammates apart when they differ', async ($, on) => {
@@ -137,6 +152,33 @@ test('any whole number can be typed as the keepalive limit, and anything else is
   expect(owned(state, 'keepalive_limit').value).toBe('infinite');
 });
 
+test('a teammate limit can be typed, including same, and anything else is refused', async ($, on) => {
+  const state = world(on);
+  await open($);
+  await type($, '9', 'teammate-limit');
+  expect(owned(state, 'teammate_keepalive_limit').value).toBe('9');
+  await type($, 'later', 'teammate-limit');
+  expect(text(await $.ui.render(pane))).toContain('Enter same, default, infinite, or a whole number of keepalives from 1.');
+  await type($, ' SAME ', 'teammate-limit');
+  expect(owned(state, 'teammate_keepalive_limit').value).toBe('same');
+  expect(state.writes).toHaveLength(2);
+});
+
+test('any number of tokens can be typed as the compaction threshold, in thousands or millions, and anything else is refused', async ($, on) => {
+  const state = world(on);
+  await open($);
+  for (const [typed, saved] of [[' 80000 ', '80k'], ['75k', '75k'], ['1M', '1000k'], ['12345', '12345']]) {
+    await type($, typed, 'compact-threshold');
+    expect(owned(state, 'compact_threshold').value).toBe(saved);
+  }
+  expect(labels(await $.ui.render(pane), 'compact-threshold')?.at(-1)).toBe('12345');
+  for (const bad of ['0', '-5k', '1.5k', '80 k', 'big', '99999999999999m']) {
+    await type($, bad, 'compact-threshold');
+    expect(text(await $.ui.render(pane))).toContain('Enter a number of tokens, such as 80k or 80000.');
+  }
+  expect(state.writes).toHaveLength(4);
+});
+
 test('a limit set elsewhere that is not a number is shown, but choosing it again writes nothing', async ($, on) => {
   const state = world(on);
   owned(state, 'keepalive_limit').value = 'lots';
@@ -152,7 +194,8 @@ test('settings your administrator manages are shown without controls and never w
   Object.assign(owned(state, 'keepalive_limit'), { isLocked: true, value: '3' });
   const drawn = await open($);
   expect(find(drawn, 'Select', 'cache-ttl')).toBeUndefined();
-  expect(find(drawn, 'Input', 'keepalive-custom')).toBeUndefined();
+  expect(find(drawn, 'Input', 'keepalive-limit-custom')).toBeUndefined();
+  expect(find(drawn, 'Input', 'compact-threshold-custom')).toBeDefined();
   expect(text(drawn)).toContain('Main conversation TTL: Default (5m) · managed by your administrator');
   expect(text(drawn)).toContain('Keepalive limit: 3 · managed by your administrator');
   owned(state, 'teammate_cache_upkeep').isLocked = true;
@@ -197,7 +240,7 @@ test('a missing, duplicated or retyped setting points to /config instead of draw
   expect(text(drawn)).toContain('Open /config and check that teammate_cache_ttl has one visible Keepalive setting.');
   expect(text(drawn)).toContain('Open /config to edit teammate_cache_upkeep; this setting requires its native control.');
   expect(text(drawn)).toContain('Open /config and check that keepalive_limit has one visible Keepalive setting.');
-  expect(find(drawn, 'Input', 'keepalive-custom')).toBeUndefined();
+  expect(find(drawn, 'Input', 'keepalive-limit-custom')).toBeUndefined();
   state.rows = state.rows.filter(item => item.key !== 'owner.cache_ttl');
   await select($, 'cache-ttl', '1h');
   expect(state.writes).toHaveLength(0);
@@ -265,7 +308,7 @@ test('while a choice is saving the pane shows values without controls, and a sec
   await first;
   expect(text(during)).toContain('Main conversation TTL: Default (5m)');
   expect(find(during, 'Select', 'cache-ttl')).toBeUndefined();
-  expect(find(during, 'Input', 'keepalive-custom')).toBeUndefined();
+  expect(find(during, 'Input', 'keepalive-limit-custom')).toBeUndefined();
   expect(state.writes.map(([key]) => key)).toEqual(['owner.cache_ttl']);
 });
 

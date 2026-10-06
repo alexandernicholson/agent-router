@@ -13,6 +13,7 @@ export const CACHE_COMMANDS = ['keepalive', 'agent-cache'] as const;
 const RECHECK_MS = [1000, 3000, 10000, 30000];
 const UPKEEP_MS = 30000;
 const COMPACT_MIN_TOKENS = 100000;
+const UNITS: Record<string, number> = { '': 1, k: 1000, m: 1000000 };
 const UPKEEP = ['off', 'warm', 'compact', 'warmcomp'] as const;
 const UPKEEP_KEY = 'cache-upkeep';
 const KEEPALIVE_PROMPT = 'Reply with only: OK';
@@ -34,7 +35,7 @@ const INTRO = [
   '  Mode button: click to cycle what happens 30 seconds before an idle main conversation\'s cache expires:',
   '    off (default) sends nothing.',
   '    warm sends cheap keepalive requests, by default while they cost less than rewriting the cache; ↻ shows how many are left.',
-  '    compact summarises a conversation of 100k+ tokens while it is still cached.',
+  '    compact summarises a conversation at or over the compaction threshold, 100k tokens unless changed, while it is still cached.',
   '    warmcomp warms first, then compacts.',
   '  Keepalives and compactions are billed. Set how many, and each kind of conversation\'s defaults, with /keepalive-settings.',
 ];
@@ -44,6 +45,11 @@ export const keepaliveLimit = (value: unknown): number | undefined => {
   const text = String(value).trim().toLowerCase();
   if (text === 'infinite') return Infinity;
   return /^[1-9]\d*$/.test(text) && Number.isSafeInteger(Number(text)) ? Number(text) : undefined;
+};
+export const compactThreshold = (value: unknown): number | undefined => {
+  const match = /^([1-9]\d*)([km]?)$/.exec(String(value).trim().toLowerCase());
+  const tokens = match ? Number(match[1]) * UNITS[match[2]] : NaN;
+  return Number.isSafeInteger(tokens) ? tokens : undefined;
 };
 const AGENT_FILTERS = ['all', 'main', 'subagents', 'teammates'] as const;
 const REQUEST_FILTERS = ['all', 'real', 'keepalives', 'compactions', 'misses'] as const;
@@ -77,6 +83,7 @@ type Context = {
   env: Record<string, string | undefined>;
   upkeep: Upkeep;
   limit?: number;
+  compactAt: number;
   family: Family;
   samples: Map<string, CacheSample>;
   resets: CacheReset[];
@@ -391,13 +398,13 @@ export function createCachePanel() {
   }
 
   async function initialize(host: CachePanelHost, bridge: Bridge, sessionId: string, endpoint: string | undefined, selfLabel: string | undefined,
-    configuration: { env: Record<string, string | undefined>; upkeep?: Upkeep; ttl: TtlDefaults; limit?: number }) {
+    configuration: { env: Record<string, string | undefined>; upkeep?: Upkeep; ttl: TtlDefaults; limit?: number; compactAt?: number }) {
     const saved = (await savedUpkeep(host)).find(([id]) => id === sessionId)?.[1];
     const [settings, auth] = await Promise.all([host.settings.read().catch(() => ({})), host.auth()]);
     const resolve = (scope: TtlScope) => resolveDefaultTtl({ scope, env: configuration.env, settings: settings as Record<string, unknown>, auth });
     const subagent = resolve('subagent');
     const current: Context = { host, bridge, sessionId, endpoint, selfLabel, env: configuration.env, upkeep: saved ?? configuration.upkeep ?? 'off',
-      limit: configuration.limit, family: themeFamily(undefined, configuration.env.COLORFGBG),
+      limit: configuration.limit, compactAt: configuration.compactAt ?? COMPACT_MIN_TOKENS, family: themeFamily(undefined, configuration.env.COLORFGBG),
       samples: new Map(), resets: [], labels: new Map(), roster: [], routes: null, now: 0, pending: new Map(), requested: new Map(), rechecks: new Map(), prices: new Map(), available: true,
       defaults: { main: resolve('main'), subagent }, ttlDefaults: configuration.ttl,
       ttls: new Map((await savedTtls(host)).filter(([id]) => id === sessionId).map(([, key, ttl]) => [key, ttl])), kinds: new Map(),
@@ -407,7 +414,7 @@ export function createCachePanel() {
     selected = undefined;
     open = false;
     lastDisplay = '';
-    if (!saved && current.upkeep !== 'off') await saveUpkeep(current);
+    if (!saved) await saveUpkeep(current);
     await applyMainTtl(current);
     await refresh();
     if (context !== current) return;
@@ -419,7 +426,7 @@ export function createCachePanel() {
     const prior = context ?? previous;
     if (prior) {
       const id = await prior.host.session.id();
-      if (!context || id !== prior.sessionId) await initialize(prior.host, prior.bridge, id, prior.endpoint, undefined, { env: prior.env, upkeep: prior.upkeep, ttl: prior.ttlDefaults, limit: prior.limit });
+      if (!context || id !== prior.sessionId) await initialize(prior.host, prior.bridge, id, prior.endpoint, undefined, { env: prior.env, upkeep: prior.upkeep, ttl: prior.ttlDefaults, limit: prior.limit, compactAt: prior.compactAt });
     }
     return context;
   }
@@ -591,7 +598,7 @@ export function createCachePanel() {
     if (!status.leftMs || status.leftMs > UPKEEP_MS) return;
     current.actedAt = row.touchedAt;
     if (warms && keepaliveWorthwhile(row, current.prices.get(sample.model)?.value, current.limit)) return warm(current, sample.model);
-    if (current.upkeep !== 'warm' && sample.read + sample.write + sample.fresh >= COMPACT_MIN_TOKENS) return compact(current);
+    if (current.upkeep !== 'warm' && sample.read + sample.write + sample.fresh >= current.compactAt) return compact(current);
     if (warms) current.host.ui.log(current.limit !== undefined && row.keepalives.length >= current.limit
       ? `Keepalive: cache warming stopped at the keepalive limit of ${current.limit}.`
       : 'Keepalive: cache warming paused; another keepalive would cost more than rewriting the cache.', { to: 'debug' });
@@ -688,7 +695,7 @@ export function createCachePanel() {
   }
 
   function upkeepText(current: Context) {
-    const compacts = `compacts a main conversation of ${cacheTokens(COMPACT_MIN_TOKENS)}+ tokens 30s before its TTL ends`;
+    const compacts = `compacts a main conversation of ${cacheTokens(current.compactAt)}+ tokens 30s before its TTL ends`;
     const rule = warmRule(current.limit);
     return {
       off: 'off · no requests are sent for upkeep',
@@ -710,7 +717,7 @@ export function createCachePanel() {
     const left = keepalivesLeft(row, known?.value, current.limit);
     if (left === null) return undefined;
     if (left === Infinity) return short ? '↻∞' : 'keepalives until your next request';
-    const compacts = current.upkeep === 'warmcomp' && row.last.read + row.last.write + row.last.fresh >= COMPACT_MIN_TOKENS;
+    const compacts = current.upkeep === 'warmcomp' && row.last.read + row.last.write + row.last.fresh >= current.compactAt;
     if (short) return [left || !compacts ? `↻${left}` : '', compacts ? '➜ cmpt' : ''].filter(Boolean).join(' ');
     if (!compacts) return `${plural(left, 'keepalive')} left`;
     return left ? `${plural(left, 'keepalive')}, then compact` : 'compact next';

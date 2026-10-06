@@ -1,6 +1,6 @@
 {
   "name": "keepalive",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "MIT",
   "description": "A prompt cache bar for every conversation, subagent and teammate, a dashboard with /keepalive, per-conversation cache TTLs, and upkeep that keeps an idle cache warm or compacts it before it expires. Requires Claude Code Mod function hooks enabled.",
   "author": {
@@ -43,6 +43,19 @@
       "default": "default",
       "required": false
     },
+    "cache_upkeep": {
+      "type": "string",
+      "title": "Cache upkeep",
+      "description": "Prompt cache upkeep the main conversation starts in. The mode button on the cache bar changes it for the session.",
+      "options": [
+        "off",
+        "warm",
+        "compact",
+        "warmcomp"
+      ],
+      "default": "off",
+      "required": false
+    },
     "teammate_cache_upkeep": {
       "type": "string",
       "title": "Teammate cache upkeep",
@@ -59,8 +72,22 @@
     "keepalive_limit": {
       "type": "string",
       "title": "Keepalive limit",
-      "description": "Keepalives warm and warmcomp send after each request before warming stops; warmcomp then compacts. default sends them while each costs less than rewriting the cache, infinite never stops, and a number sends exactly that many.",
+      "description": "Keepalives warm and warmcomp send after each request before warming stops; warmcomp then compacts. default sends them while each costs less than rewriting the cache, infinite never stops, and a number sends exactly that many. Split-pane teammates use it unless their own limit is set.",
       "default": "default",
+      "required": false
+    },
+    "teammate_keepalive_limit": {
+      "type": "string",
+      "title": "Teammate keepalive limit",
+      "description": "Keepalive limit for split-pane teammates. same uses the keepalive limit; default, infinite or a number work as they do there.",
+      "default": "same",
+      "required": false
+    },
+    "compact_threshold": {
+      "type": "string",
+      "title": "Compaction threshold",
+      "description": "The smallest conversation compact and warmcomp compact, in tokens, such as 100k or 80000. A smaller conversation is left to expire.",
+      "default": "100k",
       "required": false
     }
   }

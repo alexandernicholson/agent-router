@@ -2,6 +2,12 @@
 
 Each release explains what changed for you, in 120 words or less.
 
+## Keepalive 0.2.0
+
+- **Choose the upkeep every session starts in.** `/keepalive-settings` now has **Main conversation upkeep**: `off`, `warm`, `compact` or `warmcomp`. New sessions start in it; the mode button still changes it for the session you're in.
+- **A keepalive limit for teammates.** **Teammate keepalive limit** lets split-pane teammates warm more or less than your main conversation. `same`, the default, keeps them on your keepalive limit.
+- **Choose when to compact.** **Compaction threshold** sets the smallest conversation `compact` and `warmcomp` compact. It stays at 100k tokens unless you change it; type any size, such as `60k`.
+
 ## Agent Router 0.17.0 · Keepalive 0.1.0
 
 - **Two plugins.** The cache bar is now **Keepalive**, a separate plugin in the same marketplace: `/plugin install keepalive@agent-router-tools`. Agent Router keeps model routing. Either works without the other.

@@ -24,7 +24,7 @@ Any endpoint works: a Claude subscription, an API key or an Anthropic-compatible
 /plugin install keepalive@agent-router-tools
 ```
 
-Run `/keepalive-settings` to choose the TTL each kind of conversation starts in, the upkeep split-pane teammates start in, and the keepalive limit.
+Run `/keepalive-settings` to choose the TTL each kind of conversation starts in, the upkeep the main conversation and split-pane teammates start in, the keepalive limits, and the compaction threshold.
 
 ## With Agent Router
 
@@ -175,14 +175,14 @@ Every colour is text or a mark on the terminal's own background; nothing is draw
 
 ## Cache upkeep
 
-The mode button next to the dial shows the current upkeep mode for the main conversation; click it, or focus it and press Enter, to switch to the next mode: `off` → `warm` → `compact` → `warmcomp` → `off`. A marker before the mode shows its colour: teal `⬥` for `warm`, violet `⬥` for `compact`, both for `warmcomp`, and a dim `⬦` for `off`, which sends nothing. The choice lasts for the session, including after a reload or `/clear`; a new session starts with **off**.
+The mode button next to the dial shows the current upkeep mode for the main conversation; click it, or focus it and press Enter, to switch to the next mode: `off` → `warm` → `compact` → `warmcomp` → `off`. A marker before the mode shows its colour: teal `⬥` for `warm`, violet `⬥` for `compact`, both for `warmcomp`, and a dim `⬦` for `off`, which sends nothing. The choice lasts for the session, including after a reload or `/clear`; a new session starts in the **Main conversation upkeep** chosen with `/keepalive-settings` (`cache_upkeep`, `off` unless you change it). Changing the setting leaves sessions already running in their current mode.
 
 | Mode | What happens 30 seconds before the main conversation's TTL ends |
 | --- | --- |
 | `off` (default) | Nothing. No requests are sent. |
 | `warm` | A keepalive request: one tool-less request over the conversation as last sent, asking for `OK`. Its prompt-cache read refreshes the entry. |
-| `compact` | The conversation is compacted, as `/compact` does, while its cache is still warm, if its context is 100k tokens or larger. |
-| `warmcomp` | Keepalives as in `warm`. Once the keepalive limit is reached, the conversation is compacted as in `compact` instead; a conversation under 100k tokens is left to expire. |
+| `compact` | The conversation is compacted, as `/compact` does, while its cache is still warm, if its context is at or over the compaction threshold: 100k tokens unless you change it (see **Compaction threshold**). |
+| `warmcomp` | Keepalives as in `warm`. Once the keepalive limit is reached, the conversation is compacted as in `compact` instead; a conversation under the compaction threshold is left to expire. |
 
 Upkeep acts only while no main-conversation request is in flight, and at most once per countdown. After a compaction there is no countdown until your next request, so each mode compacts at most once per idle stretch. Upkeep needs a reported TTL, so it does nothing while the TTL is unknown.
 
@@ -190,7 +190,7 @@ Upkeep reaches only conversations that are their own Claude Code session:
 
 | Conversation | Bar and dashboard | Upkeep |
 | --- | --- | --- |
-| The main conversation | Yes | Its mode button |
+| The main conversation | Yes | Its mode button; starts in `cache_upkeep` |
 | A split-pane teammate | Yes, in its pane and on the lead's dashboard | Its own mode button; starts in `teammate_cache_upkeep` |
 | Subagents, at any depth | Yes | None, shown as `–` |
 | In-process teammates | Yes | None, shown as `–` |
@@ -209,7 +209,13 @@ The **Keepalive limit** in `/keepalive-settings` (`keepalive_limit`) sets how ma
 
 Pick a common number from the list or type any whole number into **Other number**. Each keepalive keeps an idle cache about 4½ minutes longer on a 5m TTL, or 59½ minutes on 1h, so 12 keepalives keep a 5m cache for about 55 minutes. A number or `infinite` needs no price, so keepalives are sent for models no price source lists.
 
+Split-pane teammates use the keepalive limit too, unless **Teammate keepalive limit** (`teammate_keepalive_limit`) gives them their own. It takes the same values, plus `same`, its default, which follows the keepalive limit. A teammate reads it when it starts.
+
 Keepalives are billed: each reads the cached context at the cache-read rate and adds a few uncached and output tokens. With the `default` limit, warming pauses once the keepalives since the last request, plus one more, would cost more than letting the entry expire and writing the cached context again. Each keepalive's measured tokens are priced as multiples of the model's input price, taken from Anthropic's price table for Claude models and from [models.dev](https://models.dev) otherwise: the cache-read, cache-write, and output prices (see **Model prices** below). With Claude Opus 5.5's listed prices that is about 23 keepalives on a 5-minute TTL, roughly an hour and 50 minutes of idle time; with the more common 0.1× cache reads, about 11, roughly 55 minutes. That point is when `warmcomp` compacts: until then each keepalive costs less than the rewrite it prevents, and past it only a shorter conversation makes your return cheaper. Your gateway's own pricing may differ from the public listing. A real request resets the count. In `warm` and `warmcomp`, the bar shows how many keepalives are left: `↻11` for 11 more, or `↻∞` with an `infinite` limit. On a `warmcomp` conversation large enough to compact, it shows `↻11 ➜ cmpt`, then `➜ cmpt` once the next action is the compaction. The dashboard spells this out (`11 keepalives, then compact`) and adds how many have been sent since your last request. With `default`, the count assumes each remaining keepalive costs what the last one did, so it can shift by one after the first. Keepalives only pay off if you return to the conversation; if you don't, they are spent for nothing. Keepalives appear in the dashboard's request history and totals, but not in the bar's hit rate. A keepalive sent after a compaction would replay the summary without a cache breakpoint on it, so no mode warms a compacted conversation. Compaction runs only between turns; if it is refused, the debug log says why.
+
+### Compaction threshold
+
+The **Compaction threshold** in `/keepalive-settings` (`compact_threshold`) is the smallest conversation `compact` and `warmcomp` compact, counted as the cached, written and uncached input tokens of its last request. It is `100k` unless you change it. Pick a size from the list or type any number of tokens into **Other number**, such as `60k` or `60000`; `1m` means a million. Below the threshold, a conversation is left to expire, since writing its cache again costs little. A value that is not a number of tokens counts as `100k`.
 
 ### Model prices
 

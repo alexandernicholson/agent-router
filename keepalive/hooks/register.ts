@@ -1,5 +1,5 @@
 import type { On, PluginOptions, Timer } from 'claude-code';
-import { createCachePanel, CACHE_PANE, CACHE_COMMANDS, upkeepMode, ttlOption, keepaliveLimit } from './cache-panel';
+import { createCachePanel, CACHE_PANE, CACHE_COMMANDS, upkeepMode, ttlOption, keepaliveLimit, compactThreshold } from './cache-panel';
 import { createSettingsPane, SETTINGS_PANE, type SettingsHost } from './settings-pane';
 import { createBridge, type Bridge } from './shared/bridge';
 import { resolveDefaultTtl } from '../lib/cache-ttl.js';
@@ -66,6 +66,7 @@ export function register(on: On, options: PluginOptions) {
       if (teammate) await bridge({ action: 'link', lead_session_id: teammate.parentSessionId, label: `${teammate.agentName || 'Teammate'} (${teammate.agentId})` }).catch(() => undefined);
       const stored = await $.settings.read().catch(() => ({})) as { pluginConfigs?: Record<string, { options?: Record<string, unknown> }> };
       const option = legacyOptions(options, stored.pluginConfigs ?? {});
+      const ownLimit = teammate ? option('teammate_keepalive_limit') : 'same';
       const cacheEnv = {
         DISABLE_PROMPT_CACHING: await $.env.get('DISABLE_PROMPT_CACHING').catch(() => undefined),
         DISABLE_PROMPT_CACHING_HAIKU: await $.env.get('DISABLE_PROMPT_CACHING_HAIKU').catch(() => undefined),
@@ -117,8 +118,9 @@ export function register(on: On, options: PluginOptions) {
         ttl: teammate
           ? { main: ttlOption(option('teammate_cache_ttl')), subagent: ttlOption(option('subagent_cache_ttl')), teammate: ttlOption(option('teammate_cache_ttl')) }
           : { main: ttlOption(option('cache_ttl')), subagent: ttlOption(option('subagent_cache_ttl')), teammate: ttlOption(option('teammate_cache_ttl')) },
-        upkeep: teammate ? upkeepMode(option('teammate_cache_upkeep')) : undefined,
-        limit: keepaliveLimit(option('keepalive_limit')),
+        upkeep: upkeepMode(option(teammate ? 'teammate_cache_upkeep' : 'cache_upkeep')),
+        limit: keepaliveLimit(String(ownLimit).trim().toLowerCase() === 'same' ? option('keepalive_limit') : ownLimit),
+        compactAt: compactThreshold(option('compact_threshold')),
       });
       if (e.isInteractive && e.surface === 'terminal') {
         await cachePanel.introduce();

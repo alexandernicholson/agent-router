@@ -10,14 +10,9 @@ export type SettingsHost = {
 };
 
 export const SETTINGS_PANE = 'keepalive-settings';
-const FIELDS: Record<string, { field: string; kind: ConfigRow['kind']; label: string }> = {
-  'cache-ttl': { field: 'cache_ttl', kind: 'choice', label: 'Main conversation TTL' },
-  'subagent-ttl': { field: 'subagent_cache_ttl', kind: 'choice', label: 'Subagent TTL' },
-  'teammate-ttl': { field: 'teammate_cache_ttl', kind: 'choice', label: 'Teammate TTL' },
-  'teammate-upkeep': { field: 'teammate_cache_upkeep', kind: 'choice', label: 'Teammate upkeep' },
-  'keepalive-limit': { field: 'keepalive_limit', kind: 'text', label: 'Keepalive limit' },
-};
 const LIMITS = ['default', 'infinite', '1', '2', '3', '4', '6', '8', '12', '16', '24'];
+const THRESHOLDS = ['25k', '50k', '100k', '150k', '200k', '300k', '500k'];
+const UNITS: Record<string, number> = { '': 1, k: 1000, m: 1000000 };
 const message = (error: unknown) => (error as Error).message;
 
 export const limitValue = (value: string) => {
@@ -25,7 +20,36 @@ export const limitValue = (value: string) => {
   if (text === 'default' || text === 'infinite') return text;
   return /^[1-9]\d*$/.test(text) && Number.isSafeInteger(Number(text)) ? String(Number(text)) : undefined;
 };
-const limitLabel = (value: string) => value === 'default' ? 'Default (priced)' : value === 'infinite' ? 'Infinite' : value;
+export const thresholdValue = (value: string) => {
+  const match = /^([1-9]\d*)([km]?)$/.exec(value.trim().toLowerCase());
+  const tokens = match ? Number(match[1]) * UNITS[match[2]] : NaN;
+  if (!Number.isSafeInteger(tokens)) return undefined;
+  return tokens % 1000 ? String(tokens) : `${tokens / 1000}k`;
+};
+const limitLabel = (value: string) => value === 'same' ? 'Same as keepalive limit' : value === 'default' ? 'Default (priced)' : value === 'infinite' ? 'Infinite' : value;
+const thresholdLabel = (value: string) => value === '100k' ? '100k (default)' : value;
+
+type Typed = { parse: (value: string) => string | undefined; hint: string; placeholder: string };
+const ttlSaved = () => 'Saved the prompt cache TTL. Conversations that start from now on use it; each one\'s TTL button can change it.';
+const FIELDS: Record<string, { field: string; kind: ConfigRow['kind']; label: string; saved: (value: string) => string; typed?: Typed }> = {
+  'cache-ttl': { field: 'cache_ttl', kind: 'choice', label: 'Main conversation TTL', saved: ttlSaved },
+  'subagent-ttl': { field: 'subagent_cache_ttl', kind: 'choice', label: 'Subagent TTL', saved: ttlSaved },
+  'teammate-ttl': { field: 'teammate_cache_ttl', kind: 'choice', label: 'Teammate TTL', saved: ttlSaved },
+  'cache-upkeep': { field: 'cache_upkeep', kind: 'choice', label: 'Main conversation upkeep',
+    saved: value => `Saved main conversation upkeep. Sessions started from now on begin in ${value}; this one's mode button changes it here.` },
+  'teammate-upkeep': { field: 'teammate_cache_upkeep', kind: 'choice', label: 'Teammate upkeep',
+    saved: value => `Saved teammate upkeep. Split-pane teammates started from now on begin in ${value}.` },
+  'keepalive-limit': { field: 'keepalive_limit', kind: 'text', label: 'Keepalive limit',
+    saved: () => 'Saved the keepalive limit. It applies to warm and warmcomp after each request from now on.',
+    typed: { parse: limitValue, hint: 'Enter default, infinite, or a whole number of keepalives from 1.', placeholder: 'Any whole number, then Enter' } },
+  'teammate-limit': { field: 'teammate_keepalive_limit', kind: 'text', label: 'Teammate keepalive limit',
+    saved: () => 'Saved the teammate keepalive limit. Split-pane teammates started from now on use it.',
+    typed: { parse: value => value.trim().toLowerCase() === 'same' ? 'same' : limitValue(value),
+      hint: 'Enter same, default, infinite, or a whole number of keepalives from 1.', placeholder: 'Any whole number, then Enter' } },
+  'compact-threshold': { field: 'compact_threshold', kind: 'text', label: 'Compaction threshold',
+    saved: value => `Saved the compaction threshold. compact and warmcomp compact conversations of ${value} tokens or more from now on.`,
+    typed: { parse: thresholdValue, hint: 'Enter a number of tokens, such as 80k or 80000.', placeholder: 'Tokens, such as 80k, then Enter' } },
+};
 
 function ownedRow(rows: ConfigRow[], plugin: string, key: string): ConfigRow {
   const { field, kind } = FIELDS[key];
@@ -76,14 +100,13 @@ export function createSettingsPane() {
       if (!open) return;
       const row = ownedRow(rows, host.plugin.name, key);
       if (row.isLocked) throw new Error(`Your administrator manages this setting. Ask them to update the ${FIELDS[key].label.toLowerCase()}.`);
-      if (key === 'keepalive-limit' ? limitValue(value) !== value : !row.options!.includes(value)) return;
+      const { typed } = FIELDS[key];
+      if (typed ? typed.parse(value) !== value : !row.options!.includes(value)) return;
       const result = await host.config.set({ key: row.key, value });
       if (result.deny !== undefined) throw new Error(result.deny);
       if (result.value !== value) throw new Error('The config writer returned a different value. Open /config to inspect the saved setting.');
       rows = rows.map(item => item.key === row.key ? { ...item, value } : item);
-      notice = key === 'keepalive-limit' ? 'Saved the keepalive limit. It applies to warm and warmcomp after each request from now on.'
-        : key === 'teammate-upkeep' ? `Saved teammate upkeep. Split-pane teammates started from now on begin in ${value}.`
-        : 'Saved the prompt cache TTL. Conversations that start from now on use it; each one\'s TTL button can change it.';
+      notice = FIELDS[key].saved(value);
     } catch (cause) {
       error = message(cause);
     } finally {
@@ -116,13 +139,18 @@ export function createSettingsPane() {
         onSelect={(next: string) => { void save(host, key, next); }} />;
     };
     const ttl = (fallback: string) => (value: string) => value === 'default' ? `Default (${fallback})` : value;
-    const custom = (text: string) => {
-      const value = limitValue(text);
-      if (!value) { error = 'Enter default, infinite, or a whole number of keepalives from 1.'; notice = ''; redraw(host); return; }
-      void save(host, 'keepalive-limit', value);
+    const custom = (key: string, typed: Typed) => (text: string) => {
+      const value = typed.parse(text);
+      if (!value) { error = typed.hint; notice = ''; redraw(host); return; }
+      void save(host, key, value);
     };
-    let limitRow: ConfigRow | undefined;
-    try { limitRow = ownedRow(rows, host.plugin.name, 'keepalive-limit'); } catch {}
+    const other = (key: string) => {
+      const typed = FIELDS[key].typed!;
+      let row: ConfigRow | undefined;
+      try { row = ownedRow(rows, host.plugin.name, key); } catch {}
+      return row && !row.isLocked && !saving
+        ? <Input key={`${key}-custom`} label="Other number" placeholder={typed.placeholder} value="" onSubmit={custom(key, typed)} /> : null;
+    };
     const body = ({ main, subagent }: { main: TtlDefault; subagent: TtlDefault }) => <Box flexDirection="column">
       <Text bold>Prompt cache TTL</Text>
       {choose('cache-ttl', ttl(main.ttl))}
@@ -130,12 +158,17 @@ export function createSettingsPane() {
       {choose('teammate-ttl', ttl(main.ttl === subagent.ttl ? main.ttl : `${main.ttl} split-pane, ${subagent.ttl} in-process`))}
       <Text dimColor>Default is what Claude Code uses with your current settings and sign-in. 1h survives longer breaks; each 1h cache write costs 2× instead of 1.25×.</Text>
       <Text bold>Upkeep</Text>
+      {choose('cache-upkeep', value => value)}
       {choose('teammate-upkeep', value => value)}
-      <Text dimColor>The mode split-pane teammates start in. In-process teammates and subagents can't be kept warm.</Text>
+      <Text dimColor>The mode each new session's main conversation and each split-pane teammate start in. In-process teammates and subagents can't be kept warm.</Text>
       {choose('keepalive-limit', limitLabel, LIMITS)}
-      {limitRow && !limitRow.isLocked && !saving
-        ? <Input key="keepalive-custom" label="Other number" placeholder="Any whole number, then Enter" value="" onSubmit={custom} /> : null}
-      <Text dimColor>How many keepalives warm and warmcomp send after each request; warmcomp then compacts. Default (priced) sends them while each costs less than rewriting the cache. Infinite never stops. A number sends exactly that many, whatever they cost. Each keepalive keeps an idle cache about 4½ minutes longer on a 5m TTL, or 59½ minutes on 1h.</Text>
+      {other('keepalive-limit')}
+      {choose('teammate-limit', limitLabel, ['same', ...LIMITS])}
+      {other('teammate-limit')}
+      <Text dimColor>How many keepalives warm and warmcomp send after each request; warmcomp then compacts. Default (priced) sends them while each costs less than rewriting the cache. Infinite never stops. A number sends exactly that many, whatever they cost. Each keepalive keeps an idle cache about 4½ minutes longer on a 5m TTL, or 59½ minutes on 1h. Split-pane teammates use the keepalive limit unless given their own.</Text>
+      {choose('compact-threshold', thresholdLabel, THRESHOLDS)}
+      {other('compact-threshold')}
+      <Text dimColor>The smallest conversation compact and warmcomp compact. A smaller one is left to expire, since rewriting its cache costs little.</Text>
     </Box>;
     return <Box flexDirection="column">
       <Text>Defaults each new conversation starts in. Each conversation's own TTL and mode buttons change it for that conversation only.</Text>
@@ -147,5 +180,5 @@ export function createSettingsPane() {
   };
 
   return { commandRun, uiRender, close: () => { open = false; },
-    register: (host: SettingsHost) => host.command.register({ name: SETTINGS_PANE, description: 'Choose the prompt cache TTLs, teammate upkeep and keepalive limit Keepalive starts each conversation with.' }) };
+    register: (host: SettingsHost) => host.command.register({ name: SETTINGS_PANE, description: 'Choose the prompt cache TTLs, upkeep modes, keepalive limits and compaction threshold Keepalive starts each conversation with.' }) };
 }

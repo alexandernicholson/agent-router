@@ -450,6 +450,29 @@ test('the upkeep button cycles off, warm, compact and warmcomp and keeps the cho
   expect(await mode($)).toBe('off');
 });
 
+test('each session\'s main conversation starts in the cache upkeep setting until its mode button changes it', { options: { cache_upkeep: 'compact' } }, async ($, on) => {
+  response(on, 150000);
+  const { world, clock } = await setup($, on);
+  expect(await mode($)).toBe('compact');
+  world.reported = { fiveMinute: 100, oneHour: 0 };
+  await step($);
+  await clock.advance(275000);
+  expect(world.compactions.length).toBe(1);
+  await upkeep($);
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true });
+  expect(await mode($)).toBe('warmcomp');
+  world.sessionId = 'another-session';
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true });
+  expect(await mode($)).toBe('compact');
+});
+
+test('a teammate upkeep saved under Agent Router that names no mode starts the teammate in off', async ($, on) => {
+  response(on);
+  await setup($, on, undefined, undefined, { teammate: { agentId: 'worker@team', agentName: 'worker', parentSessionId: 'lead-session' },
+    settings: { pluginConfigs: { 'agent-router@agent-router-tools': { options: { teammate_cache_upkeep: 'always' } } } } });
+  expect(await mode($)).toBe('off');
+});
+
 function button(node: RenderNode, key: string): { label?: string; plain?: boolean } | undefined {
   if (typeof node === 'string') return undefined;
   if (node.type === 'Button' && node.props.key === key) return node.props;
@@ -977,6 +1000,67 @@ test('an infinite keepalive limit warms until the next request, and warmcomp nev
   const contents = await dashboard($);
   expect(contents.includes('keepalives until your next request')).toBe(true);
   expect(contents.includes('so it never compacts')).toBe(true);
+});
+
+const worker = { agentId: 'worker@team', agentName: 'worker', parentSessionId: 'lead-session' };
+
+test('split-pane teammates warm up to their own keepalive limit, and the main conversation up to its own', { options: { keepalive_limit: '1', teammate_keepalive_limit: '2' } }, async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on, undefined, undefined, { teammate: worker });
+  world.reported = { fiveMinute: 100, oneHour: 0 };
+  await cycleTo($, 'warm');
+  await step($);
+  for (let i = 0; i < 6; i++) await clock.advance(270000);
+  expect(world.forks.length).toBe(2);
+  world.teammate = null;
+  world.sessionId = 'lead-session';
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true });
+  await cycleTo($, 'warm');
+  await step($, { index: 1 });
+  for (let i = 0; i < 6; i++) await clock.advance(270000);
+  expect(world.forks.length).toBe(3);
+});
+
+test('a teammate keepalive limit of same follows the keepalive limit', { options: { keepalive_limit: '1' } }, async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on, undefined, undefined, { teammate: worker });
+  world.reported = { fiveMinute: 100, oneHour: 0 };
+  await cycleTo($, 'warm');
+  await step($);
+  for (let i = 0; i < 6; i++) await clock.advance(270000);
+  expect(world.forks.length).toBe(1);
+});
+
+test('the compaction threshold sets the smallest conversation compact and warmcomp compact', { options: { compact_threshold: '40k' } }, async ($, on) => {
+  response(on, 45000);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 100, oneHour: 0 };
+  await cycleTo($, 'compact');
+  await step($);
+  expect((await dashboard($)).includes('compacts an idle main conversation of 40k+ tokens')).toBe(true);
+  await clock.advance(275000);
+  expect(world.compactions).toEqual(['default']);
+});
+
+test('a compaction threshold that is not a number of tokens keeps 100k', { options: { compact_threshold: 'big' } }, async ($, on) => {
+  response(on, 45000);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 100, oneHour: 0 };
+  await cycleTo($, 'compact');
+  await step($);
+  expect((await dashboard($)).includes('compacts an idle main conversation of 100k+ tokens')).toBe(true);
+  await clock.advance(275000);
+  expect(world.compactions.length).toBe(0);
+});
+
+test('a running session keeps the upkeep it started in when the setting changes, off included', async ($, on) => {
+  response(on);
+  const options: Record<string, string> = { teammate_cache_upkeep: 'off' };
+  await setup($, on, undefined, undefined, { teammate: worker, settings: { pluginConfigs: { 'agent-router@agent-router-tools': { options } } } });
+  expect(await mode($)).toBe('off');
+  options.teammate_cache_upkeep = 'compact';
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true });
+  expect(await mode($)).toBe('off');
 });
 
 test('a number of keepalives needs no price, so an unpriced model is warmed too', { options: { keepalive_limit: '2' } }, async ($, on) => {
