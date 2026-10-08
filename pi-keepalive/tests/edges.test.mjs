@@ -78,7 +78,7 @@ test("invalid samples are ignored; a lookup in flight is reused", async (t) => {
 });
 
 test("an unpriced model logs once and keepalives stay off; price present but zero-cost rows say nothing", async (t) => {
-  const { panel, state } = await started(t, { set: { upkeep: "warm" } });
+  const { panel, state } = await started(t, { set: { upkeep: "warm", unreported_ttl: "5m" } });
   const odd = source({ model: "mystery-alias" });
   await realRequest(panel, state, { ...odd, api: "anthropic-messages" }, { write: 5000 });
   state.now += 271_000;

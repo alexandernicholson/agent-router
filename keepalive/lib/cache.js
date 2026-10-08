@@ -183,24 +183,105 @@ export const POLICY_TICK_MS = 5000;
 /** A row the gateway's policy governs: it has a cached prefix but Anthropic never reported its cache lifetimes. */
 export const policyRow = row => !!row?.last && !row.creation && !row.last.cacheCreation && row.last.read + row.last.write > 0;
 
+export const KEEPALIVE_SOURCES = ['native', 'learned', 'documented', 'default', 'client'];
+/** The keepalive request text; src says which lifetime the keepalive was timed by. */
+export const keepalivePrompt = (version, source) => `<keepalive v="${version}" src="${source}"/> Reply with only: K`;
+
+export const SOURCE_ICONS = { native: '◉', learned: '✦', documented: '▣', default: '◇', client: '✎', none: '⊘', unknown: '◌' };
+export const SOURCE_NAMES = { native: 'reported by the provider', learned: 'learned by the gateway', documented: 'documented by the provider',
+  default: 'gateway default', client: 'your TTL setting', none: 'no cache', unknown: 'unknown' };
+export const FALLBACK_TTLS = { '5m': 300000, '15m': 900000, '30m': 1800000, '45m': 2700000, '1h': 3600000 };
+/** @param {unknown} value @returns {'off' | keyof typeof FALLBACK_TTLS | undefined} */
+export const fallbackTtl = value => value === 'off' || typeof value === 'string' && Object.hasOwn(FALLBACK_TTLS, value) ? value : undefined;
+
+const globRegex = pattern => new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`, 'i');
+/** "kimi*=15m, glm-5.3=off" → [['kimi*', '15m'], ['glm-5.3', 'off']]; anything malformed is skipped. */
+export function parseTtlOverrides(text) {
+  return String(text ?? '').split(/[,\n]/).map(part => part.split('=').map(item => item.trim()))
+    .filter(([pattern, ttl, extra]) => pattern && pattern.length <= 200 && extra === undefined && fallbackTtl(ttl?.toLowerCase())).map(([pattern, ttl]) => [pattern, ttl.toLowerCase()]);
+}
+/** The client TTL in ms for a model with no reported or served lifetime: the first matching override, else the global choice. Never for Claude. */
+export function clientTtl(model, global, overrides = []) {
+  if (/claude/i.test(model)) return null;
+  const choice = overrides.find(([pattern]) => globRegex(pattern).test(model))?.[1] ?? global ?? 'off';
+  return choice === 'off' ? null : FALLBACK_TTLS[choice];
+}
+
 /**
- * What a gateway policy row says to do for a row it governs. With refreshOnRead true the countdown anchors on the last confirmed
- * cache-touching request (the real one, or a keepalive that read the cache) and chains. Otherwise it anchors on the last real turn only
+ * The lifetime that governs a row: native (reported) → the server's row by source → the client TTL → unknown.
+ * `policy` is set only when it can be acted on; it feeds policyAction.
+ * @param {CacheRow | undefined} row
+ * @param {{status: string, safe: number | null, maxIdle: number | null, refreshOnRead?: boolean | null, source?: string | null, pResume?: number | null, reason?: string | null} | undefined} server
+ * @param {number | null} client ms
+ * @returns {{source: string, policy?: {status: 'enabled', safe: number, maxIdle: number | null, refreshOnRead: boolean | null, pResume: number | null},
+ *   shownS?: number, once?: boolean, controlled?: boolean, status?: string, reason?: string | null}}
+ */
+export function lifetimeOf(row, server, client) {
+  if (!policyRow(row)) return { source: row?.creation || row?.last?.cacheCreation ? 'native' : 'unknown' };
+  if (server?.status === 'no_cache') return { source: 'none' };
+  if (server?.status === 'demoted') return { source: 'unknown', status: 'demoted', reason: server.reason };
+  if (server?.status === 'enabled' && server.safe) {
+    return { source: server.source ?? 'learned', controlled: true, once: server.refreshOnRead !== true, shownS: server.safe,
+      policy: { status: 'enabled', safe: server.safe, maxIdle: server.maxIdle, refreshOnRead: server.refreshOnRead ?? null, pResume: server.pResume ?? null } };
+  }
+  if (client && (!server || server.status === 'shadow' || server.status === 'insufficient_data')) {
+    const margin = Math.max(10000, client / 10);
+    return { source: 'client', shownS: client / 1000, policy: { status: 'enabled', safe: (client - margin) / 1000, maxIdle: null, refreshOnRead: null, pResume: null, anchorOnStart: true } };
+  }
+  return { source: 'unknown', ...(server ? { status: server.status, reason: server.reason } : {}) };
+}
+
+const span = seconds => {
+  if (seconds >= 3600 && seconds % 3600 === 0) return `${seconds / 3600}h`;
+  const [minutes, rest] = [Math.floor(seconds / 60), Math.round(seconds % 60)];
+  return minutes ? `${minutes}m${rest ? ` ${rest}s` : ''}` : `${rest}s`;
+};
+/** The bar text for a lifetime, such as "◇ 5m · once" or "⊘ no cache"; undefined for native rows. */
+export function lifetimeLabel(life, state = '') {
+  if (life.source === 'native') return state || undefined;
+  const icon = SOURCE_ICONS[life.source];
+  if (life.source === 'none') return `${icon} no cache`;
+  if (life.shownS) return `${icon} ${span(life.shownS)}${life.once ? ' · once' : ''}`;
+  const why = life.status === 'demoted' ? `demoted${life.reason ? ` · ${life.reason}` : ''}`
+    : life.status === 'monitor' ? `monitor${life.reason ? ` (${life.reason})` : ''}` : life.status?.replace('_', ' ');
+  return `${icon} ${why ?? state}`.trimEnd();
+}
+
+/** Whether a keepalive pays for itself: the chance the user resumes times what a hit saves must beat what the keepalive costs. */
+export function savingsWorthwhile(pResume, prices) {
+  return validPrices(prices) && pResume * (Math.max(1, prices.fiveMinute ?? 1) - prices.read) > prices.read;
+}
+
+/**
+ * What a lifetime says to do for a row it governs. With refreshOnRead true the countdown anchors on the last confirmed
+ * cache-touching request (the real one, or a keepalive that read the cache) and chains. Otherwise it anchors on the last real turn (null) or on the latest write (false, a fixed window)
  * and fires one keepalive per idle period. Either way it ends at anchor + safe: fire in the last tick before that, never after.
  * @param {CacheRow} row
- * @param {{status: string, safe: number | null, maxIdle: number | null, refreshOnRead?: boolean | null} | undefined} policy
+ * @param {{status: string, safe: number | null, maxIdle: number | null, refreshOnRead?: boolean | null, anchorOnStart?: boolean} | undefined} policy
  * @param {number} now
  * @returns {{action: 'monitor' | 'wait' | 'fire' | 'missed' | 'idle' | 'sent', dueAt?: number}}
  */
 export function policyAction(row, policy, now) {
-  if (!policyRow(row) || !policy || policy.status !== 'enabled' || !policy.safe || policy.refreshOnRead === false) return { action: 'monitor' };
-  const at = s => s.completedAt ?? s.startedAt;
-  const same = row.keepalives.filter(s => sameModel(s.model, row.last.model) && s.startedAt >= row.last.startedAt);
+  if (!policyRow(row) || !policy || policy.status !== 'enabled' || !policy.safe) return { action: 'monitor' };
+  // The provider's cache clock may restart at prefill, so a client-set TTL counts from the start of the request; a server's margin already covers latency.
+  const at = s => policy.anchorOnStart ? s.startedAt : s.completedAt ?? s.startedAt;
+  const sameKeepalives = row.keepalives.filter(s => sameModel(s.model, row.last.model) && s.startedAt >= row.last.startedAt);
   const chained = policy.refreshOnRead === true;
-  const anchor = Math.max(at(row.last), ...(chained ? same.filter(s => s.read > 0).map(at) : []));
-  const dueAt = anchor + policy.safe * 1000;
+  const fixed = policy.refreshOnRead === false;
+  const safeMs = policy.safe * 1000;
+  let anchor;
+  if (fixed) {
+    // A fixed window runs from the write that established the prefix: the latest sample that wrote at least half of the current prefix.
+    const writes = row.samples.filter(s => sameModel(s.model, row.last.model) && !isCompaction(s) && s.write > 0 && s.write * 2 >= row.last.read + row.last.write);
+    if (!writes.length) return { action: 'monitor' };
+    anchor = Math.max(...writes.map(at));
+  } else anchor = Math.max(at(row.last), ...(chained ? sameKeepalives.filter(s => s.read > 0).map(at) : []));
+  const dueAt = anchor + safeMs;
   if (policy.maxIdle && now - at(row.last) >= policy.maxIdle * 1000) return { action: 'idle', dueAt };
-  if (!chained && same.length) return { action: 'sent', dueAt };
+  const sent = fixed ? sameKeepalives.filter(s => at(s) > anchor) : sameKeepalives;
+  if (!chained && sent.length) {
+    return { action: 'sent', dueAt };
+  }
   if (now > dueAt) return { action: 'missed', dueAt };
   return { action: now >= dueAt - POLICY_TICK_MS ? 'fire' : 'wait', dueAt };
 }

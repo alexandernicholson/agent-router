@@ -11,6 +11,7 @@ test("version matches package.json and the gateway prompt contract", () => {
   assert.equal(VERSION, JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version);
   assert.equal(KEEPALIVE_PROMPT_TEMPLATE, '<keepalive v="{version}"/> Reply with only: K');
   assert.equal(keepalivePrompt("1.2.3"), '<keepalive v="1.2.3"/> Reply with only: K');
+  assert.equal(keepalivePrompt("1.2.3", "learned"), '<keepalive v="1.2.3" src="learned"/> Reply with only: K');
   assert.match(keepalivePrompt(), /^<keepalive v="[0-9A-Za-z.+-]{1,32}"\/>/);
 });
 

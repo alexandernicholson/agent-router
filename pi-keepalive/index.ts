@@ -3,6 +3,7 @@
 import { createPanel, type CompactResult, type ForkResult, type PanelHost, type Source } from "./lib/panel.ts";
 import { REQUEST_FILTERS, dashboard, painter, statusLine, type RequestFilter } from "./lib/render.ts";
 import { replayApi, type Tokens } from "./lib/replay.ts";
+import { fallbackTtl } from "./lib/core/cache.js";
 import { SETTING_ROWS, keepaliveLimit, mergeSettings, resolveSettings, type Settings, UPKEEP, type Upkeep } from "./lib/settings.ts";
 import { createStore, dataRoot, readJson, writeJson, trace } from "./lib/storage.ts";
 import { VERSION } from "./lib/version.ts";
@@ -164,7 +165,7 @@ export default function keepaliveExtension(pi: any): void {
     description: "Prompt cache keepalive: status | dashboard | requests | upkeep | ttl | settings | on | off",
     handler: async (args: string, ctx: any) => {
       ctxRef = ctx;
-      const [cmd = "", a = "", b = ""] = first(String(args));
+      const [cmd = "", a = ""] = first(String(args));
       const c = panel.get();
       const say = (text: string) => safe(() => ui()?.notify?.(text, "info"));
       if (cmd === "off" || cmd === "on") {
@@ -185,9 +186,12 @@ export default function keepaliveExtension(pi: any): void {
         say(`Keepalive TTL: ${panel.wantedTtl(panel.get()!)}`);
       } else if (cmd === "set") {
         const key = SETTING_ROWS.find(([k]) => k === a)?.[0];
-        say(key ? await setting(key, b) : `Unknown setting. Known: ${SETTING_ROWS.map(([k]) => k).join(", ")}`);
+        const value = String(args).trim().split(/\s+/).slice(2).join(" ");
+        say(!key ? `Unknown setting. Known: ${SETTING_ROWS.map(([k]) => k).join(", ")}`
+          : key === "unreported_ttl" && fallbackTtl(value.toLowerCase()) === undefined ? "unreported_ttl takes off, 5m, 15m, 30m, 45m or 1h."
+          : await setting(key, value));
       } else if (cmd === "settings") {
-        const chosen = await ui()?.select?.("Keepalive settings", SETTING_ROWS.map(([, title]) => title));
+        const chosen = await ui()?.select?.("Keepalive settings", SETTING_ROWS.filter(([, , choices]) => choices.length).map(([, title]) => title));
         const row = SETTING_ROWS.find(([, title]) => title === chosen);
         if (row) {
           const value = await ui()?.select?.(row[1], row[2]);

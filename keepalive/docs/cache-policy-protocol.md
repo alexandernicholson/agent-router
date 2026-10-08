@@ -63,7 +63,10 @@ GET {base_url}/v1/cache/policy?alias=<model>&session=<id>
 | Field | Type | Used by client | Meaning |
 |---|---|---|---|
 | `rows` | array | yes | One row per cache the alias can land in, per prefix bucket. |
-| `status` | string, required | yes | `enabled`, `shadow`, `insufficient_data`, `fixed_window`, `demoted` or `native`. Any other value drops the row. |
+| `status` | string, required | yes | `enabled`, `insufficient_data`, `fixed_window`, `demoted`, `monitor`, `no_cache`, `native`, or the deprecated `shadow` (clients treat it like `insufficient_data`: no opinion). Any other value drops the row. |
+| `source` | `learned`, `documented` or `default` | yes | Where the lifetime comes from (see §4). Anything else counts as `learned`. |
+| `p_resume` | number 0–1 | yes | Optional hint: the chance the user resumes within the next window. Used to decide whether a keepalive pays for itself. |
+| `reason` | string ≤ 200 | shown | Why a row is `demoted`; shown next to it. |
 | `safe_refresh_s` | integer seconds, 1–604800, or `null` | yes | See §4. |
 | `max_idle_s` | integer seconds, 1–604800, or `null` | yes | Stop warming after this much real idle time. `null` = no server limit. |
 | `prefix_bucket` | integer, or omitted (= 0) | yes | `floor(log2(prefix tokens))` this row applies to. |
@@ -78,8 +81,9 @@ A row with an invalid `status`, a non-integer or out-of-range `safe_refresh_s` /
 ## 4. What the server must guarantee
 
 - **`safe_refresh_s`**: the longest time after the end of the last cache-touching request at which a refresh still hits the cache with high probability. The server applies its own safety margin (include request latency). The client fires within 5 s before `anchor + safe_refresh_s`, never after, and does not catch up a missed window, so a value that is too large costs a miss while a smaller one only costs a few extra reads.
-- **Only `enabled` warms.** `shadow`, `insufficient_data`, `demoted`, `fixed_window` and `native` are shown and never acted on. When unsure, return one of those. Never guess.
-- **`refresh_on_read`** (`true`, `false` or `null`/absent): whether a cache read extends the lifetime. `null` means not yet known: the client fires **one** keepalive per idle period, timed from the end of the last *real* request (keepalives never move the anchor), and never chains; this is safe whatever the provider does. `true` lets the client chain: each keepalive that reports `cache_read_input_tokens > 0` becomes the new anchor. `false` (a fixed window from first write) must not be published as `enabled`, use `fixed_window`; a client treats `enabled` with `false` as monitor-only. Learn it from what happens on the next real request after a single keepalive.
+- **Only `enabled` warms or compacts.** A served `enabled` row is authoritative: it overrides any lifetime the user configured on the client ("server controlled"). `insufficient_data` means "no opinion" (the deprecated `shadow` is treated the same): the client falls through to the user's own TTL setting, if any, else monitors only. `demoted`, `fixed_window` and `monitor` are monitor-only and never overridden by a user TTL (`reason` is shown, e.g. `◌ monitor (ttl_too_short)`). Use `monitor` when you know the lifetime but warming must not happen (lifetime shorter than a safe refresh, live load). The user's own TTL applies only when there is no row at all: no endpoint, a `404`, or an empty `rows`. While a refresh is pending or failing the client keeps using your last rows for up to an hour, then monitors. `no_cache` means the model has no cache: never warmed or compacted, shown as "no cache". When unsure, return `insufficient_data`. Never guess.
+- **`source`**: tells the user how much to trust the number: `learned` (measured from traffic), `documented` (the provider's published lifetime) or `default` (an administrator's fallback, typically 300 s). The client shows it as an icon (✦ learned, ▣ documented, ◇ default) and passes it back in the keepalive marker.
+- **`refresh_on_read`** (`true`, `false` or `null`/absent): whether a cache read extends the lifetime. `null` means not yet known: the client fires **one** keepalive per idle period, timed from the end of the last *real* request (keepalives never move the anchor), and never chains; this is safe whatever the provider does. `true` lets the client chain: each keepalive that reports `cache_read_input_tokens > 0` becomes the new anchor. `false` (a fixed window from the write): the window is counted from the latest request that mostly wrote the prefix (write ≥ half its cached+written tokens), not from later reads; with no such request the client only monitors. The client sends at most one keepalive inside the window and never chains. Use `fixed_window` instead when a keepalive cannot help at all. Learn it from what happens on the next real request after a single keepalive.
 - **`max_idle_s`**: the point after which warming costs more than it saves, as measured by when users usually return. The client counts it from the last real request.
 - **`prefix_bucket`**: the client picks the highest bucket not above `floor(log2(cached prefix tokens))`; with a tie it takes the more cautious row (not `enabled`, then the smaller `safe_refresh_s`). Publish one bucket (0) if lifetime does not depend on size.
 - **Sessions**: if an alias can be served by several caches, return the row for the cache this `session` last hit (`resolution: "session"`). With no session information return the most conservative row (`min`: the smallest `safe_refresh_s`) rather than the best.
@@ -95,13 +99,23 @@ The client confirms every keepalive from the response's Anthropic Messages `usag
 
 ## 6. Recognising a keepalive
 
-The last user message begins with `<keepalive v="X.Y.Z"/> Reply with only: K` (`X.Y.Z` is the plugin version). Match it with:
+The last user message begins with `<keepalive v="X.Y.Z" src="SOURCE"/> Reply with only: K` (`X.Y.Z` is the plugin version; `SOURCE` is the lifetime that timed it: `native`, `learned`, `documented`, `default` or `client`). Older plugins omit `src`. Match it with:
 
 ```
-<keepalive v="(?P<version>[0-9A-Za-z.+-]{1,32})"/>
+<keepalive v="(?P<version>[0-9A-Za-z.+-]{1,32})"(?: src="(?P<src>native|learned|documented|default|client)")?/>
 ```
 
 A server may use it to classify, bill (it is mostly cache-read tokens), or count adoption. It must be routed to the same backend, replica or slot as the session's real requests, or it will not hit the cache: keep session affinity for keepalives exactly as for normal requests.
+
+### Price feed (optional)
+
+`GET {base}/v1/cache/prices`, same origin and authentication as the policy, under 64 KB, cached 1 h by the client, `404` = none:
+
+```json
+{"version": 1, "models": {"kimi-k3": {"input": 1.0, "read": 0.1, "write": 1.25, "output": 5.0}}}
+```
+
+Values are per-token prices in any consistent unit (relative multipliers are fine; dollars work too). The client uses only their ratios to decide whether a keepalive is cheaper than rewriting the cache. Users can point the client at their own feed instead.
 
 ## 7. Implementing it
 
@@ -130,7 +144,7 @@ def policy(alias, session):
 1. Label consecutive requests of the same session and backend: the idle gap `g` since the last request that touched the cache, and whether the next request read at least 90% of the previous cached prefix (hit = alive at `g`). Drop pairs where the prompt shrank sharply (compaction) or the backend changed.
 2. Per backend × model (and prefix size), estimate P(alive | gap) with a monotone classifier, or an empirical hit rate by gap bin with a Wilson lower bound. Add time of day if load matters.
 3. Set `safe_refresh_s` to the largest gap whose lower bound reaches your target (e.g. 99%), minus a margin, within the gap range you actually observed.
-4. Gate: publish `enabled` only after a forward holdout (data newer than the training set) meets the target with enough independent sessions; otherwise `shadow` or `insufficient_data`.
+4. Gate: publish `enabled` only after a forward holdout (data newer than the training set) meets the target with enough independent sessions; otherwise `insufficient_data`.
 5. Demote on a burst of keepalive misses. Derive `max_idle_s` from when sessions typically resume.
 
 Because clients never refresh later than published, you only learn longer lifetimes from sessions without keepalives, so keep gaps beyond `safe_refresh_s` observable.

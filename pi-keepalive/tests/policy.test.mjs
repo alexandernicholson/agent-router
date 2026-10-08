@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createPanel } from "../lib/panel.ts";
+import { dashboard, painter, statusLine } from "../lib/render.ts";
 import { fakeHost, realRequest, settings, source } from "./helpers.mjs";
 
 const gw = (extra = {}) => source({ model: "kimi-k3", api: "openai-completions", baseUrl: "https://gateway.example.com/ai/openai/v1", payload: { messages: [], model: "kimi-k3" }, ...extra });
@@ -59,7 +60,7 @@ test("stops after the maximum idle time and at the keepalive limit", async (t) =
   await tick(limited.panel, limited.state, 478_000);
   await tick(limited.panel, limited.state, 478_000);
   assert.equal(limited.state.forks.length, 1);
-  assert.match(limited.state.logs.at(-1)[0], /stopped at its limit/);
+  assert.match(limited.state.logs.at(-1)[0], /not worth its cost or limit/);
 });
 
 test("other statuses only show; nothing is sent", async (t) => {
@@ -71,12 +72,59 @@ test("other statuses only show; nothing is sent", async (t) => {
   }
 });
 
-test("warmcomp and compact ignore policy rows for compaction; compact mode sends nothing", async (t) => {
+test("compact mode compacts a large conversation on a served lifetime and sends no keepalive", async (t) => {
   const { panel, state } = await gateway(t, { set: { upkeep: "compact", compact_threshold: "1k" } });
   await tick(panel, state, 100);
   await tick(panel, state, 478_000);
-  assert.equal(state.compactions, 0);
+  assert.equal(state.compactions, 1);
   assert.equal(state.forks.length, 0);
+});
+
+test("warmcomp compacts when the keepalive is not worth it", async (t) => {
+  const { panel, state } = await gateway(t, { set: { upkeep: "warmcomp", compact_threshold: "1k", keepalive_limit: "1" } });
+  await tick(panel, state, 100);
+  await tick(panel, state, 478_000);
+  await tick(panel, state, 478_000);
+  assert.equal(state.forks.length, 1);
+  assert.equal(state.compactions, 1);
+});
+
+test("a served p_resume decides by the savings rule", async (t) => {
+  const priced = (p) => ({ status: 200, text: JSON.stringify({ rows: [{ alias: "kimi-k3", status: "enabled", refresh_on_read: true, safe_refresh_s: 480, max_idle_s: 1500, prefix_bucket: 0, p_resume: p }] }) });
+  for (const [p, sent] of [[0.9, 1], [0.01, 0]]) {
+    const { panel, state } = await gateway(t, { policy: priced(p), set: { keepalive_limit: "default" } });
+    panel.get().prices.set("kimi-k3", { at: Infinity, value: { read: 0.1, write: 1.25, fiveMinute: 1.25, output: 5 }, settled: true });
+    await tick(panel, state, 100);
+    await tick(panel, state, 478_000);
+    assert.equal(state.forks.length, sent, `p_resume ${p}`);
+  }
+});
+
+test("the client TTL times keepalives for a model with no served lifetime, tagged src=client", async (t) => {
+  for (const [set, expected] of [[{ unreported_ttl: "5m" }, 1], [{ unreported_ttl: "off" }, 0], [{ unreported_ttl: "off", unreported_ttl_models: "kimi*=5m" }, 1], [{ unreported_ttl: "5m", unreported_ttl_models: "kimi*=off" }, 0]]) {
+    const { panel, state } = await gateway(t, { policy: { status: 404, text: "" }, set });
+    await tick(panel, state, 100);
+    await tick(panel, state, 266_000);
+    assert.equal(state.forks.length, expected, JSON.stringify(set));
+    if (expected) assert.match(state.forks[0].payload.messages.at(-1).content, /^<keepalive v="0\.3\.0" src="client"\/>/);
+    assert.equal(panel.managed(), expected === 1);
+    if (expected) assert.equal(panel.lifetime(panel.get(), panel.mainRow(panel.get())).source, "client");
+  }
+});
+
+test("the dashboard shows the lifetime line and the icon legend", async (t) => {
+  const { panel, state } = await gateway(t, { policy: rows({ refresh_on_read: true, source: "learned" }) });
+  await tick(panel, state, 100);
+  const text = dashboard(panel, panel.get(), painter({ NO_COLOR: "1" }, false), "all").join("\n");
+  assert.match(text, /✦ 8m · learned by the gateway via phala · server controlled/);
+  assert.match(text, /Lifetime icons: ◉/);
+});
+
+test("the price feed is asked for with the session's credentials on a gateway base", async (t) => {
+  const { panel, state } = await gateway(t, { set: { keepalive_limit: "default" } });
+  await tick(panel, state, 100);
+  await tick(panel, state, 478_000);
+  assert.ok(state.fetches.some((f) => /\/v1\/cache\/policy/.test(f.url)));
 });
 
 test("the endpoint missing (404) falls back to native: claude warms natively, others only show", async (t) => {
@@ -135,9 +183,53 @@ test("single-shot: without refresh_on_read one keepalive fires, then nothing is 
   }
 });
 
-test("refresh_on_read false never warms", async (t) => {
+test("refresh_on_read false fires one keepalive inside the fixed window, then no more", async (t) => {
   const { panel, state } = await gateway(t, { policy: rows({ refresh_on_read: false }) });
   await tick(panel, state, 100);
   await tick(panel, state, 478_000);
+  assert.equal(state.forks.length, 1);
+  await tick(panel, state, 478_000);
+  assert.equal(state.forks.length, 1);
+});
+
+test("warmcomp compacts instead of a single keepalive over the threshold; below it sends one; chained still warms", async (t) => {
+  for (const [name, policy, set] of [["false", rows({ refresh_on_read: false }), {}], ["null", rows({ refresh_on_read: null }), {}],
+    ["client", { status: 404, text: "" }, { unreported_ttl: "5m" }]]) {
+    const wait = name === "client" ? 266_000 : 478_000;
+    const over = await gateway(t, { policy, set: { upkeep: "warmcomp", compact_threshold: "1k", ...set } });
+    await tick(over.panel, over.state, 100);
+    await tick(over.panel, over.state, wait);
+    assert.equal(over.state.compactions, 1, `${name}: compacts`);
+    assert.equal(over.state.forks.length, 0, `${name}: no keepalive`);
+    const under = await gateway(t, { policy, set: { upkeep: "warmcomp", compact_threshold: "1m", ...set } });
+    await tick(under.panel, under.state, 100);
+    await tick(under.panel, under.state, wait);
+    assert.equal(under.state.forks.length, 1, `${name}: one keepalive`);
+    assert.equal(under.state.compactions, 0);
+  }
+  const chained = await gateway(t, { set: { upkeep: "warmcomp", compact_threshold: "1k" } });
+  await tick(chained.panel, chained.state, 100);
+  await tick(chained.panel, chained.state, 478_000);
+  assert.equal(chained.state.forks.length, 1);
+  assert.equal(chained.state.compactions, 0);
+});
+
+test("an unknown or stale answer is not an opinion: no client TTL; a real 404 is", async (t) => {
+  const bad = await gateway(t, { policy: { status: 500, text: "" }, set: { unreported_ttl: "5m" } });
+  await tick(bad.panel, bad.state, 100);
+  await tick(bad.panel, bad.state, 266_000);
+  assert.equal(bad.state.forks.length, 0, "answer unknown: monitor only");
+  assert.equal(bad.panel.lifetime(bad.panel.get(), bad.panel.mainRow(bad.panel.get())).source, "unknown");
+  assert.equal(bad.panel.policyOf(bad.panel.get(), bad.panel.mainRow(bad.panel.get())), undefined);
+  const none = await gateway(t, { policy: { status: 404, text: "" }, set: { unreported_ttl: "5m" } });
+  await tick(none.panel, none.state, 100);
+  assert.equal(none.panel.lifetime(none.panel.get(), none.panel.mainRow(none.panel.get())).source, "client");
+});
+
+test("a monitor row is shown as monitor with its reason and never warmed", async (t) => {
+  const { panel, state } = await gateway(t, { policy: rows({ status: "monitor", reason: "ttl_too_short" }), set: { unreported_ttl: "5m" } });
+  await tick(panel, state, 100);
+  await tick(panel, state, 478_000);
   assert.equal(state.forks.length, 0);
+  assert.match(statusLine(panel, panel.get(), painter({ NO_COLOR: "1" }, true)), /◌ monitor \(ttl_too_short\)/);
 });

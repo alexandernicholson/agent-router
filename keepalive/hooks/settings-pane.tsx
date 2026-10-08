@@ -1,5 +1,6 @@
 import type { Args, ConfigRow, EngineInterface } from 'claude-code';
 import type { TtlDefault } from '../lib/cache-ttl.js';
+import { parseTtlOverrides } from '../lib/cache.js';
 
 export type SettingsHost = {
   plugin: Pick<EngineInterface['plugin'], 'name'>;
@@ -27,9 +28,11 @@ export const thresholdValue = (value: string) => {
   return tokens % 1000 ? String(tokens) : `${tokens / 1000}k`;
 };
 const limitLabel = (value: string) => value === 'same' ? 'Same as keepalive limit' : value === 'default' ? 'Default (priced)' : value === 'infinite' ? 'Infinite' : value;
+const FALLBACKS = ['off', '5m', '15m', '30m', '45m', '1h'];
+const fallbackLabel = (value: string) => value === 'off' ? 'Off (monitor only)' : value;
 const thresholdLabel = (value: string) => value === '100k' ? '100k (default)' : value;
 
-type Typed = { parse: (value: string) => string | undefined; hint: string; placeholder: string };
+type Typed = { parse: (value: string) => string | undefined; hint: string; placeholder: string; label?: string };
 const ttlSaved = () => 'Saved the prompt cache TTL. Conversations that start from now on use it; each one\'s TTL button can change it.';
 const FIELDS: Record<string, { field: string; kind: ConfigRow['kind']; label: string; saved: (value: string) => string; typed?: Typed }> = {
   'cache-ttl': { field: 'cache_ttl', kind: 'choice', label: 'Main conversation TTL', saved: ttlSaved },
@@ -46,6 +49,16 @@ const FIELDS: Record<string, { field: string; kind: ConfigRow['kind']; label: st
     saved: () => 'Saved the teammate keepalive limit. Split-pane teammates started from now on use it.',
     typed: { parse: value => value.trim().toLowerCase() === 'same' ? 'same' : limitValue(value),
       hint: 'Enter same, default, infinite, or a whole number of keepalives from 1.', placeholder: 'Any whole number, then Enter' } },
+  'unreported-ttl': { field: 'unreported_ttl', kind: 'choice', label: 'TTL for models that don\'t report one',
+    saved: value => `Saved. Models without a reported or gateway-published lifetime ${value === 'off' ? 'are monitored only' : `are kept warm for ${value}`}, from the next request on.` },
+  'unreported-ttl-models': { field: 'unreported_ttl_models', kind: 'text', label: 'TTL for specific models',
+    saved: () => 'Saved the per-model TTLs. They apply from the next request on.',
+    typed: { parse: value => parseTtlOverrides(value).length ? value.trim() : undefined,
+      hint: 'Enter model=ttl pairs, such as kimi*=15m, glm-5.3=off (ttl: off, 5m, 15m, 30m, 45m, 1h).', placeholder: 'kimi*=15m, glm-5.3=off, then Enter', label: 'Model TTLs' } },
+  'price-url': { field: 'keepalive_price_url', kind: 'text', label: 'Price feed URL',
+    saved: () => 'Saved the price feed URL. It is used for models priced from now on.',
+    typed: { parse: value => /^(off|https?:\/\/\S+)?$/i.test(value.trim()) ? value.trim() : undefined,
+      hint: 'Enter an https:// URL, off, or leave empty to use your gateway.', placeholder: 'https://…/prices.json, then Enter', label: 'Price feed URL' } },
   'compact-threshold': { field: 'compact_threshold', kind: 'text', label: 'Compaction threshold',
     saved: value => `Saved the compaction threshold. compact and warmcomp compact conversations of ${value} tokens or more from now on.`,
     typed: { parse: thresholdValue, hint: 'Enter a number of tokens, such as 80k or 80000.', placeholder: 'Tokens, such as 80k, then Enter' } },
@@ -149,7 +162,7 @@ export function createSettingsPane() {
       let row: ConfigRow | undefined;
       try { row = ownedRow(rows, host.plugin.name, key); } catch {}
       return row && !row.isLocked && !saving
-        ? <Input key={`${key}-custom`} label="Other number" placeholder={typed.placeholder} value="" onSubmit={custom(key, typed)} /> : null;
+        ? <Input key={`${key}-custom`} label={typed.label ?? 'Other number'} placeholder={typed.placeholder} value="" onSubmit={custom(key, typed)} /> : null;
     };
     const body = ({ main, subagent }: { main: TtlDefault; subagent: TtlDefault }) => <Box flexDirection="column">
       <Text bold>Prompt cache TTL</Text>
@@ -168,6 +181,13 @@ export function createSettingsPane() {
       <Text dimColor>How many keepalives warm and warmcomp send after each request; warmcomp then compacts. Default (priced) sends them while each costs less than rewriting the cache. Infinite never stops. A number sends exactly that many, whatever they cost. Each keepalive keeps an idle cache about 4½ minutes longer on a 5m TTL, or 59½ minutes on 1h. Split-pane teammates use the keepalive limit unless given their own.</Text>
       {choose('compact-threshold', thresholdLabel, THRESHOLDS)}
       {other('compact-threshold')}
+      <Text bold>Models that don't report a cache lifetime</Text>
+      {choose('unreported-ttl', fallbackLabel, FALLBACKS)}
+      {choose('unreported-ttl-models', value => value || 'None', [''])}
+      {other('unreported-ttl-models')}
+      <Text dimColor>The lifetime Keepalive assumes when neither the provider nor your gateway gives one, so warm, compact and warmcomp can work. A gateway's own lifetime always wins; Claude is never affected. Overrides look like kimi*=15m, glm-5.3=off. Icons: ◉ provider-reported, ✦ gateway-learned, ▣ documented, ◇ gateway default, ✎ your setting, ⊘ no cache, ◌ unknown.</Text>
+      {other('price-url')}
+      <Text dimColor>{`Price feed: ${(() => { try { return String(ownedRow(rows, host.plugin.name, 'price-url').value) || 'your gateway'; } catch { return 'unavailable'; } })()}. Prices decide whether a keepalive is worth its cost.`}</Text>
       <Text dimColor>The smallest conversation compact and warmcomp compact. A smaller one is left to expire, since rewriting its cache costs little.</Text>
     </Box>;
     return <Box flexDirection="column">

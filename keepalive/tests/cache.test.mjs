@@ -4,7 +4,7 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { cachePolicy, validSample, validPrices, cacheRows, cacheStatus, cacheBar, cacheClock, loopKey, applyCacheCreation, cacheGrade, cachePercent, lifeGrade, isKeepalive, keepaliveWorthwhile, keepalivesLeft, cacheDial, cacheBarParts, isCompaction,
-  recentUsage, recentMisses, sampleTtl, unreportedModels, sessionMatrix, sessionUsage, cacheGap, policyAction, policyRow, POLICY_TICK_MS, MISS_WINDOW_MS, TTL_REPORT_MS } from '../lib/cache.js';
+  recentUsage, recentMisses, sampleTtl, unreportedModels, sessionMatrix, sessionUsage, cacheGap, lifetimeOf, lifetimeLabel, clientTtl, parseTtlOverrides, fallbackTtl, savingsWorthwhile, keepalivePrompt, SOURCE_ICONS, policyAction, policyRow, POLICY_TICK_MS, MISS_WINDOW_MS, TTL_REPORT_MS } from '../lib/cache.js';
 import { recordCacheSample, resetCache, cacheSnapshot, linkSession } from '../lib/cache-state.mjs';
 import { recordPath, writeRecord, routerData } from '../lib/state.mjs';
 import { handleRequest } from '../lib/bridge.mjs';
@@ -490,7 +490,6 @@ test('without refresh_on_read the anchor is the last real turn and one keepalive
   assert.equal(policyAction(gateway({}, { read: 0, write: 900 }), once, 100).action, 'sent');
   assert.equal(policyAction(gateway({}, { read: 900, model: 'other/model' }), once, 482000).action, 'fire');
   assert.equal(policyAction(gateway({}, { read: 900 }), chained, 483000).action, 'fire');
-  assert.equal(policyAction(gateway({}, { read: 900 }), { ...enabled, refreshOnRead: false }, 100).action, 'monitor');
 });
 
 test('only a keepalive that read the cache renews the anchor', () => {
@@ -518,4 +517,113 @@ test('rows with a reported cache creation, such as Claude behind a gateway, are 
 test('the policy anchor falls back to the start time of a request that never completed', () => {
   const row = cacheRows([sample({ startedAt: 2000, read: 0, write: 900, fresh: 10 })])[0];
   assert.equal(policyAction(row, { status: 'enabled', safe: 480, maxIdle: null }, 2000).dueAt, 482000);
+});
+
+const served = (extra = {}) => ({ status: 'enabled', safe: 240, maxIdle: 3600, refreshOnRead: null, source: 'learned', pResume: null, ...extra });
+
+test('the lifetime chain is native, then the server row by source, then the client TTL, then unknown', () => {
+  const row = gateway();
+  assert.equal(lifetimeOf(gateway({ model: 'claude-opus-5', cacheCreation: { fiveMinute: 100, oneHour: 0 } }), served(), 300000).source, 'native');
+  assert.equal(lifetimeOf(undefined, served(), 300000).source, 'unknown');
+  assert.deepEqual(lifetimeOf(row, served({ source: 'documented', refreshOnRead: true }), 900000), { source: 'documented', controlled: true, once: false, shownS: 240,
+    policy: { status: 'enabled', safe: 240, maxIdle: 3600, refreshOnRead: true, pResume: null } });
+  assert.equal(lifetimeOf(row, served({ source: null }), null).source, 'learned');
+  assert.equal(lifetimeOf(row, served({ status: 'no_cache' }), 900000).source, 'none');
+  const demoted = lifetimeOf(row, served({ status: 'demoted', reason: 'misses' }), 900000);
+  assert.deepEqual([demoted.source, demoted.policy, demoted.reason], ['unknown', undefined, 'misses']);
+  const client = lifetimeOf(row, served({ status: 'shadow' }), 900000);
+  assert.deepEqual([client.source, client.shownS, client.policy.safe, client.policy.refreshOnRead], ['client', 900, 810, null]);
+  assert.equal(lifetimeOf(row, undefined, 60000).policy.safe, 50);
+  assert.equal(lifetimeOf(row, undefined, 3600000).policy.safe, 3240);
+  assert.equal(lifetimeOf(row, served({ status: 'fixed_window' }), 900000).source, 'unknown');
+  const watched = lifetimeOf(row, served({ status: 'monitor', reason: 'ttl_too_short' }), 900000);
+  assert.deepEqual([watched.source, watched.policy, watched.status, watched.reason], ['unknown', undefined, 'monitor', 'ttl_too_short']);
+  assert.equal(lifetimeLabel(watched), '◌ monitor (ttl_too_short)');
+  assert.equal(lifetimeLabel({ source: 'unknown', status: 'monitor' }), '◌ monitor');
+  assert.equal(lifetimeOf(row, served({ status: 'insufficient_data' }), 900000).source, 'client');
+  assert.equal(lifetimeOf(row, served({ status: 'enabled', safe: null }), null).status, 'enabled');
+  assert.deepEqual(lifetimeOf(row, undefined, null), { source: 'unknown' });
+});
+
+test('lifetimes are labelled with their source icon', () => {
+  const row = gateway();
+  assert.equal(lifetimeLabel(lifetimeOf(row, served({ source: 'default', safe: 300 }), null)), '◇ 5m · once');
+  assert.equal(lifetimeLabel(lifetimeOf(row, served({ source: 'documented', safe: 1680, refreshOnRead: true }), null)), '▣ 28m');
+  assert.equal(lifetimeLabel(lifetimeOf(row, served({ safe: 95 }), null)), '✦ 1m 35s · once');
+  assert.equal(lifetimeLabel(lifetimeOf(row, served({ safe: 3600 }), null)), '✦ 1h · once');
+  assert.equal(lifetimeLabel(lifetimeOf(row, served({ safe: 45 }), null)), '✦ 45s · once');
+  assert.equal(lifetimeLabel(lifetimeOf(row, undefined, 900000)), '✎ 15m');
+  assert.equal(lifetimeLabel({ source: 'none' }), '⊘ no cache');
+  assert.equal(lifetimeLabel({ source: 'unknown', status: 'demoted', reason: 'misses' }), '◌ demoted · misses');
+  assert.equal(lifetimeLabel({ source: 'unknown', status: 'demoted' }), '◌ demoted');
+  assert.equal(lifetimeLabel({ source: 'unknown', status: 'insufficient_data' }), '◌ insufficient data');
+  assert.equal(lifetimeLabel({ source: 'unknown' }), '◌');
+  assert.equal(lifetimeLabel({ source: 'native' }), undefined);
+  assert.equal(lifetimeLabel({ source: 'native' }, 'uncached'), 'uncached');
+  assert.equal(SOURCE_ICONS.native, '◉');
+});
+
+test('client TTL settings: a global choice, per-model overrides, never for Claude', () => {
+  assert.deepEqual(parseTtlOverrides('kimi*=15m, glm-5.3=OFF, bad, x=2h, a=b=c, =5m\nz.y=1h'), [['kimi*', '15m'], ['glm-5.3', 'off'], ['z.y', '1h']]);
+  assert.deepEqual(parseTtlOverrides(undefined), []);
+  assert.equal(fallbackTtl('15m'), '15m');
+  assert.equal(fallbackTtl('off'), 'off');
+  assert.equal(fallbackTtl('toString'), undefined);
+  assert.equal(fallbackTtl(5), undefined);
+  assert.equal(clientTtl('kimi-k3', undefined), null);
+  assert.equal(clientTtl('kimi-k3', 'off'), null);
+  assert.equal(clientTtl('kimi-k3', '30m'), 1800000);
+  assert.equal(clientTtl('vendor/kimi-k3', '30m', [['vendor/kimi*', '5m']]), 300000);
+  assert.equal(clientTtl('glm-5.3', '30m', [['glm-5.3', 'off']]), null);
+  assert.equal(clientTtl('glm-5x3', '30m', [['glm-5.3', 'off']]), 1800000);
+  assert.equal(clientTtl('claude-opus-5', '1h'), null);
+});
+
+test('the keepalive prompt names the version and the lifetime source', () => {
+  assert.equal(keepalivePrompt('0.4.0', 'learned'), '<keepalive v="0.4.0" src="learned"/> Reply with only: K');
+});
+
+test('a keepalive is worth sending only when the chance of resuming times the saving beats its cost', () => {
+  const prices = { read: 0.1, fiveMinute: 1.25, output: 5 };
+  assert.equal(savingsWorthwhile(0.2, prices), true);
+  assert.equal(savingsWorthwhile(0.08, prices), false);
+  assert.equal(savingsWorthwhile(1, { read: 0.4, output: 1 }), true);
+  assert.equal(savingsWorthwhile(1, null), false);
+});
+
+const fixedRow = (...samples) => cacheRows(samples.map((s, i) => sample({ turnId: s.turnId ?? `t${i}`, completedAt: s.at, startedAt: s.at - 100, ...s })))[0];
+const fixed = { status: 'enabled', safe: 240, maxIdle: null, refreshOnRead: false };
+
+test('a fixed window runs from the write that established the prefix, not from later reads', () => {
+  const row = fixedRow({ at: 1000, read: 0, write: 900, fresh: 10 }, { at: 100000, read: 900, write: 20, fresh: 10 });
+  assert.equal(policyAction(row, fixed, 1000).dueAt, 241000);
+  assert.equal(policyAction(row, fixed, 241000 - POLICY_TICK_MS).action, 'fire');
+  assert.equal(policyAction(row, fixed, 241001).action, 'missed');
+  const rewritten = fixedRow({ at: 1000, read: 0, write: 900, fresh: 10 }, { at: 100000, read: 100, write: 800, fresh: 10 });
+  assert.equal(policyAction(rewritten, fixed, 100000).dueAt, 340000);
+  assert.equal(policyAction(fixedRow({ at: 1000, read: 900, write: 100, fresh: 10 }), fixed, 1000).action, 'monitor');
+});
+
+test('a fixed window gets one keepalive; one that rewrote the cache opens a new window', () => {
+  const row = (extra = {}) => cacheRows([sample({ completedAt: 1000, startedAt: 900, read: 0, write: 900 }), sample({ turnId: 'keepalive:1', startedAt: 150000, completedAt: 150100, ...extra })])[0];
+  const read = policyAction(row({ read: 900, write: 0 }), fixed, 160000);
+  assert.equal(read.action, 'sent');
+  const rewrote = policyAction(row({ read: 0, write: 900 }), fixed, 160000);
+  assert.deepEqual([rewrote.action, rewrote.dueAt], ['wait', 390100]);
+});
+
+test('a client TTL counts from the start of the request, a served row from its completion', () => {
+  const row = cacheRows([sample({ startedAt: 1000, completedAt: 61000, read: 0, write: 900 })])[0];
+  const client = lifetimeOf(row, undefined, 300000).policy;
+  assert.equal(client.anchorOnStart, true);
+  assert.equal(policyAction(row, client, 1000).dueAt, 1000 + 270000);
+  assert.equal(policyAction(row, { status: 'enabled', safe: 270, maxIdle: null, refreshOnRead: null }, 1000).dueAt, 61000 + 270000);
+});
+
+test('a fixed window anchors only on a write of at least half the current prefix', () => {
+  const rows = (second) => cacheRows([sample({ turnId: 'a', completedAt: 1000, startedAt: 900, read: 0, write: 40000 }),
+    sample({ turnId: 'b', completedAt: 100000, startedAt: 99000, ...second })])[0];
+  assert.equal(policyAction(rows({ read: 40000, write: 60000 }), fixed, 100000).dueAt, 100000 + 240000);
+  assert.equal(policyAction(rows({ read: 60000, write: 40000 }), fixed, 100000).action, 'monitor');
+  assert.equal(policyAction(rows({ read: 40000, write: 20000 }), fixed, 100000).dueAt, 1000 + 240000);
 });

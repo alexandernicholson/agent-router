@@ -3,7 +3,7 @@
 Keeps the prompt cache warm for [Pi](https://github.com/badlogic/pi-mono) and
 OMP (oh-my-pi) sessions by sending a tiny cache-reading request shortly before
 the cache expires. Same idea as the Claude Code `keepalive` plugin, and it
-follows the gateway cache-policy protocol (`<keepalive v="X.Y.Z"/> Reply with only: K`,
+follows the gateway cache-policy protocol (`<keepalive v="X.Y.Z" src="SRC"/> Reply with only: K`, SRC = native, learned, documented, default or client,
 max output ~1 token).
 
 ## Install
@@ -27,13 +27,15 @@ Slash command: `/keepalive [status|on|off]`.
 |---|---|
 | Any non-Anthropic base URL | `GET {base}/v1/cache/policy?alias=<model>&session=<session id>`; warms only rows with `status: "enabled"`, using `safe_refresh_s`, `max_idle_s`, `refresh_on_read`. Cached 10 min, 5 s timeout, no redirects, exponential backoff on failure. |
 | `api.anthropic.com` | Documented TTL: 5 min (or 1 h if the request uses `ttl: "1h"`), refresh at TTL − 30 s (5 m) / TTL − 120 s (1 h); max idle 30 min. |
-| Anything else | Not warmed (no documented/served TTL). |
+| Anything else | Not warmed unless you set a client TTL (`unreported_ttl`, `off` by default; `5m` to `1h`; `unreported_ttl_models` overrides per model, first match wins, never Claude). |
 
 Gateways are not detected by name: the policy is asked of any base URL other than `api.anthropic.com` (https, or http on loopback); no answer (404, error, redirect) means no policy and Claude models use the native 5m/1h logic. The protocol is described in [`../keepalive/docs/cache-policy-protocol.md`](../keepalive/docs/cache-policy-protocol.md).
 
 Upkeep modes (`/keepalive upkeep off|warm|compact|warmcomp`), keepalive limit, compaction threshold, TTL, price sources, ledger and miss reasons behave as in the Claude Code plugin; see [PARITY.md](PARITY.md). Gateway rows: the countdown starts at the last cache-touching request, a keepalive fires in the last 5 s before `safe_refresh_s` (never after, no catch-up), only a keepalive that read the cache renews it, warming stops at `max_idle_s` and at the keepalive limit.
 
-Footer: `[ ◕ ] ⬥ warm TTL 5m ██████████ 96% ✕ 2 prefix · ETA ~3:44 · ↻11 · read 148.1k · write 5.7k · new 2`. `/keepalive dashboard` opens the session overview as a widget.
+Lifetime chain: native (reported) → the gateway's row (learned, documented or default; `no_cache` is never warmed) → your client TTL → monitor only. Icons: ◉ native, ✦ learned, ▣ documented, ◇ default, ✎ client, ⊘ no cache, ◌ unknown. `refresh_on_read` true chains keepalives; null sends one per idle period timed from the last real turn; false sends one inside the fixed window counted from the write that established the prefix. With `warmcomp`, a conversation at or over the compaction threshold is compacted instead of sending that single keepalive; below it, one keepalive is sent. A gateway that has no policy (404 or empty) leaves room for your client TTL; an answer that is unknown or older than 1 h does not, and the row is monitored (`◌ monitor (reason)` for a `monitor` row). Warm, compact and warmcomp all run on the active lifetime, and a keepalive fires only if it pays (`p_resume × (write − read) > read`, else the price-based limit). Prices come from `keepalive_price_url`, default `{base}/v1/cache/prices` behind a gateway, then Anthropic, then models.dev.
+
+Footer: `[ ◕ ] ⬥ warm TTL 5m ██████████ 96% ✕ 2 prefix · ◉ ETA ~3:44 · ↻11 · read 148.1k · write 5.7k · new 2`. `/keepalive dashboard` opens the session overview as a widget.
 
 ## Built-in warmer
 
@@ -50,6 +52,9 @@ stand. Elsewhere it returns nothing and the built-in behaviour is unchanged.
 | `PI_KEEPALIVE_UPKEEP` | off | off, warm, compact, warmcomp |
 | `PI_KEEPALIVE_LIMIT` | default | `default`, `infinite` or a number |
 | `PI_KEEPALIVE_TTL` | default | 5m or 1h |
+| `PI_KEEPALIVE_UNREPORTED_TTL` | off | client TTL: off, 5m, 15m, 30m, 45m, 1h |
+| `PI_KEEPALIVE_UNREPORTED_TTL_MODELS` | | per-model client TTL, e.g. `kimi*=15m, glm-5.3=off` |
+| `PI_KEEPALIVE_PRICE_URL` | | custom price feed URL (`default` = gateway feed, `off` = none) |
 | `PI_KEEPALIVE_COMPACT_THRESHOLD` | 100k | tokens |
 | `PI_KEEPALIVE_TRANSPORT` | auto | `fetch` forces the HTTP replay path |
 

@@ -2,6 +2,7 @@ import type { On, PluginOptions, Timer } from 'claude-code';
 import { createCachePanel, CACHE_PANE, CACHE_COMMANDS, upkeepMode, ttlOption, keepaliveLimit, compactThreshold } from './cache-panel';
 import { createSettingsPane, SETTINGS_PANE, type SettingsHost } from './settings-pane';
 import { createBridge, type Bridge } from './shared/bridge';
+import { fallbackTtl, parseTtlOverrides } from '../lib/cache.js';
 import { resolveDefaultTtl } from '../lib/cache-ttl.js';
 import type { TtlAuth } from '../lib/cache-ttl.js';
 
@@ -127,6 +128,8 @@ export function register(on: On, options: PluginOptions) {
         upkeep: upkeepMode(option(teammate ? 'teammate_cache_upkeep' : 'cache_upkeep')),
         limit: keepaliveLimit(String(ownLimit).trim().toLowerCase() === 'same' ? option('keepalive_limit') : ownLimit),
         compactAt: compactThreshold(option('compact_threshold')),
+        fallback: { ttl: fallbackTtl(String(option('unreported_ttl')).trim().toLowerCase()), models: parseTtlOverrides(option('unreported_ttl_models')),
+          priceUrl: String(option('keepalive_price_url')).trim() },
       });
       if (e.isInteractive && e.surface === 'terminal') {
         await cachePanel.introduce();

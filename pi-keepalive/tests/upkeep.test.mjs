@@ -30,7 +30,7 @@ test("warm with a number limit: keepalive carries the marker, is counted, then s
   await TICK(panel, state, 21_000); // 271s: inside the last 30s
   assert.equal(state.forks.length, 1);
   const sent = state.forks[0].payload;
-  assert.equal(sent.messages.at(-1).content[0].text, `<keepalive v="${VERSION}"/> Reply with only: K`);
+  assert.equal(sent.messages.at(-1).content[0].text, `<keepalive v="${VERSION}" src="native"/> Reply with only: K`);
   assert.equal(sent.max_tokens, 1);
   assert.equal(panel.mainRow(panel.get()).keepalives.length, 1);
   assert.equal(panel.get().warming, false);

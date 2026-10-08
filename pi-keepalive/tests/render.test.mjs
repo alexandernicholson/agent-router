@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { matrixLines, dashboard, keepaliveNote, missChip, missLine, painter, policyText, requestLines, segments, statusLine, upkeepText } from "../lib/render.ts";
+import { matrixLines, dashboard, keepaliveNote, missChip, missLine, painter, lifetimeLine, requestLines, segments, statusLine, upkeepText } from "../lib/render.ts";
 import { createPanel } from "../lib/panel.ts";
 import { fakeHost, realRequest, settings, source, started } from "./helpers.mjs";
 
@@ -14,7 +14,7 @@ test("no observation, then a warm bar with dial, mode, TTL, hit rate, ETA and co
   await realRequest(panel, state, source(), { write: 5000, fresh: 10 });
   await realRequest(panel, state, source(), { read: 5000, fresh: 20 });
   const line = statusLine(panel, panel.get(), plain);
-  assert.match(line, /^\[ ● \] ⬦ off TTL 5m .* \d+% · ETA ~4:5\d · read 5k · write 0 · new 20$/);
+  assert.match(line, /^\[ ● \] ⬦ off TTL 5m .* \d+% · ◉ ETA ~4:5\d · read 5k · write 0 · new 20$/);
   panel.get().available = false;
   assert.match(statusLine(panel, panel.get(), plain), /storage unavailable$/);
 });
@@ -38,7 +38,7 @@ test("TTL 1h, reported TTL differing from the request, expired, uncached and awa
   const { panel, state } = await started(t);
   await panel.setTtl("1h");
   await realRequest(panel, state, source(), { write: 100, write1h: 0 });
-  assert.match(strip(statusLine(panel, panel.get(), ansi)), /TTL 1h .* · 5m reported · ETA/);
+  assert.match(strip(statusLine(panel, panel.get(), ansi)), /TTL 1h .* · 5m reported · ◉ ETA/);
   state.now += 400_000;
   await panel.tick();
   assert.match(statusLine(panel, panel.get(), plain), /5m reported · expired/);
@@ -191,18 +191,19 @@ test("the dot matrix keeps the newest four rows and counts the earlier dots", ()
   assert.equal(lines.length, 5);
 });
 
-test("policy text: minutes, seconds, provider", async (t) => {
+test("lifetime line: source, provider, control; native and plain unknown rows have none", async (t) => {
   const { host, state } = await fakeHost(t);
   const panel = createPanel();
   await panel.initialize(host, "p", settings());
   const row = { last: { model: "kimi-k3" } };
   const c = panel.get();
-  const fake = (policy) => ({ policyOf: () => policy });
-  assert.equal(policyText(fake(undefined), c, row), undefined);
-  assert.equal(policyText(fake({ safe: null }), c, row), undefined);
-  assert.equal(policyText(fake({ safe: 480, provider: "phala", status: "enabled", refreshOnRead: true }), c, row), "kimi-k3 via phala · safe 8m · enabled");
-  assert.equal(policyText(fake({ safe: 480, provider: "phala", status: "enabled", refreshOnRead: null }), c, row), "kimi-k3 via phala · safe 8m · once");
-  assert.equal(policyText(fake({ safe: 95, status: "insufficient_data" }), c, row), "kimi-k3 · safe 1m 35s · insufficient data");
-  assert.equal(policyText(fake({ safe: 45, status: "shadow" }), c, row), "kimi-k3 · safe 45s · shadow");
+  const fake = (life, served) => ({ lifetime: () => life, policyOf: () => served });
+  assert.equal(lifetimeLine(fake({ source: "native" }), c, row), undefined);
+  assert.equal(lifetimeLine(fake({ source: "unknown" }), c, row), undefined);
+  assert.equal(lifetimeLine(fake({ source: "learned", shownS: 480, controlled: true }, { provider: "phala" }), c, row), "✦ 8m · learned by the gateway via phala · server controlled");
+  assert.equal(lifetimeLine(fake({ source: "learned", shownS: 480, once: true, controlled: true }), c, row), "✦ 8m · once · learned by the gateway · server controlled");
+  assert.equal(lifetimeLine(fake({ source: "client", shownS: 900 }), c, row), "✎ 15m · your TTL setting");
+  assert.equal(lifetimeLine(fake({ source: "none" }), c, row), "⊘ no cache · no cache");
+  assert.equal(lifetimeLine(fake({ source: "unknown", status: "shadow" }), c, row), "◌ shadow · unknown");
   void state;
 });

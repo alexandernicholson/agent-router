@@ -16,7 +16,9 @@ export async function handleRequest(input, env = process.env, context = {}, pric
     if (!Array.isArray(models) || models.length > 16 || models.some(model => typeof model !== 'string' || !model || model.length > 200)) {
       throw new Error('cache-prices takes up to 16 model names in models.');
     }
-    return lookUpPrices(models, { root, env, fetcher: pricesFetch });
+    const { feed } = input;
+    const headers = Object.fromEntries(Object.entries(feed?.headers ?? {}).filter(([key, value]) => ['authorization', 'x-api-key'].includes(key) && typeof value === 'string'));
+    return lookUpPrices(models, { root, env, fetcher: pricesFetch, feed: feed && { base: String(feed.base ?? ''), url: String(feed.url ?? ''), headers } });
   }
   if (input.action === 'migrate') {
     if (!context.routerData) return { migrated: false, handover: null };

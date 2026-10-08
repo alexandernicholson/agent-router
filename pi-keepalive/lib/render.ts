@@ -1,7 +1,7 @@
 // Text rendering of the cache bar, dashboard and request history (ANSI, truecolor), ported from cache-panel.ts.
 import {
   cacheBar, cacheBarParts, cacheClock, cacheDial, cacheGap, cacheGrade, cachePercent, cacheTokens, isCompaction, isKeepalive, keepalivesLeft,
-  lifeGrade, MISS_WINDOW_MS, RATE_REQUESTS, recentMisses, recentUsage, sampleTtl, sessionMatrix, sessionUsage,
+  lifeGrade, lifetimeLabel, MISS_WINDOW_MS, RATE_REQUESTS, recentMisses, recentUsage, sampleTtl, SOURCE_ICONS, SOURCE_NAMES, sessionMatrix, sessionUsage,
 } from "./core/cache.js";
 import { CACHE_COLORS, themeFamily } from "./core/cache-colors.js";
 import { displayText } from "./core/shared/text.js";
@@ -38,12 +38,13 @@ export function rate(p: Paint, usage: { read: number; write: number; fresh: numb
   return paint(fill) + p.dim(empty) + paint(` ${column ? label.padStart(4) : label}`);
 }
 
-export function policyText(panel: Panel, c: Ctx, row: any): string | undefined {
-  const policy = panel.policyOf(c, row);
-  if (!policy?.safe) return undefined;
-  const [minutes, seconds] = [Math.floor(policy.safe / 60), policy.safe % 60];
-  const safe = minutes ? `${minutes}m${seconds ? ` ${seconds}s` : ""}` : `${seconds}s`;
-  return `${row.last.model}${policy.provider ? ` via ${policy.provider}` : ""} · safe ${safe} · ${policy.status === "enabled" && policy.refreshOnRead !== true ? "once" : policy.status.replace("_", " ")}`;
+/** Dashboard line for a non-native lifetime: its label, where it comes from and who controls it. */
+export function lifetimeLine(panel: Panel, c: Ctx, row: any): string | undefined {
+  const life = panel.lifetime(c, row);
+  if (life.source === "native" || (life.source === "unknown" && !life.status)) return undefined;
+  const served = panel.policyOf(c, row);
+  const via = served?.provider ? ` via ${displayText(served.provider, 60)}` : "";
+  return `${lifetimeLabel(life)} · ${SOURCE_NAMES[life.source as keyof typeof SOURCE_NAMES]}${via}${life.controlled ? " · server controlled" : ""}`;
 }
 
 export function segments(panel: Panel, c: Ctx, p: Paint, row: any): string {
@@ -53,11 +54,11 @@ export function segments(panel: Panel, c: Ctx, p: Paint, row: any): string {
     const { before, after } = status.compacted!;
     return `${result} · cmpt ✓${before !== undefined && after !== undefined ? ` ${cacheTokens(before)} → ${cacheTokens(after)}` : ""}`;
   }
-  if (!status.ttl) return `${result} · ${policyText(panel, c, row) ?? status.state}`;
+  if (!status.ttl) return `${result} · ${lifetimeLabel(panel.lifetime(c, row), status.state)}`;
   const wanted = panel.wantedTtl(c);
   const reported = wanted && status.ttl !== wanted ? ` · ${status.ttl} reported` : "";
   const life = lifeGrade(status.leftMs);
-  return `${result}${reported}${status.leftMs && life ? p.color(life, ` · ETA ~${cacheClock(status.leftMs)}`) : p.color("poor", " · expired")}`;
+  return `${result}${reported}${status.leftMs && life ? p.color(life, ` · ${SOURCE_ICONS.native} ETA ~${cacheClock(status.leftMs)}`) : p.color("poor", " · expired")}`;
 }
 
 export function misses(c: Ctx, rows: any[]) {
@@ -188,10 +189,13 @@ export function dashboard(panel: Panel, c: Ctx, p: Paint, filter: RequestFilter,
   if (line) out.push(p.color("fair", line));
   if (!c.available) out.push(p.color("fair", "Storage unavailable · showing last known observations"));
   out.push(p.dim(`Upkeep: ${upkeepText(c)}`));
+  out.push(p.dim("Lifetime icons: ◉ provider-reported · ✦ gateway-learned · ▣ documented · ◇ gateway default · ✎ your TTL setting · ⊘ no cache · ◌ unknown"));
   out.push(p.dim(`Bars show the hit rate over the last ${RATE_REQUESTS} requests, coloured for the context size. Time left counts from the last request that read or wrote the cache.`));
   out.push("", `Main`);
   out.push(`${cacheDial(status)} ${marker(p, c.upkeep)} ${c.upkeep} TTL ${panel.wantedTtl(c) ?? row.last?.requested ?? "5m"} ${segments(panel, c, p, row)}`);
   out.push(p.dim(`TTL ${panel.wantedTtl(c) ?? "5m"} · ${c.ttl ? "chosen with /keepalive ttl" : c.settings.ttl ? "ttl in /keepalive settings" : "the request's own cache_control"}`));
+  const lifetime = lifetimeLine(panel, c, row);
+  if (lifetime) out.push(p.dim(lifetime));
   for (const part of status.lifetimes) {
     out.push(p.color(lifeGrade(part.leftMs)!, `TTL ${part.ttl} · ${cacheTokens(part.tokens)} written · ${cacheBar(part.leftMs / part.ttlMs)} ~${cacheClock(part.leftMs)} left${status.awaiting ? " · awaiting report" : ""}`));
   }

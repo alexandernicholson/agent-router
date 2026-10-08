@@ -2,7 +2,7 @@
 // Everything environmental (clock, storage, network, model calls, compaction) comes in through PanelHost.
 import {
   applyCacheCreation, cachePolicy, cacheRows, cacheStatus, isCompaction, isKeepalive, keepaliveWorthwhile, keepalivesLeft, loopKey,
-  policyAction, policyRow, recentUsage, sampleKey, unreportedModels, validPrices, validSample,
+  policyAction, policyRow, lifetimeOf, clientTtl, savingsWorthwhile, recentUsage, sampleKey, unreportedModels, validPrices, validSample,
 } from "./core/cache.js";
 import { handleRequest } from "./core/bridge.mjs";
 import { createPolicyClient, pickRow, policyUrl } from "./core/shared/policy.mjs";
@@ -102,9 +102,24 @@ export function createPanel() {
     return value;
   }
 
+  /** The gateway's served rows for a row it may govern: [] = no opinion (404, empty, no gateway), null = unknown or too stale. */
+  function servedRows(c: Ctx, row: any): any[] | null {
+    if (!gatewayBase(c) || !policyRow(row)) return [];
+    return c.policy.peek(row.last.model, c.now);
+  }
+
+  /** The gateway's served row for a row it may govern. */
   function policyOf(c: Ctx, row: any) {
-    if (!gatewayBase(c) || !policyRow(row)) return undefined;
-    return pickRow(c.policy.peek(row.last.model, c.now), row.last.read + row.last.write);
+    const served = servedRows(c, row);
+    return served ? pickRow(served, row.last.read + row.last.write) : undefined;
+  }
+
+  /** The lifetime governing a row: native, the gateway's row by source, the client TTL setting, or unknown. */
+  function lifetime(c: Ctx, row: any) {
+    // After a real 404 or empty answer nobody has an opinion, so the client TTL may apply; while the answer is unknown or too old, nobody may substitute one.
+    const rows = servedRows(c, row);
+    const client = rows && policyRow(row) ? clientTtl(row.last.model, c.settings.fallback.ttl, c.settings.fallback.models) : null;
+    return lifetimeOf(row, rows ? pickRow(rows, policyRow(row) ? row.last.read + row.last.write : 0) : undefined, client);
   }
 
   /** Any non-Anthropic base URL may publish a cache policy; policyUrl refuses api.anthropic.com and unsafe URLs. */
@@ -243,10 +258,10 @@ function sampleOf(c: Ctx, fields: object) {
     c.host.redraw();
   }
 
-  async function warm(c: Ctx, model: string) {
+  async function warm(c: Ctx, model: string, lifetimeSource: string) {
     const startedAt = c.host.now();
     const source = c.last!;
-    const built = buildKeepalivePayload(source.api, source.payload, VERSION);
+    const built = buildKeepalivePayload(source.api, source.payload, VERSION, lifetimeSource);
     if (!built.ok) { c.host.log(`Keepalive: cache keepalive skipped (${built.reason}).`); return; }
     c.warming = true;
     let result: ForkResult;
@@ -279,7 +294,7 @@ function sampleOf(c: Ctx, fields: object) {
       let value: any = null;
       let found = false;
       try {
-        const matched = (await bridge(c, { action: "cache-prices", models: [model] }))?.prices?.[model];
+        const matched = (await bridge(c, { action: "cache-prices", models: [model], feed: { base: c.last?.baseUrl, url: c.settings.fallback.priceUrl, headers: await c.host.credentials() } }))?.prices?.[model];
         value = validPrices(matched) ? matched : null;
         found = true;
       } catch { /* retried at the next tick */ }
@@ -293,30 +308,37 @@ function sampleOf(c: Ctx, fields: object) {
     return lookup;
   }
 
-  async function policyUpkeep(c: Ctx, row: any, policy: any) {
-    if (c.upkeep !== "warm" && c.upkeep !== "warmcomp") return;
-    const model = row.last.model;
-    if (c.settings.limit === undefined) await lookUpPrices(c, model);
-    const { action, dueAt } = policyAction(row, { status: policy.status, safe: policy.safe, maxIdle: policy.maxIdle, refreshOnRead: policy.refreshOnRead }, eff(c, row));
+  /** Warm, compact or both on a gateway-served or client-set lifetime: in the last tick before it ends, never after. */
+  async function lifetimeUpkeep(c: Ctx, row: any, life: ReturnType<typeof lifetime>) {
+    if (!life.policy) return;
+    const sample = row.last;
+    const warms = c.upkeep === "warm" || c.upkeep === "warmcomp";
+    if (warms && c.settings.limit === undefined) await lookUpPrices(c, sample.model);
+    const { action, dueAt } = policyAction(row, life.policy, eff(c, row));
+    const big = sample.read + sample.write + sample.fresh >= c.settings.compactAt;
     if (action !== "fire" || c.actedAt === dueAt) return;
     c.actedAt = dueAt;
-    if (keepaliveWorthwhile(row, c.prices.get(model)?.value, c.settings.limit)) return warm(c, model);
-    c.host.log("Keepalive: cache warming stopped at its limit.");
+    // A single keepalive cannot be relied on to extend an unchained lifetime, so warmcomp compacts a big conversation in the window instead.
+    if (c.upkeep === "warmcomp" && life.policy.refreshOnRead !== true && big) return compact(c);
+    const prices = c.prices.get(sample.model)?.value;
+    const worthwhile = c.settings.limit === undefined && life.policy.pResume !== null ? savingsWorthwhile(life.policy.pResume, prices) : keepaliveWorthwhile(row, prices, c.settings.limit);
+    if (warms && worthwhile) return warm(c, sample.model, life.source);
+    if (c.upkeep !== "warm" && big) return compact(c);
+    if (warms) c.host.log("Keepalive: cache warming paused; another keepalive is not worth its cost or limit.");
   }
 
   async function upkeep(c: Ctx) {
     if (c.upkeep === "off" || c.pending || c.warming || !c.last || c.host.busy()) return;
     const row = mainRow(c);
     const sample = row.last;
-    const policy = policyOf(c, row);
-    if (sample && policy) return policyUpkeep(c, row, policy);
+    if (sample && policyRow(row)) return lifetimeUpkeep(c, row, lifetime(c, row));
     if (!sample || row.touchedAt === undefined || c.actedAt === row.touchedAt) return;
     const warms = c.upkeep === "warm" || c.upkeep === "warmcomp";
     if (warms && c.settings.limit === undefined) await lookUpPrices(c, sample.model);
     const status = cacheStatus(row, eff(c, row), undefined, unreportedModels(rows(c), c.now));
     if (!status.leftMs || status.leftMs > UPKEEP_MS) return;
     c.actedAt = row.touchedAt;
-    if (warms && keepaliveWorthwhile(row, c.prices.get(sample.model)?.value, c.settings.limit)) return warm(c, sample.model);
+    if (warms && keepaliveWorthwhile(row, c.prices.get(sample.model)?.value, c.settings.limit)) return warm(c, sample.model, "native");
     if (c.upkeep !== "warm" && sample.read + sample.write + sample.fresh >= c.settings.compactAt) return compact(c);
     if (warms) c.host.log(c.settings.limit !== undefined && row.keepalives.length >= c.settings.limit
       ? `Keepalive: cache warming stopped at the keepalive limit of ${c.settings.limit}.`
@@ -370,12 +392,12 @@ function sampleOf(c: Ctx, fields: object) {
     if (!c || c.upkeep === "off" || !c.last) return false;
     const row = mainRow(c);
     if (!policyRow(row)) return state(c, row).ttl !== undefined;
-    return policyOf(c, row)?.status === "enabled";
+    return lifetime(c, row).policy !== undefined;
   }
 
   /** The model changed: nothing may be replayed until the next real request. */
   const forget = () => { if (ctx) ctx.last = undefined; };
 
-  return { get, forget, initialize, refresh, begin, finish, compacted, tick, setUpkeep, cycle, setTtl, introduce, managed, rows, mainRow, state, policyOf, recentUsage, isKeepalive, isCompaction, keepalivesLeft, keepalivePrompt, eff, lookUpPrices, wantedTtl, gatewayBase, setSettings: (s: Resolved) => { if (ctx) ctx.settings = s; } };
+  return { get, forget, initialize, refresh, begin, finish, compacted, tick, setUpkeep, cycle, setTtl, introduce, managed, rows, mainRow, state, policyOf, lifetime, recentUsage, isKeepalive, isCompaction, keepalivesLeft, keepalivePrompt, eff, lookUpPrices, wantedTtl, gatewayBase, setSettings: (s: Resolved) => { if (ctx) ctx.settings = s; } };
 }
 export type Panel = ReturnType<typeof createPanel>;

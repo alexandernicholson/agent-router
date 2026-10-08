@@ -1,5 +1,6 @@
 // Settings: defaults < settings.json in the data directory < PI_KEEPALIVE_* environment.
-// The same four knobs as the Claude plugin's userConfig (cache_ttl, cache_upkeep, keepalive_limit, compact_threshold).
+import { fallbackTtl, parseTtlOverrides } from "./core/cache.js";
+// The same knobs as the Claude plugin's userConfig (cache_ttl, cache_upkeep, keepalive_limit, compact_threshold).
 
 export const UPKEEP = ["off", "warm", "compact", "warmcomp"] as const;
 export type Upkeep = (typeof UPKEEP)[number];
@@ -30,13 +31,17 @@ export interface Settings {
   upkeep: string;
   keepalive_limit: string;
   compact_threshold: string;
+  unreported_ttl: string;
+  unreported_ttl_models: string;
+  keepalive_price_url: string;
 }
 
-export const DEFAULT_SETTINGS: Settings = { ttl: "default", upkeep: "off", keepalive_limit: "default", compact_threshold: "100k" };
+export const DEFAULT_SETTINGS: Settings = { ttl: "default", upkeep: "off", keepalive_limit: "default", compact_threshold: "100k", unreported_ttl: "off", unreported_ttl_models: "", keepalive_price_url: "" };
 
 const ENV: Record<keyof Settings, string> = {
   ttl: "PI_KEEPALIVE_TTL", upkeep: "PI_KEEPALIVE_UPKEEP", keepalive_limit: "PI_KEEPALIVE_LIMIT",
-  compact_threshold: "PI_KEEPALIVE_COMPACT_THRESHOLD",
+  compact_threshold: "PI_KEEPALIVE_COMPACT_THRESHOLD", unreported_ttl: "PI_KEEPALIVE_UNREPORTED_TTL",
+  unreported_ttl_models: "PI_KEEPALIVE_UNREPORTED_TTL_MODELS", keepalive_price_url: "PI_KEEPALIVE_PRICE_URL",
 };
 
 export function mergeSettings(stored: unknown, env: Record<string, string | undefined>): Settings {
@@ -56,6 +61,8 @@ export interface Resolved {
   upkeep: Upkeep;
   limit: number | undefined;
   compactAt: number;
+  /** The client-side lifetime for models that report none and that no gateway serves one for. */
+  fallback: { ttl: ReturnType<typeof fallbackTtl>; models: string[][]; priceUrl: string };
 }
 
 export function resolveSettings(s: Settings): Resolved {
@@ -64,6 +71,7 @@ export function resolveSettings(s: Settings): Resolved {
     upkeep: upkeepMode(s.upkeep) ?? "off",
     limit: keepaliveLimit(s.keepalive_limit),
     compactAt: compactThreshold(s.compact_threshold) ?? COMPACT_MIN_TOKENS,
+    fallback: { ttl: fallbackTtl(s.unreported_ttl.trim().toLowerCase()), models: parseTtlOverrides(s.unreported_ttl_models), priceUrl: s.keepalive_price_url.trim() },
   };
 }
 
@@ -73,4 +81,7 @@ export const SETTING_ROWS: [keyof Settings, string, string[]][] = [
   ["upkeep", "Cache upkeep", [...UPKEEP]],
   ["keepalive_limit", "Keepalive limit (default, infinite or a number)", ["default", "infinite", "3", "6", "12", "24"]],
   ["compact_threshold", "Compaction threshold (tokens, e.g. 100k)", ["50k", "100k", "200k", "500k"]],
+  ["unreported_ttl", "Client TTL for models that report none", ["off", "5m", "15m", "30m", "45m", "1h"]],
+  ["unreported_ttl_models", "Client TTL per model (e.g. kimi*=15m, glm-5.3=off; use /keepalive set)", []],
+  ["keepalive_price_url", "Custom price URL (use /keepalive set)", []],
 ];

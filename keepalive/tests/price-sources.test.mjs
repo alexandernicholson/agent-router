@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ANTHROPIC_PRICES } from '../lib/anthropic-prices.js';
-import { PRICE_SOURCES, anthropicPrices, lookUpPrices } from '../lib/price-sources.mjs';
+import { PRICE_SOURCES, anthropicPrices, customUrlPrices, lookUpPrices } from '../lib/price-sources.mjs';
 import { handleRequest } from '../lib/bridge.mjs';
 
 const near = (actual, expected) => assert.ok(Math.abs(actual - expected) < 1e-9, `${actual} ≠ ${expected}`);
@@ -66,8 +66,8 @@ test('a source that fails or answers with invalid prices is passed over', async 
   assert.deepEqual(await lookUpPrices([], {}, [broken]), { prices: {} });
 });
 
-test('the default sources put Anthropic before models.dev', () => {
-  assert.deepEqual(PRICE_SOURCES.map(item => item.id), ['anthropic', 'models.dev']);
+test('the default sources try a price feed, then Anthropic, then models.dev', () => {
+  assert.deepEqual(PRICE_SOURCES.map(item => item.id), ['feed', 'anthropic', 'models.dev']);
 });
 
 test('the bridge prices Claude models without downloading models.dev', async t => {
@@ -83,4 +83,40 @@ test('the bridge prices Claude models without downloading models.dev', async t =
   assert.equal(other.prices['gpt-5'].source, 'models.dev');
   assert.equal(other.prices['gpt-5'].oneHour, undefined);
   assert.equal(calls.length, 1);
+});
+
+test('a price feed prices models in relative units, sends credentials only to the gateway, and a 404 means none', async () => {
+  const calls = [];
+  const feed = { version: 1, models: { 'kimi-k3': { input: 2, read: 0.2, write: 2.5, output: 10 } } };
+  const fetcher = async (url, init) => { calls.push([String(url), init]); return url.includes('missing') ? new Response('no', { status: 404 }) : new Response(JSON.stringify(feed)); };
+  const headers = { authorization: 'Bearer t' };
+  const own = await lookUpPrices(['kimi-k3', 'other'], { fetcher, feed: { base: 'https://gateway.example', headers } }, [customUrlPrices]);
+  assert.deepEqual(own.prices['kimi-k3'], { read: 0.1, fiveMinute: 1.25, output: 5, source: 'price feed' });
+  assert.equal(own.prices.other, null);
+  assert.equal(calls[0][0], 'https://gateway.example/v1/cache/prices');
+  assert.equal(calls[0][1].headers.authorization, 'Bearer t');
+  assert.equal(calls[0][1].redirect, 'error');
+  await lookUpPrices(['kimi-k3'], { fetcher, feed: { base: 'https://gateway.example', url: 'https://prices.example/p.json', headers } }, [customUrlPrices]);
+  assert.equal(calls[1][1].headers.authorization, undefined);
+  assert.deepEqual(await lookUpPrices(['kimi-k3'], { fetcher, feed: { base: 'https://gateway.example', url: 'https://x.example/missing', headers } }, [customUrlPrices]), { prices: { 'kimi-k3': null } });
+  assert.deepEqual(await lookUpPrices(['kimi-k3'], { fetcher, feed: { base: 'https://api.anthropic.com' } }, [customUrlPrices]), { prices: { 'kimi-k3': null } });
+  assert.deepEqual(await lookUpPrices(['kimi-k3'], { fetcher }, [customUrlPrices]), { prices: { 'kimi-k3': null } });
+  const big = async () => new Response('{}', { headers: { 'content-length': '70000' } });
+  assert.deepEqual(await lookUpPrices(['kimi-k3'], { fetcher: big, feed: { base: 'https://gateway.example' } }, [customUrlPrices]), { prices: { 'kimi-k3': null } });
+  const plain = async () => ({ ok: true, text: async () => JSON.stringify(feed) });
+  assert.equal((await lookUpPrices(['kimi-k3'], { fetcher: plain, feed: { base: 'https://gateway.example' } }, [customUrlPrices])).prices['kimi-k3'].read, 0.1);
+  const junk = async () => new Response('nonsense');
+  assert.equal((await lookUpPrices(['kimi-k3'], { fetcher: junk, feed: { base: 'https://gateway.example' } }, [customUrlPrices])).prices['kimi-k3'], null);
+});
+
+test('the bridge hands only credential headers to the price feed', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'keepalive-price-feed-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const seen = [];
+  const fetcher = async (url, init) => { seen.push(init.headers); return new Response(JSON.stringify({ version: 1, models: { m: { input: 1, read: 0.1, write: 1.25, output: 5 } } })); };
+  const found = await handleRequest({ action: 'cache-prices', session_id: 's', models: ['m'], feed: { base: 'https://gateway.example', headers: { authorization: 'Bearer t', cookie: 'x', 'x-api-key': 5 } } }, { CLAUDE_PLUGIN_DATA: root }, {}, fetcher);
+  assert.equal(found.prices.m.source, 'price feed');
+  assert.deepEqual(seen[0], { accept: 'application/json', authorization: 'Bearer t' });
+  await handleRequest({ action: 'cache-prices', session_id: 's', models: ['m'], feed: { base: 'https://gateway.example' } }, { CLAUDE_PLUGIN_DATA: root }, {}, fetcher);
+  await handleRequest({ action: 'cache-prices', session_id: 's', models: ['m'], feed: {} }, { CLAUDE_PLUGIN_DATA: root }, {}, fetcher);
 });

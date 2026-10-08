@@ -47,7 +47,7 @@ async function setup($: Engine, on: On, endpoint = 'https://gateway.example', st
     roster: [] as AgentInfo[], sessionId: 'cache-session', failSave: false, failRead: false, logs: [] as string[],
     reported: undefined as { fiveMinute: number; oneHour: number } | undefined,
     flushed: undefined as { fiveMinute: number; oneHour: number } | undefined,
-    forks: [] as string[], fetches: [] as { url: string; headers?: Record<string, string> }[], policy: null as null | Record<string, unknown>[], compactions: [] as string[], theme: 'dark',
+    forks: [] as string[], fetches: [] as { url: string; headers?: Record<string, string> }[], policy: null as null | Record<string, unknown>[], policyStatus: 200, compactions: [] as string[], theme: 'dark',
     forkUsage: { input_tokens: 10, output_tokens: 2, cache_read_input_tokens: 900, cache_creation_input_tokens: 0 },
     compaction: {} as Record<string, unknown>,
     prices: { 'vendor/main': { read: 0.1, fiveMinute: 1.25, output: 5, provider: 'example', id: 'main-1', source: 'models.dev' } } as Record<string, unknown>,
@@ -78,7 +78,7 @@ async function setup($: Engine, on: On, endpoint = 'https://gateway.example', st
   on('http.fetch', ($, e) => {
     world.fetches.push({ url: e.url, headers: e.init?.headers });
     if (!world.policy) throw new Error('policy offline');
-    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ rows: world.policy, server_now: 1 }) } };
+    return { value: { status: world.policyStatus, ok: world.policyStatus === 200, headers: {}, text: JSON.stringify({ rows: world.policy, server_now: 1 }) } };
   });
   on('model.fork', async ($, e) => {
     const early = await world.before['model.fork']?.(e);
@@ -1990,7 +1990,7 @@ test('the keepalive prompt names the plugin version and asks for one letter', as
   await cycleTo($, 'warm');
   await step($);
   await clock.advance(275000);
-  expect(world.forks).toEqual(['<keepalive v="0.3.1"/> Reply with only: K']);
+  expect(world.forks).toEqual(['<keepalive v="0.4.0" src="native"/> Reply with only: K']);
 });
 
 test('a gateway policy keeps a row without reported cache lifetimes warm by its safe time, renewing on confirmed reads', async ($, on) => {
@@ -2004,7 +2004,7 @@ test('a gateway policy keeps a row without reported cache lifetimes warm by its 
   expect(world.fetches[0].url).toBe('https://gateway.example/v1/cache/policy?alias=vendor%2Fmain&session=cache-session');
   expect(world.fetches[0].headers?.authorization).toBe('Bearer secret-token');
   await clock.advance(30000);
-  expect(text(await $.ui.render(band())).includes('vendor/main via phala · safe 8m · enabled')).toBe(true);
+  expect(text(await $.ui.render(band())).includes('✦ 8m')).toBe(true);
   await clock.advance(438000);
   expect(world.forks.length).toBe(0);
   await clock.advance(10000);
@@ -2024,11 +2024,265 @@ test('a gateway row without refresh_on_read fires one keepalive per idle period 
   await step($);
   await clock.advance(2000);
   await clock.advance(30000);
-  expect(text(await $.ui.render(band())).includes('vendor/main via phala · safe 8m · once')).toBe(true);
+  expect(text(await $.ui.render(band())).includes('✦ 8m · once')).toBe(true);
   await clock.advance(448000);
   expect(world.forks.length).toBe(1);
   await clock.advance(1200000);
   expect(world.forks.length).toBe(1);
+});
+
+test('a client TTL warms a model nobody else gives a lifetime for, once per idle period, and says so', { options: { unreported_ttl: '5m' } }, async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.reported = undefined;
+  world.policy = [];
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(35000);
+  expect(text(await $.ui.render(band())).includes('✎ 5m')).toBe(true);
+  await clock.advance(225000);
+  expect(world.forks.length).toBe(0);
+  await clock.advance(12000);
+  expect(world.forks).toEqual(['<keepalive v="0.4.0" src="client"/> Reply with only: K']);
+  await clock.advance(1200000);
+  expect(world.forks.length).toBe(1);
+  expect((await dashboard($)).includes('✎ 5m · your TTL setting')).toBe(true);
+});
+
+test('a client TTL works without any gateway base URL', { options: { unreported_ttl: '15m' } }, async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on, '');
+  world.reported = undefined;
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(3000);
+  expect((await dashboard($)).includes('✎ 15m · your TTL setting')).toBe(true);
+  expect(world.fetches.length).toBe(0);
+});
+
+test('an unreachable gateway never lets the client TTL take over, but a 404 does', { options: { unreported_ttl: '5m' } }, async ($, on) => {
+  response(on);
+  const down = await setup($, on);
+  down.world.reported = undefined;
+  await cycleTo($, 'warm');
+  await step($);
+  await down.clock.advance(700000);
+  expect(down.world.forks.length).toBe(0);
+  expect(text(await $.ui.render(band())).includes('✎')).toBe(false);
+});
+
+test('a 404 from the gateway means no opinion, so the client TTL applies', { options: { unreported_ttl: '5m' } }, async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.reported = undefined;
+  world.policy = [];
+  world.policyStatus = 404;
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(35000);
+  expect(text(await $.ui.render(band())).includes('✎ 5m')).toBe(true);
+});
+
+test('a monitor row shows its reason and is never warmed or replaced by the client TTL', { options: { unreported_ttl: '5m' } }, async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.policy = [policyRow({ status: 'monitor', reason: 'ttl_too_short' })];
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(700000);
+  expect(world.forks.length).toBe(0);
+  expect(text(await $.ui.render(band())).includes('◌ monitor (ttl_too_short)')).toBe(true);
+});
+
+test('the last served rows keep governing while the policy is refreshed or unreachable, for up to an hour', { options: { unreported_ttl: '5m' } }, async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.policy = [policyRow({ safe_refresh_s: 1200, max_idle_s: null })];
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(30000);
+  world.policy = null;
+  await clock.advance(1100000);
+  expect(world.forks.length).toBe(0);
+  await clock.advance(80000);
+  expect(world.forks.length).toBe(1);
+  expect(text(await $.ui.render(band())).includes('✎')).toBe(false);
+});
+
+test('past an hour without an answer the row is monitored, not handed to the client TTL', { options: { unreported_ttl: '5m' } }, async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.policy = [policyRow({ safe_refresh_s: 20000, max_idle_s: null })];
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(30000);
+  world.policy = null;
+  await clock.advance(3700000);
+  expect(world.forks.length).toBe(0);
+  expect(text(await $.ui.render(band())).includes('✎')).toBe(false);
+});
+
+test('warmcomp on a fixed window compacts a big conversation instead of sending a keepalive', { options: { compact_threshold: '500' } }, async ($, on) => {
+  response(on, 0, 900, 10);
+  const { world, clock } = await setup($, on);
+  world.policy = [policyRow({ refresh_on_read: false })];
+  await cycleTo($, 'warmcomp');
+  await step($);
+  await clock.advance(480000);
+  expect(world.forks.length).toBe(0);
+  expect(world.compactions.length).toBe(1);
+});
+
+test('warmcomp with refresh_on_read unknown compacts a big conversation in the window instead of a keepalive', { options: { compact_threshold: '500' } }, async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.policy = [policyRow({ refresh_on_read: null })];
+  await cycleTo($, 'warmcomp');
+  await step($);
+  await clock.advance(480000);
+  expect(world.forks.length).toBe(0);
+  expect(world.compactions.length).toBe(1);
+});
+
+test('warmcomp on a client TTL compacts a big conversation in the window instead of a keepalive', { options: { unreported_ttl: '5m', compact_threshold: '500' } }, async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.reported = undefined;
+  world.policy = [];
+  await cycleTo($, 'warmcomp');
+  await step($);
+  await clock.advance(275000);
+  expect(world.forks.length).toBe(0);
+  expect(world.compactions.length).toBe(1);
+});
+
+test('warmcomp on a chained lifetime still warms first', { options: { compact_threshold: '500' } }, async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.policy = [policyRow({ refresh_on_read: true })];
+  await cycleTo($, 'warmcomp');
+  await step($);
+  await clock.advance(480000);
+  expect(world.forks.length).toBe(1);
+  expect(world.compactions.length).toBe(0);
+});
+
+test('warmcomp on a fixed window sends a keepalive when the conversation is below the threshold', async ($, on) => {
+  response(on, 0, 900, 10);
+  const { world, clock } = await setup($, on);
+  world.policy = [policyRow({ refresh_on_read: false })];
+  await cycleTo($, 'warmcomp');
+  await step($);
+  await clock.advance(480000);
+  expect(world.forks.length).toBe(1);
+  expect(world.compactions.length).toBe(0);
+});
+
+test('per-model client TTLs override the global one and off leaves a model monitor-only', { options: { unreported_ttl: '5m', unreported_ttl_models: 'vendor/main=off' } }, async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.reported = undefined;
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(700000);
+  expect(world.forks.length).toBe(0);
+  expect(text(await $.ui.render(band())).includes('◌ TTL not reported')).toBe(true);
+});
+
+test('a served enabled lifetime overrides the client TTL, and its source rides the keepalive marker', { options: { unreported_ttl: '1h' } }, async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on, 'https://gateway.example', undefined, GATEWAY);
+  world.policy = [policyRow({ source: 'documented', safe_refresh_s: 240 })];
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(32000);
+  expect(text(await $.ui.render(band())).includes('▣ 4m')).toBe(true);
+  await clock.advance(212000);
+  expect(world.forks).toEqual(['<keepalive v="0.4.0" src="documented"/> Reply with only: K']);
+  expect((await dashboard($)).includes('server controlled')).toBe(true);
+});
+
+test('a gateway that says no cache is never warmed or compacted, whatever the client TTL', { options: { unreported_ttl: '5m', compact_threshold: '1k' } }, async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on, 'https://gateway.example', undefined, GATEWAY);
+  world.policy = [policyRow({ status: 'no_cache', safe_refresh_s: null })];
+  await cycleTo($, 'warmcomp');
+  await step($);
+  await clock.advance(700000);
+  expect(world.forks.length + world.compactions.length).toBe(0);
+  expect(text(await $.ui.render(band())).includes('⊘ no cache')).toBe(true);
+});
+
+test('a demoted row shows its reason and falls to monitor only', { options: { unreported_ttl: '5m' } }, async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on, 'https://gateway.example', undefined, GATEWAY);
+  world.policy = [policyRow({ status: 'demoted', reason: 'too many misses' })];
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(700000);
+  expect(world.forks.length).toBe(0);
+  expect(text(await $.ui.render(band())).includes('◌ demoted · too many misses')).toBe(true);
+});
+
+test('compact runs on a client lifetime when the conversation is big enough', { options: { unreported_ttl: '5m', compact_threshold: '1k' } }, async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.reported = undefined;
+  world.policy = [];
+  await cycleTo($, 'compact');
+  await step($);
+  await clock.advance(272000);
+  expect(world.compactions).toEqual(['default']);
+  expect(world.forks.length).toBe(0);
+});
+
+test('warmcomp sends the single keepalive on a client lifetime below the compaction threshold', { options: { unreported_ttl: '5m', keepalive_limit: '1' } }, async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.reported = undefined;
+  world.policy = [];
+  await cycleTo($, 'warmcomp');
+  await step($);
+  await clock.advance(272000);
+  expect(world.forks.length).toBe(1);
+});
+
+test('the server resume hint decides a keepalive by savings, and a low one pauses warming', async ($, on) => {
+  response(on);
+  const low = await setup($, on, 'https://gateway.example', undefined, GATEWAY);
+  low.world.policy = [policyRow({ p_resume: 0.05 })];
+  await cycleTo($, 'warm');
+  await step($);
+  await low.clock.advance(500000);
+  expect(low.world.forks.length).toBe(0);
+  expect(low.world.logs.some(line => line.includes('not worth'))).toBe(true);
+});
+
+test('the server resume hint warms when the saving beats the cost', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on, 'https://gateway.example', undefined, GATEWAY);
+  world.policy = [policyRow({ p_resume: 0.9 })];
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(500000);
+  expect(world.forks.length).toBe(1);
+});
+
+test('price lookups pass the gateway, the price URL and credentials to the bridge', { options: { keepalive_price_url: 'https://prices.example/p.json' } }, async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on, 'https://gateway.example', undefined, GATEWAY);
+  world.policy = [policyRow()];
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(40000);
+  const lookup = world.calls.find(call => call.action === 'cache-prices');
+  expect(lookup?.feed).toEqual({ base: 'https://gateway.example', url: 'https://prices.example/p.json', headers: { authorization: 'Bearer secret-token' } });
+});
+
+test('the dashboard explains the lifetime icons', async ($, on) => {
+  response(on);
+  await setup($, on);
+  expect((await dashboard($)).includes('◉ provider-reported')).toBe(true);
 });
 
 test('a keepalive that read nothing does not renew a gateway countdown, and the missed window is not retried', async ($, on) => {
@@ -2052,7 +2306,7 @@ test('a gateway row whose policy is not enabled is only shown', async ($, on) =>
   await step($);
   await clock.advance(700000);
   expect(world.forks.length).toBe(0);
-  expect(text(await $.ui.render(band())).includes('vendor/main via phala · safe 8m · shadow')).toBe(true);
+  expect(text(await $.ui.render(band())).includes('◌ shadow')).toBe(true);
 });
 
 test('gateway warming stops after the policy max idle time', async ($, on) => {
@@ -2142,7 +2396,7 @@ test('a gateway request without credentials sends none', async ($, on) => {
   expect(world.fetches[0].headers?.['x-api-key']).toBeUndefined();
 });
 
-for (const [safe, provider, shown] of [[45, undefined, 'vendor/main · safe 45s · enabled'], [95, 'phala', 'vendor/main via phala · safe 1m 35s · enabled'], [120, undefined, 'vendor/main · safe 2m · enabled']] as const) {
+for (const [safe, provider, shown] of [[45, undefined, '✦ 45s'], [95, 'phala', '✦ 1m 35s'], [120, undefined, '✦ 2m']] as const) {
   test(`a policy safe time of ${safe}s is shown as "${shown}"`, async ($, on) => {
     response(on);
     const { world, clock } = await setup($, on, 'https://gateway.example', undefined, GATEWAY);

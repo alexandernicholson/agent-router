@@ -1,6 +1,6 @@
 {
   "name": "keepalive",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "license": "MIT",
   "description": "A prompt cache bar for every conversation, subagent and teammate, a dashboard with /keepalive, per-conversation cache TTLs, and upkeep that keeps an idle cache warm or compacts it before it expires. Requires Claude Code Mod function hooks enabled.",
   "author": {
@@ -88,6 +88,35 @@
       "title": "Compaction threshold",
       "description": "The smallest conversation compact and warmcomp compact, in tokens, such as 100k or 80000. A smaller conversation is left to expire.",
       "default": "100k",
+      "required": false
+    },
+    "unreported_ttl": {
+      "type": "string",
+      "title": "TTL for models that don't report one",
+      "description": "Cache lifetime Keepalive assumes for models whose provider reports none and whose gateway publishes none, so warm, compact and warmcomp can work on them. off keeps them monitor-only. Never applies to Claude.",
+      "options": [
+        "off",
+        "5m",
+        "15m",
+        "30m",
+        "45m",
+        "1h"
+      ],
+      "default": "off",
+      "required": false
+    },
+    "unreported_ttl_models": {
+      "type": "string",
+      "title": "TTL for specific models",
+      "description": "Per-model overrides of that TTL, such as kimi*=15m, glm-5.3=off. The first match wins; * matches any text.",
+      "default": "",
+      "required": false
+    },
+    "keepalive_price_url": {
+      "type": "string",
+      "title": "Price feed URL",
+      "description": "A JSON price list for models Anthropic and models.dev don't price: {\"version\":1,\"models\":{\"alias\":{\"input\":1,\"read\":0.1,\"write\":1.25,\"output\":5}}}. Relative units are fine. Empty uses your gateway's /v1/cache/prices when it has one; off disables the feed.",
+      "default": "",
       "required": false
     }
   }

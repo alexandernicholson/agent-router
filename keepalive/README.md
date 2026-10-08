@@ -213,13 +213,30 @@ Split-pane teammates use the keepalive limit too, unless **Teammate keepalive li
 
 Keepalives are billed: each reads the cached context at the cache-read rate and adds a few uncached and output tokens. With the `default` limit, warming pauses once the keepalives since the last request, plus one more, would cost more than letting the entry expire and writing the cached context again. Each keepalive's measured tokens are priced as multiples of the model's input price, taken from Anthropic's price table for Claude models and from [models.dev](https://models.dev) otherwise: the cache-read, cache-write, and output prices (see **Model prices** below). With Claude Opus 5.5's listed prices that is about 23 keepalives on a 5-minute TTL, roughly an hour and 50 minutes of idle time; with the more common 0.1× cache reads, about 11, roughly 55 minutes. That point is when `warmcomp` compacts: until then each keepalive costs less than the rewrite it prevents, and past it only a shorter conversation makes your return cheaper. Your gateway's own pricing may differ from the public listing. A real request resets the count. In `warm` and `warmcomp`, the bar shows how many keepalives are left: `↻11` for 11 more, or `↻∞` with an `infinite` limit. On a `warmcomp` conversation large enough to compact, it shows `↻11 ➜ cmpt`, then `➜ cmpt` once the next action is the compaction. The dashboard spells this out (`11 keepalives, then compact`) and adds how many have been sent since your last request. With `default`, the count assumes each remaining keepalive costs what the last one did, so it can shift by one after the first. Keepalives only pay off if you return to the conversation; if you don't, they are spent for nothing. Keepalives appear in the dashboard's request history and totals, but not in the bar's hit rate. A keepalive sent after a compaction would replay the summary without a cache breakpoint on it, so no mode warms a compacted conversation. Compaction runs only between turns; if it is refused, the debug log says why.
 
-### Gateway cache policy
+### Cache lifetimes and where they come from
 
-When `ANTHROPIC_BASE_URL` points at an inference gateway that publishes a cache policy (not `api.anthropic.com`), `warm` and `warmcomp` also cover models whose cache lifetime the response does not report. The plugin asks the gateway, at most every 10 minutes per model, for `GET {base}/v1/cache/policy?alias=<model>&session=<id>`, sending your `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY` to that same origin only (the base URL Claude Code already sends it to; `ANTHROPIC_API_KEY` only when there is no `ANTHROPIC_AUTH_TOKEN`). Residual risk: Claude Code's host `fetch` exposes neither the final URL nor a no-redirect option, so a gateway that redirects the policy request to another origin could receive the custom `x-api-key` header (an `Authorization` header is dropped on a cross-origin redirect). The answer has a status, a safe refresh time and a maximum idle time, and the bar shows them, for example `kimi-k3 via phala · safe 8m · enabled`.
+`warm`, `warmcomp` and `compact` run on whichever lifetime a conversation has, found in this order. The bar and dashboard show an icon for it:
 
-- **`enabled`**: the countdown starts when the last request that touched the cache completes. A keepalive is sent in the last 5 seconds before the safe time, never after; a window missed, such as after sleep, is not caught up. Only a keepalive that read the cache restarts the countdown. Warming stops after the maximum idle time and at your keepalive limit, `default` included. `compact` and `warmcomp` do not compact these conversations.
-- **`shadow`, `insufficient data`, `demoted`, `fixed window`**: shown only; nothing is sent.
-- **`native`, a reported cache lifetime, or no answer** (offline, an error, a redirect, a body over 64 KB): the 5-minute and 1-hour behaviour above, unchanged.
+| Icon | Lifetime | Example |
+|---|---|---|
+| ◉ | Reported by the provider (Claude's `cache_creation`) | `◉ ETA ~3:44` |
+| ✦ | Learned by your gateway from traffic | `✦ 8m · once` |
+| ▣ | Documented by the provider | `▣ 28m` |
+| ◇ | Gateway default | `◇ 5m · once` |
+| ✎ | Your own TTL setting | `✎ 15m` |
+| ⊘ | No cache; never warmed or compacted | `⊘ no cache` |
+| ◌ | Unknown; monitored only | `◌ demoted · too many misses` |
+
+1. **Provider-reported (◉)** wins and works as described above.
+2. **Your gateway's row.** With `ANTHROPIC_BASE_URL` at an inference gateway that publishes a cache policy (not `api.anthropic.com`), the plugin asks `GET {base}/v1/cache/policy?alias=<model>&session=<id>` at most every 10 minutes per model, sending your `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY` to that same origin only (`ANTHROPIC_API_KEY` only when there is no `ANTHROPIC_AUTH_TOKEN`). Residual risk: Claude Code's host `fetch` exposes neither the final URL nor a no-redirect option, so a gateway that redirects the policy request to another origin could receive the custom `x-api-key` header (`Authorization` is dropped on a cross-origin redirect). An `enabled` row always overrides your TTL setting ("server controlled"). `no_cache` stops all upkeep. `demoted` and `fixed window` are monitor-only, and `demoted` shows its reason. `shadow` and `insufficient data` fall through to your TTL setting.
+3. **Your TTL setting (✎).** **TTL for models that don't report one** in `/keepalive-settings` (`unreported_ttl`): off (default), 5m, 15m, 30m, 45m or 1h, with per-model overrides such as `kimi*=15m, glm-5.3=off` (`unreported_ttl_models`; first match wins). It never applies to Claude.
+4. **Otherwise** the row is monitored only (◌).
+
+**When a keepalive fires.** In the last 5 seconds before `last request + lifetime − margin`, never after, and a window missed, such as after sleep, is not caught up. The margin is the gateway's own, or `max(10s, 10%)` of your TTL. If the gateway says reads extend the cache (`refresh_on_read`), keepalives chain, each confirmed by a cache read. Otherwise one keepalive is sent per idle period, timed from your last message, and the bar adds `· once`. A fixed window gets at most one keepalive. Warming stops after the gateway's maximum idle time and at your keepalive limit, `default` included. `compact` and `warmcomp` compact on the same schedule once the conversation reaches the compaction threshold.
+
+**Is it worth it?** For these conversations a keepalive is sent only if the chance you return × (cache write price − cache read price) beats the read price it costs. The chance comes from your keepalive limit when you set one, else from the gateway's `p_resume` hint, else the usual price-based default.
+
+Each keepalive says which lifetime timed it: `<keepalive v="0.4.0" src="learned"/> Reply with only: K` (`src` is `native`, `learned`, `documented`, `default` or `client`).
 
 Server authors: see the [cache policy protocol](docs/cache-policy-protocol.md).
 
@@ -231,8 +248,9 @@ The **Compaction threshold** in `/keepalive-settings` (`compact_threshold`) is t
 
 Keepalive costs come from price sources, asked in order for any model the earlier ones did not price. In `warm` and `warmcomp` with the `default` keepalive limit, the panel looks up the main conversation's model once an hour, and the dashboard names the source that priced it.
 
-1. **Anthropic pricing.** The [prompt caching price table](https://platform.claude.com/docs/en/build-with-claude/prompt-caching#pricing) for every Claude model, including 1-hour cache writes at 2× input, as built into Keepalive (checked 2026-10-05). It prices Claude models however a gateway, Bedrock, or Google Cloud spells them, with no download.
-2. **models.dev.** The public [models.dev](https://models.dev) catalog, for everything else. It lists 5-minute cache writes only, so a 1-hour cache it prices is costed at its 5-minute write price: warming stops sooner than the exact price would allow, never later.
+1. **Price feed.** Your gateway's `{base}/v1/cache/prices`, or the **Price feed URL** (`keepalive_price_url`; `off` disables it), as `{"version":1,"models":{"alias":{"input":1,"read":0.1,"write":1.25,"output":5}}}`. Values may be relative multipliers or dollars. Credentials go only to the gateway's own origin; a `404` means no feed; the answer is cached for an hour.
+2. **Anthropic pricing.** The [prompt caching price table](https://platform.claude.com/docs/en/build-with-claude/prompt-caching#pricing) for every Claude model, including 1-hour cache writes at 2× input, as built into Keepalive (checked 2026-10-05). It prices Claude models however a gateway, Bedrock, or Google Cloud spells them, with no download.
+3. **models.dev.** The public [models.dev](https://models.dev) catalog, for everything else. It lists 5-minute cache writes only, so a 1-hour cache it prices is costed at its 5-minute write price: warming stops sooner than the exact price would allow, never later.
 
 The models.dev source works as follows:
 

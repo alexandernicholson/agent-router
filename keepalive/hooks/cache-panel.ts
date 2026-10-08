@@ -1,5 +1,5 @@
 import type { AgentInfo, Elements, EngineInterface, RenderElement, RenderSurface, SessionCompacted, TurnStepInput, TurnUsage } from 'claude-code';
-import { applyCacheCreation, reportedCacheCreation, cacheBar, cacheBarParts, cacheClock, cacheDial, cacheGrade, cachePercent, cachePolicy, cacheRows, cacheStatus, cacheTokens, isCompaction, isKeepalive, keepaliveWorthwhile, keepalivesLeft, lifeGrade, policyAction, policyRow, loopKey, recentMisses, recentUsage, sampleKey, sampleTtl, unreportedModels, validSample, sessionMatrix, sessionUsage, cacheGap, MISS_WINDOW_MS, RATE_REQUESTS } from '../lib/cache.js';
+import { applyCacheCreation, reportedCacheCreation, cacheBar, cacheBarParts, cacheClock, cacheDial, cacheGrade, cachePercent, cachePolicy, cacheRows, cacheStatus, cacheTokens, isCompaction, isKeepalive, keepaliveWorthwhile, keepalivesLeft, lifeGrade, policyAction, policyRow, lifetimeOf, lifetimeLabel, clientTtl, savingsWorthwhile, keepalivePrompt, SOURCE_ICONS, SOURCE_NAMES, loopKey, recentMisses, recentUsage, sampleKey, sampleTtl, unreportedModels, validSample, sessionMatrix, sessionUsage, cacheGap, MISS_WINDOW_MS, RATE_REQUESTS } from '../lib/cache.js';
 import { validPrices } from '../lib/cache.js';
 import type { CachePrices, CacheRow, CacheSample, CacheReset, CacheStatus } from '../lib/cache.js';
 import { CACHE_COLORS, themeFamily } from '../lib/cache-colors.js';
@@ -18,11 +18,11 @@ const COMPACT_MIN_TOKENS = 100000;
 const UNITS: Record<string, number> = { '': 1, k: 1000, m: 1000000 };
 const UPKEEP = ['off', 'warm', 'compact', 'warmcomp'] as const;
 const UPKEEP_KEY = 'cache-upkeep';
-const KEEPALIVE_PROMPT = `<keepalive v="${VERSION}"/> Reply with only: K`;
 const PRICES_MS = 3600000;
 const MISS_FRESH_MS = 300000;
 const TTL_KEY = 'cache-ttl';
 const TTL_ENV = { main: 'CLAUDE_CODE_PROMPT_CACHE_TTL', subagent: 'CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL' } as const;
+export type Fallback = { ttl?: 'off' | '5m' | '15m' | '30m' | '45m' | '1h'; models: string[][]; priceUrl: string };
 type TtlScope = keyof typeof TTL_ENV;
 type TtlChoice = { ttl: Ttl; reason: string; locked: boolean; chosen: boolean };
 export type TtlDefaults = { main?: Ttl; subagent?: Ttl; teammate?: Ttl };
@@ -39,6 +39,7 @@ const INTRO = [
   '    warm sends cheap keepalive requests, by default while they cost less than rewriting the cache; ↻ shows how many are left.',
   '    compact summarises a conversation at or over the compaction threshold, 100k tokens unless changed, while it is still cached.',
   '    warmcomp warms first, then compacts.',
+  '  Icons say where a cache lifetime comes from: ◉ reported by the provider, ✦ learned by your gateway, ▣ documented by the provider, ◇ gateway default, ✎ your own TTL setting, ⊘ no cache, ◌ unknown.',
   '  Keepalives and compactions are billed. Set how many, and each kind of conversation\'s defaults, with /keepalive-settings.',
 ];
 type Upkeep = typeof UPKEEP[number];
@@ -100,6 +101,7 @@ type Context = {
   rechecks: Map<string, number>;
   rechecking?: Promise<void>;
   policy: ReturnType<typeof createPolicyClient>;
+  fallback: Fallback;
   prices: Map<string, { at: number; value: CachePrices | null; settled: boolean; lookup?: Promise<void> }>;
   actedAt?: number;
   upkeeping?: Promise<void>;
@@ -255,26 +257,35 @@ export function createCachePanel() {
       const { before, after } = status.compacted!;
       return [...result, { text: ` · cmpt ✓${before !== undefined && after !== undefined ? ` ${cacheTokens(before)} → ${cacheTokens(after)}` : ''}` }];
     }
-    if (!status.ttl) return [...result, { text: ` · ${policyText(current, row) ?? status.state}` }];
+    if (!status.ttl) return [...result, { text: ` · ${segmentLabel(current, row, status.state)}` }];
     const wanted = row.sessionId === current.sessionId ? ttlChoice(current, row.agentId).ttl : undefined;
     if (wanted && status.ttl !== wanted) result.push({ text: ` · ${status.ttl} reported` });
     const life = lifeGrade(status.leftMs);
-    result.push(status.leftMs && life ? { text: ` · ETA ~${cacheClock(status.leftMs)}`, color: palette(current)[life] }
+    result.push(status.leftMs && life ? { text: ` · ${SOURCE_ICONS.native} ETA ~${cacheClock(status.leftMs)}`, color: palette(current)[life] }
       : { text: ' · expired', color: palette(current).poor });
     return result;
   }
 
-  function policyOf(current: Context, row: CacheRow | undefined) {
-    if (!current.endpoint || !policyRow(row)) return undefined;
-    return pickRow(current.policy.peek(row!.last!.model, current.now), row!.last!.read + row!.last!.write);
+  /** The lifetime governing a row: native, the gateway's row by source, the client TTL setting, or unknown. */
+  function lifetime(current: Context, row: CacheRow | undefined) {
+    const governed = policyRow(row);
+    const rows = current.endpoint && governed ? current.policy.peek(row!.last!.model, current.now) : [];
+    const served = rows ? pickRow(rows, governed ? row!.last!.read + row!.last!.write : 0) : undefined;
+    // Without a base URL, or after a real 404 or empty answer, nobody has an opinion; while the gateway's answer is unknown or too old, nobody may substitute one.
+    const client = governed && rows ? clientTtl(row!.last!.model, current.fallback.ttl, current.fallback.models) : null;
+    return lifetimeOf(row, served, client);
   }
 
-  function policyText(current: Context, row: CacheRow) {
-    const policy = policyOf(current, row);
-    if (!policy?.safe) return undefined;
-    const [minutes, seconds] = [Math.floor(policy.safe / 60), policy.safe % 60];
-    const safe = minutes ? `${minutes}m${seconds ? ` ${seconds}s` : ''}` : `${seconds}s`;
-    return `${row.last!.model}${policy.provider ? ` via ${policy.provider}` : ''} · safe ${safe} · ${policy.status === 'enabled' && policy.refreshOnRead !== true ? 'once' : policy.status.replace('_', ' ')}`;
+  function segmentLabel(current: Context, row: CacheRow, state: string) {
+    return lifetimeLabel(lifetime(current, row), state);
+  }
+
+  function lifetimeLine(current: Context, row: CacheRow) {
+    const life = lifetime(current, row);
+    if (life.source === 'native' || life.source === 'unknown' && !life.status) return undefined;
+    const served = current.endpoint ? pickRow(current.policy.peek(row.last!.model, current.now), row.last!.read + row.last!.write) : undefined;
+    const via = served?.provider ? ` via ${displayText(served.provider, 60)}` : '';
+    return `${lifetimeLabel(life)} · ${SOURCE_NAMES[life.source as keyof typeof SOURCE_NAMES]}${via}${life.controlled ? ' · server controlled' : ''}`;
   }
 
   function paint(elements: Elements[RenderSurface], parts: Segment[]): RenderElement[] {
@@ -416,14 +427,14 @@ export function createCachePanel() {
   }
 
   async function initialize(host: CachePanelHost, bridge: Bridge, sessionId: string, endpoint: string | undefined, selfLabel: string | undefined,
-    configuration: { env: Record<string, string | undefined>; upkeep?: Upkeep; ttl: TtlDefaults; limit?: number; compactAt?: number }) {
+    configuration: { env: Record<string, string | undefined>; upkeep?: Upkeep; ttl: TtlDefaults; limit?: number; compactAt?: number; fallback: Fallback }) {
     const saved = (await savedUpkeep(host)).find(([id]) => id === sessionId)?.[1];
     const [settings, auth] = await Promise.all([host.settings.read().catch(() => ({})), host.auth()]);
     const resolve = (scope: TtlScope) => resolveDefaultTtl({ scope, env: configuration.env, settings: settings as Record<string, unknown>, auth });
     const subagent = resolve('subagent');
     const current: Context = { host, bridge, sessionId, endpoint, selfLabel, env: configuration.env, upkeep: saved ?? configuration.upkeep ?? 'off',
       limit: configuration.limit, compactAt: configuration.compactAt ?? COMPACT_MIN_TOKENS, family: themeFamily(undefined, configuration.env.COLORFGBG),
-      samples: new Map(), resets: [], labels: new Map(), roster: [], routes: null, now: 0, pending: new Map(), requested: new Map(), rechecks: new Map(), policy: createPolicyClient({ fetch: (url, init) => host.http.fetch(url, init), headers: host.credentials }), prices: new Map(), available: true,
+      samples: new Map(), resets: [], labels: new Map(), roster: [], routes: null, now: 0, pending: new Map(), requested: new Map(), rechecks: new Map(), fallback: configuration.fallback, policy: createPolicyClient({ fetch: (url, init) => host.http.fetch(url, init), headers: host.credentials }), prices: new Map(), available: true,
       defaults: { main: resolve('main'), subagent }, ttlDefaults: configuration.ttl,
       ttls: new Map((await savedTtls(host)).filter(([id]) => id === sessionId).map(([, key, ttl]) => [key, ttl])), kinds: new Map(),
       gate: createTtlGate(value => setTtlEnv(host, TTL_ENV.subagent, value ?? configuration.env[TTL_ENV.subagent])),
@@ -444,7 +455,7 @@ export function createCachePanel() {
     const prior = context ?? previous;
     if (prior) {
       const id = await prior.host.session.id();
-      if (!context || id !== prior.sessionId) await initialize(prior.host, prior.bridge, id, prior.endpoint, undefined, { env: prior.env, upkeep: prior.upkeep, ttl: prior.ttlDefaults, limit: prior.limit, compactAt: prior.compactAt });
+      if (!context || id !== prior.sessionId) await initialize(prior.host, prior.bridge, id, prior.endpoint, undefined, { env: prior.env, upkeep: prior.upkeep, ttl: prior.ttlDefaults, limit: prior.limit, compactAt: prior.compactAt, fallback: prior.fallback });
     }
     return context;
   }
@@ -529,11 +540,11 @@ export function createCachePanel() {
     for (const agentId of loops.values()) await enrich(current.sessionId, agentId);
   }
 
-  async function warm(current: Context, model: string) {
+  async function warm(current: Context, model: string, source: string) {
     const startedAt = await current.host.clock.now();
     const release = await holdSubagentTtl(current, null);
     let result;
-    try { result = await current.host.model.fork({ prompt: KEEPALIVE_PROMPT }); }
+    try { result = await current.host.model.fork({ prompt: keepalivePrompt(VERSION, source) }); }
     finally { await release(); }
     if (context !== current) return;
     if (!result.isAnswered) current.host.ui.log(`Keepalive: cache keepalive did not answer (${result.reason}).`, { to: 'debug' });
@@ -590,7 +601,7 @@ export function createCachePanel() {
       let value: CachePrices | null = null;
       let found = false;
       try {
-        const result = await send(current, { action: 'cache-prices', models: [model] });
+        const result = await send(current, { action: 'cache-prices', models: [model], feed: { base: current.endpoint, url: current.fallback.priceUrl, headers: await current.host.credentials() } });
         const matched = result?.prices?.[model];
         value = validPrices(matched) ? matched : null;
         found = true;
@@ -609,30 +620,38 @@ export function createCachePanel() {
     if (current.upkeep === 'off' || current.pending.has(loopKey(current.sessionId, null))) return;
     const row = mainRow(current);
     const sample = row?.last;
-    const policy = policyOf(current, row);
-    if (row && sample && policy) return policyUpkeep(current, row, policy);
+    if (row && sample && policyRow(row)) return lifetimeUpkeep(current, row, lifetime(current, row));
     if (!row || !sample || row.touchedAt === undefined || current.actedAt === row.touchedAt) return;
     const warms = current.upkeep === 'warm' || current.upkeep === 'warmcomp';
     if (warms && current.limit === undefined) await lookUpPrices(current, sample.model);
     const status = cacheStatus(row, current.now, undefined, unreportedModels(rows(current), current.now));
     if (!status.leftMs || status.leftMs > UPKEEP_MS) return;
     current.actedAt = row.touchedAt;
-    if (warms && keepaliveWorthwhile(row, current.prices.get(sample.model)?.value, current.limit)) return warm(current, sample.model);
+    if (warms && keepaliveWorthwhile(row, current.prices.get(sample.model)?.value, current.limit)) return warm(current, sample.model, 'native');
     if (current.upkeep !== 'warm' && sample.read + sample.write + sample.fresh >= current.compactAt) return compact(current);
     if (warms) current.host.ui.log(current.limit !== undefined && row.keepalives.length >= current.limit
       ? `Keepalive: cache warming stopped at the keepalive limit of ${current.limit}.`
       : 'Keepalive: cache warming paused; another keepalive would cost more than rewriting the cache.', { to: 'debug' });
   }
 
-  async function policyUpkeep(current: Context, row: CacheRow, policy: NonNullable<ReturnType<typeof policyOf>>) {
-    if (current.upkeep !== 'warm' && current.upkeep !== 'warmcomp') return;
-    const model = row.last!.model;
-    if (current.limit === undefined) await lookUpPrices(current, model);
-    const { action, dueAt } = policyAction(row, { status: policy.status, safe: policy.safe, maxIdle: policy.maxIdle, refreshOnRead: policy.refreshOnRead }, current.now);
+  /** Warm, compact or both on a gateway-served or client-set lifetime: in the last tick before it ends, never after. */
+  async function lifetimeUpkeep(current: Context, row: CacheRow, life: ReturnType<typeof lifetime>) {
+    if (!life.policy) return;
+    const sample = row.last!;
+    const warms = current.upkeep === 'warm' || current.upkeep === 'warmcomp';
+    if (warms && current.limit === undefined) await lookUpPrices(current, sample.model);
+    const { action, dueAt } = policyAction(row, life.policy, current.now);
+    const big = sample.read + sample.write + sample.fresh >= current.compactAt;
     if (action !== 'fire' || current.actedAt === dueAt) return;
     current.actedAt = dueAt;
-    if (keepaliveWorthwhile(row, current.prices.get(model)?.value, current.limit)) return warm(current, model);
-    current.host.ui.log('Keepalive: cache warming stopped at its limit.', { to: 'debug' });
+    // A single keepalive cannot be relied on to extend an unchained lifetime, so warmcomp compacts a big conversation in the window instead.
+    if (current.upkeep === 'warmcomp' && life.policy.refreshOnRead !== true && big) return compact(current);
+    const prices = current.prices.get(sample.model)?.value;
+    const worthwhile = current.limit === undefined && life.policy.pResume !== null ? savingsWorthwhile(life.policy.pResume, prices)
+      : keepaliveWorthwhile(row, prices, current.limit);
+    if (warms && worthwhile) return warm(current, sample.model, life.source);
+    if (current.upkeep !== 'warm' && big) return compact(current);
+    if (warms) current.host.ui.log('Keepalive: cache warming paused; another keepalive is not worth its cost or limit.', { to: 'debug' });
   }
 
   async function cycle() {
@@ -888,6 +907,7 @@ export function createCachePanel() {
       ...(current.available ? [] : [Text({ color: palette(current).fair, children: ['Storage unavailable · showing last known observations'] })]),
       Text({ dimColor: true, children: [`Upkeep: ${upkeepText(current)}`] }),
       ...coldNote(elements, nodes.filter(shown)),
+      Text({ dimColor: true, children: ['Lifetime icons: ◉ provider-reported · ✦ gateway-learned · ▣ documented · ◇ gateway default · ✎ your TTL setting · ⊘ no cache · ◌ unknown'] }),
       Text({ dimColor: true, children: [`Bars show each loop's hit rate over its last ${RATE_REQUESTS} requests, coloured for its context size. Time left counts from the last request that read or wrote the cache. Select an agent for recent requests.`] }),
     ];
     const agents = nodes.filter(shown).map(node => {
@@ -911,6 +931,7 @@ export function createCachePanel() {
         Box({ flexDirection: 'row', children: [Text({ children: [`${indent}${cacheDial(state(current, row))} `] }), ...marker(elements, current, node.upkeep),
           Text({ children: [node.upkeep ? ` ${node.upkeep} ` : ' '] }), Text({ children: [`TTL ${ttlLabel(current, row)} `] }), ...paint(elements, segments(current, row))] }),
         ...(row.sessionId === current.sessionId ? [Text({ dimColor: true, children: [`${indent}TTL ${ttlChoice(current, row.agentId).ttl} · ${ttlChoice(current, row.agentId).reason}`] })] : []),
+        ...(lifetimeLine(current, row) ? [Text({ dimColor: true, children: [`${indent}${lifetimeLine(current, row)}`] })] : []),
         ...life,
         ...keepalives,
         Text({ dimColor: true, children: [`${indent}${window ? `hit rate over the last ${plural(window, 'request')} · ` : ''}${plural(counts.requests, 'request')} · read ${cacheTokens(counts.read)} · write ${cacheTokens(counts.write)} · new ${cacheTokens(counts.fresh)} · out ${cacheTokens(counts.output)}`] }),

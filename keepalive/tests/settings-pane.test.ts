@@ -21,6 +21,7 @@ function world(on: On, extra: { auth?: 'bearer'; env?: Record<string, string> } 
       row('cache_ttl', 'choice', 'default', TTLS), row('subagent_cache_ttl', 'choice', 'default', TTLS), row('teammate_cache_ttl', 'choice', 'default', TTLS),
       row('cache_upkeep', 'choice', 'off', UPKEEP), row('teammate_cache_upkeep', 'choice', 'off', UPKEEP), row('keepalive_limit', 'text', 'default'),
       row('teammate_keepalive_limit', 'text', 'same'), row('compact_threshold', 'text', '100k'),
+      row('unreported_ttl', 'choice', 'off', ['off', '5m', '15m', '30m', '45m', '1h']), row('unreported_ttl_models', 'text', ''), row('keepalive_price_url', 'text', ''),
     ] as ConfigRow[],
     writes: [] as [string, unknown][], deny: '', echo: undefined as string | undefined, listFailure: undefined as unknown, openFailure: '',
     placed: true, logs: [] as string[], closed: 0, onList: undefined as undefined | (() => Promise<void>), onSet: undefined as undefined | (() => Promise<void>),
@@ -338,4 +339,34 @@ test('the settings command waits for session setup, and other panes are left to 
   expect(text(await $.ui.render(pane))).toBe('Someone else');
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: false });
   expect(text(await $.ui.render({ ...pane, requestId: 'other' }))).toBe('Someone else');
+});
+
+test('the settings pane sets the TTL for models that report none, per-model overrides and the price feed', async ($, on) => {
+  const state = world(on);
+  const drawn = await open($);
+  expect(labels(drawn, 'unreported-ttl')).toEqual(['Off (monitor only)', '5m', '15m', '30m', '45m', '1h']);
+  expect(text(drawn)).toContain('◉ provider-reported');
+  expect(text(drawn)).toContain('Price feed: your gateway.');
+  await select($, 'unreported-ttl', '15m');
+  expect(owned(state, 'unreported_ttl').value).toBe('15m');
+  expect(text(await $.ui.render(pane))).toContain('are kept warm for 15m');
+  await select($, 'unreported-ttl', 'off');
+  expect(text(await $.ui.render(pane))).toContain('are monitored only');
+  await type($, 'kimi*=15m, glm-5.3=off', 'unreported-ttl-models');
+  expect(owned(state, 'unreported_ttl_models').value).toBe('kimi*=15m, glm-5.3=off');
+  expect(text(await $.ui.render(pane))).toContain('Saved the per-model TTLs');
+  await type($, 'nonsense', 'unreported-ttl-models');
+  expect(text(await $.ui.render(pane))).toContain('Enter model=ttl pairs');
+  await type($, 'https://prices.example/p.json', 'price-url');
+  expect(owned(state, 'keepalive_price_url').value).toBe('https://prices.example/p.json');
+  expect(text(await $.ui.render(pane))).toContain('Saved the price feed URL');
+  expect(text(await $.ui.render(pane))).toContain('Price feed: https://prices.example/p.json.');
+  await type($, 'ftp://x', 'price-url');
+  expect(text(await $.ui.render(pane))).toContain('Enter an https:// URL, off, or leave empty');
+});
+
+test('a missing price feed setting is reported in the pane instead of breaking it', async ($, on) => {
+  const state = world(on);
+  state.rows = state.rows.filter(item => !item.key.endsWith('.keepalive_price_url'));
+  expect(text(await open($))).toContain('Price feed: unavailable.');
 });

@@ -2,6 +2,20 @@
 
 Each release explains what changed for you, in 120 words or less.
 
+## Keepalive 0.4.0
+
+- **Warm, compact and warmcomp work on any model.** Pick **TTL for models that don't report one** in `/keepalive-settings`, globally or per model; a gateway's own lifetime always wins, and Claude is untouched.
+- **See where a lifetime comes from.** Icons mark it: ◉ provider, ✦ learned, ▣ documented, ◇ default, ✎ yours, ⊘ no cache.
+- **One keepalive per idle period** unless reads are known to extend the cache, and only when it pays off.
+- **Prices from your gateway.** Reads `/v1/cache/prices` or your own feed URL.
+
+## Pi Keepalive 0.3.0
+
+- **Warm, compact and warmcomp work on any model.** Set `unreported_ttl` (`off`, `5m`, `15m`, `30m`, `45m`, `1h`) with `/keepalive set`, or per model with `unreported_ttl_models` (`kimi*=15m, glm-5.3=off`). A gateway's own lifetime wins, and Claude is untouched.
+- **See where a lifetime comes from.** The bar and dashboard show ◉ ✦ ▣ ◇ ✎ ⊘ ◌, and keepalives say which with `src="…"`.
+- **Prices from your gateway** (`/v1/cache/prices`) or `keepalive_price_url`; keepalives fire only when they pay off.
+- **Safer gateway handling.** Unknown or stale policy answers are monitored, and `warmcomp` compacts a big conversation instead of a single unchained keepalive.
+
 ## Pi Keepalive 0.2.1
 
 - **One keepalive when the gateway can't promise more.** Same as Keepalive 0.3.1: an unconfirmed cache gets a single keepalive timed from your last message, shown as `· once`.
