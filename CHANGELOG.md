@@ -2,6 +2,11 @@
 
 Each release explains what changed for you, in 120 words or less.
 
+## Keepalive 0.4.3
+
+- **Timed from request start when your gateway says so.** Refreshes land a little earlier and never late, matching how providers restart the cache clock.
+- **Faster demotions.** The gateway can ask for its lifetimes to be rechecked every 30 to 600 seconds, so a bad lifetime is corrected within about a minute.
+
 ## Keepalive 0.4.2
 
 - **Providers see nothing about the plugin.** The keepalive is plain `Reply with only: K`. A gateway that answers the policy endpoint is told about keepalives and compactions out of band instead, for its statistics only.
@@ -18,6 +23,10 @@ Each release explains what changed for you, in 120 words or less.
 - **See where a lifetime comes from.** Icons mark it: ◉ provider, ✦ learned, ▣ documented, ◇ default, ✎ yours, ⊘ no cache.
 - **One keepalive per idle period** unless reads are known to extend the cache, and only when it pays off.
 - **Prices from your gateway.** Reads `/v1/cache/prices` or your own feed URL.
+
+## Pi Keepalive 0.3.3
+
+- **Timed from request start when your gateway says so.** Keepalives fire by start + safe; other rows are unchanged. Gateways can ask for lifetimes to be rechecked every 30 to 600 seconds.
 
 ## Pi Keepalive 0.3.2
 

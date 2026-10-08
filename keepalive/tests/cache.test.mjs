@@ -652,3 +652,9 @@ test('a governed row counts down to the refresh time from the same deadline poli
   const fixedLife = lifetimeOf(noWrite, served({ refreshOnRead: false }), null);
   assert.equal(lifetimeStatus(noWrite, fixedLife, 1, cacheStatus(noWrite, 1)).state, cacheStatus(noWrite, 1).state);
 });
+
+test('native lifetimes count from the request start, not the end of the response', () => {
+  const row = cacheRows([{ sessionId: 's', agentId: null, turnId: 't', index: 0, model: 'claude-sonnet-5', startedAt: 1000, completedAt: 201000, read: 0, write: 30000, fresh: 10, output: 20,
+    ttlMs: 300000, ttlSource: 'reported', disabled: false, requested: '5m', cacheCreation: { fiveMinute: 30000, oneHour: 0 } }])[0];
+  assert.equal(cacheStatus(row, 201000).leftMs, 100000);
+});

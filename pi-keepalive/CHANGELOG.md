@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.3
+
+- **Start-anchored lifetimes.** A gateway row with `anchor: "start"` is timed from when the request was dispatched, as providers measure cache lifetime from request start; keepalives fire by start + safe. Completion-anchored rows are unchanged. The `client=pi-keepalive/0.3.3` heartbeat is what makes a gateway serve these rows.
+- **`max_age_s`** shortens how long a policy answer is trusted before it is asked again (30s to 10 minutes).
+
 ## 0.3.2
 
 - **The keepalive prompt is always `Reply with only: K`.** No marker, so providers and gateways see an ordinary short message.

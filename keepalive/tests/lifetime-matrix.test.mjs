@@ -178,6 +178,7 @@ test('property: a keepalive never fires after the true expiry, and never repeats
         assert.ok(now <= dueAt, `fired at ${now} after due ${dueAt}`);
         assert.ok(now >= dueAt - POLICY_TICK_MS);
         assert.ok(anchorAt >= (anchorOnStart ? startedAt : 0));
+        if (anchorOnStart && fires.length === 0) assert.ok(now <= startedAt + safe * 1000, `start-anchored fire ${now} after start + safe`);
         fires.push(now);
         const read = random() < 0.7;
         keepalives.push(base({ turnId: `keepalive:${fires.length}`, startedAt: now, completedAt: now + 100, read: read ? 30000 : 0, write: read ? 0 : 30000 }));
@@ -195,4 +196,31 @@ test('matrix prices: the feed price of a native 1h write decides how many keepal
   assert.ok(keepalivesLeft(row, feed) > keepalivesLeft(row, list));
   assert.equal(keepalivesLeft(row, { read: 0.05, output: 5 }) >= 0, true);
   assert.equal(keepalivesLeft(row, { ...feed, oneHour: undefined }), keepalivesLeft(row, { ...feed, oneHour: 1.25 }));
+});
+
+test('matrix anchor: a served start anchor times from the request start, completion from its end, and the default is completion', () => {
+  const real = { startedAt: 1000, completedAt: 61000 };
+  for (const [served, due] of [[{ anchorOnStart: true }, 1000 + 600000], [{}, 61000 + 600000], [{ anchorOnStart: false }, 61000 + 600000]]) {
+    const life = lifetimeOf(rowOf(real), serve({ safe: 600, ...served }), null);
+    assert.equal(life.policy.anchorOnStart, served.anchorOnStart ? true : undefined);
+    assert.equal(policyAction(rowOf(real), life.policy, 2000).dueAt, due);
+  }
+  const chainedKeep = keep(0, { startedAt: 300000, completedAt: 330000 });
+  const life = lifetimeOf(rowOf(real, chainedKeep), serve({ safe: 600, anchorOnStart: true }), null);
+  assert.equal(policyAction(rowOf(real, chainedKeep), life.policy, 400000).dueAt, 300000 + 600000);
+});
+
+test('policy rows: anchor and max_age_s are parsed, max age clamped to 30-600 s and used as the cache TTL', async () => {
+  const parsed = parsePolicy(JSON.stringify({ rows: [{ alias: 'a', status: 'enabled', safe_refresh_s: 100, anchor: 'start', max_age_s: 5 },
+    { alias: 'a', status: 'enabled', safe_refresh_s: 100, anchor: 'completion', max_age_s: 9999 }, { alias: 'a', status: 'enabled', safe_refresh_s: 100 }] }));
+  assert.deepEqual(parsed.map(r => [r.anchorOnStart, r.maxAgeMs]), [[true, 30000], [false, 600000], [false, null]]);
+  let calls = 0;
+  const client = createPolicyClient({ fetch: async () => { calls++; return { status: 200, text: JSON.stringify({ rows: [{ alias: 'a', status: 'enabled', safe_refresh_s: 100, max_age_s: 60 }] }) }; } });
+  await client.refresh('https://g.example', 'a', 's', 0);
+  await client.refresh('https://g.example', 'a', 's', 59999);
+  assert.equal(calls, 1);
+  await client.refresh('https://g.example', 'a', 's', 60000);
+  assert.equal(calls, 2);
+  assert.equal(client.peek('a', 60000 + 3599999).length, 1);
+  assert.equal(client.peek('a', 60000 + POLICY_STALE_MS), null);
 });

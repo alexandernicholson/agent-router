@@ -210,7 +210,7 @@ export function clientTtl(model, global, overrides = []) {
  * The lifetime that governs a row: native (reported) → the server's row by source → the client TTL → unknown.
  * `policy` is set only when it can be acted on; it feeds policyAction.
  * @param {CacheRow | undefined} row
- * @param {{status: string, safe: number | null, maxIdle: number | null, refreshOnRead?: boolean | null, source?: string | null, pResume?: number | null, reason?: string | null} | undefined} server
+ * @param {{status: string, safe: number | null, maxIdle: number | null, refreshOnRead?: boolean | null, anchorOnStart?: boolean, source?: string | null, pResume?: number | null, reason?: string | null} | undefined} server
  * @param {number | null} client ms
  * @returns {{source: string, policy?: {status: 'enabled', safe: number, maxIdle: number | null, refreshOnRead: boolean | null, pResume: number | null},
  *   shownS?: number, once?: boolean, controlled?: boolean, status?: string, reason?: string | null}}
@@ -221,7 +221,7 @@ export function lifetimeOf(row, server, client) {
   if (server?.status === 'demoted') return { source: 'unknown', status: 'demoted', reason: server.reason };
   if (server?.status === 'enabled' && server.safe) {
     return { source: server.source ?? 'learned', controlled: true, once: server.refreshOnRead !== true, shownS: server.safe,
-      policy: { status: 'enabled', safe: server.safe, maxIdle: server.maxIdle, refreshOnRead: server.refreshOnRead ?? null, pResume: server.pResume ?? null } };
+      policy: { status: 'enabled', safe: server.safe, maxIdle: server.maxIdle, refreshOnRead: server.refreshOnRead ?? null, pResume: server.pResume ?? null, ...(server.anchorOnStart ? { anchorOnStart: true } : {}) } };
   }
   if (client && (!server || server.status === 'shadow' || server.status === 'insufficient_data')) {
     const margin = Math.max(10000, client / 10);

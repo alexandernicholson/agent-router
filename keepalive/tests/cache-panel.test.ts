@@ -2018,7 +2018,7 @@ test('a confirmed keepalive behind a protocol gateway is reported to its reports
   expect(sent.length).toBeGreaterThan(0);
   expect(sent[0].url).toBe('https://gateway.example/v1/cache/reports');
   const body = JSON.parse(sent[0].body!);
-  expect(body.client).toBe('keepalive/0.4.2');
+  expect(body.client).toBe('keepalive/0.4.3');
   expect(body.harness).toBe('claude_cli');
   expect(body.reports[0]).toMatchObject({ kind: 'keepalive', session: 'cache-session', alias: 'gateway-code-task', src: 'documented' });
   expect(typeof body.reports[0].started_at_ms).toBe('number');
@@ -2058,6 +2058,21 @@ test('a native Claude keepalive behind a protocol gateway is reported with src n
   expect(Object.keys(reports[0]).sort()).toEqual(['alias', 'completed_at_ms', 'fresh', 'kind', 'output', 'read', 'session', 'src', 'started_at_ms', 'write']);
 });
 
+test('a native 5m cache counts from the request start: a 200 s response leaves the keepalive due about 270 s after the start, not after completion', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 100, oneHour: 0 };
+  await cycleTo($, 'warm');
+  const turn = $.turn.step({ turnId: 'long', index: 0, messageCount: 1, model: 'vendor/main' });
+  await turn.next();
+  await clock.advance(200000);
+  while (!(await turn.next()).done);
+  await clock.advance(60000);
+  expect(world.forks.length).toBe(0);
+  await clock.advance(20000);
+  expect(world.forks.length).toBe(1);
+});
+
 test('a Claude-only session behind a gateway sends the heartbeat at most once per ten minutes', async ($, on) => {
   response(on);
   const { world, clock } = await setup($, on, 'https://gateway.example', undefined, GATEWAY);
@@ -2068,7 +2083,7 @@ test('a Claude-only session behind a gateway sends the heartbeat at most once pe
   await clock.advance(30000);
   const gets = () => world.fetches.filter(f => f.method !== 'POST');
   expect(gets().length).toBe(1);
-  expect(gets()[0].url).toContain('client=keepalive%2F0.4.2&harness=claude_cli');
+  expect(gets()[0].url).toContain('client=keepalive%2F0.4.3&harness=claude_cli');
   expect(gets()[0].headers?.authorization).toBe('Bearer secret-token');
   await clock.advance(500000);
   expect(gets().length).toBe(1);
@@ -2123,7 +2138,7 @@ test('a gateway policy keeps a row without reported cache lifetimes warm by its 
   await step($);
   await clock.advance(2000);
   expect(world.fetches.length).toBe(1);
-  expect(world.fetches[0].url).toBe('https://gateway.example/v1/cache/policy?alias=vendor%2Fmain&session=cache-session&client=keepalive%2F0.4.2&harness=claude_cli');
+  expect(world.fetches[0].url).toBe('https://gateway.example/v1/cache/policy?alias=vendor%2Fmain&session=cache-session&client=keepalive%2F0.4.3&harness=claude_cli');
   expect(world.fetches[0].headers?.authorization).toBe('Bearer secret-token');
   await clock.advance(30000);
   expect(text(await $.ui.render(band()))).toMatch(/✦ 7m \d+s/);
@@ -2637,6 +2652,7 @@ const TOTAL = WRITE + 10;
 type Source = { name: string; row?: Record<string, unknown>; client?: string; native?: boolean; actionable: boolean; chained: boolean; advance: number; src?: string };
 const SOURCES: Source[] = [
   { name: 'learned chained', row: { source: 'learned', refresh_on_read: true }, actionable: true, chained: true, advance: 482000, src: 'learned' },
+  { name: 'learned chained start anchor', row: { source: 'learned', refresh_on_read: true, anchor: 'start' }, actionable: true, chained: true, advance: 482000, src: 'learned' },
   { name: 'probe unknown refresh', row: { source: 'probe', refresh_on_read: null }, actionable: true, chained: false, advance: 482000, src: 'probe' },
   { name: 'override chained', row: { source: 'override', refresh_on_read: true }, actionable: true, chained: true, advance: 482000, src: 'override' },
   { name: 'documented unknown refresh', row: { source: 'documented', refresh_on_read: null }, actionable: true, chained: false, advance: 482000, src: 'documented' },
@@ -2695,7 +2711,7 @@ for (const source of SOURCES) for (const mode of ['off', 'warm', 'compact', 'war
 // ---- in flight: nothing is sent while a turn is pending; afterwards the schedule restarts from that turn -----------------------------------
 for (const source of SOURCES.filter(item => item.actionable && !item.native && item.name !== 'client 15m')) for (const mode of ['warm', 'compact', 'warmcomp']) {
   // A client TTL counts from the start of a request; this one started a whole lifetime ago, so its window is already lost and nothing may be sent late.
-  const outcome = source.client ? 'nothing' : expectOutcome(source, mode, true);
+  const outcome = source.client || source.name.includes('start anchor') ? 'nothing' : expectOutcome(source, mode, true);
   test(`matrix in flight: ${source.name} × ${mode}`, { options: { compact_threshold: String(TOTAL), ...(source.client ? { unreported_ttl: source.client } : {}) } }, async ($, on) => {
     const { world, clock } = await prepare($, on, source);
     await cycleTo($, mode);

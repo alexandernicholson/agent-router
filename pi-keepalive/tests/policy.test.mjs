@@ -21,7 +21,7 @@ test("enabled policy: the countdown starts at the last cache-touching request an
   const { panel, state } = await gateway(t);
   await tick(panel, state, 100);
   assert.equal(state.fetches.length, 1);
-  assert.match(state.fetches[0].url, /^https:\/\/gateway\.example\.com\/ai\/openai\/v1\/v1\/cache\/policy\?alias=kimi-k3&session=p&client=pi-keepalive%2F0\.3\.2&harness=pi$/);
+  assert.match(state.fetches[0].url, /^https:\/\/gateway\.example\.com\/ai\/openai\/v1\/v1\/cache\/policy\?alias=kimi-k3&session=p&client=pi-keepalive%2F0\.3\.3&harness=pi$/);
   assert.equal(state.fetches[0].init.headers["x-api-key"], "k");
   assert.equal(panel.policyOf(panel.get(), panel.mainRow(panel.get())).status, "enabled");
   await tick(panel, state, 470_000);
@@ -367,4 +367,49 @@ test("policy GETs and report bodies name the harness (pi by default, omp when th
     assert.equal(body.harness, harness);
     assert.equal(body.reports[0].session, "sess-7", "the same id the model requests carry");
   }
+});
+
+async function longTurn(t, extra) {
+  const { host, state } = await fakeHost(t);
+  state.policy = rows(extra);
+  const panel = createPanel();
+  await panel.initialize(host, "p", settings({ upkeep: "warm", keepalive_limit: "4" }));
+  await realRequest(panel, state, gw(), { write: 20_000 }, 60_000);
+  return { panel, state };
+}
+
+test("a start-anchored row fires by start + safe, counted from dispatch not completion", async (t) => {
+  const { panel, state } = await longTurn(t, { anchor: "start" });
+  await tick(panel, state, 100);
+  assert.equal(state.forks.length, 0);
+  await tick(panel, state, 300_000);
+  assert.equal(state.forks.length, 0, "dispatch + 475s has not come yet (turn took 60s)");
+  await tick(panel, state, 115_000);
+  assert.equal(state.forks.length, 1, "fired before completion + safe would be");
+});
+
+test("a completion-anchored row is unchanged by a long turn", async (t) => {
+  const { panel, state } = await longTurn(t, {});
+  await tick(panel, state, 100);
+  await tick(panel, state, 370_000);
+  assert.equal(state.forks.length, 0, "completion + 475s not reached");
+  await tick(panel, state, 105_000);
+  assert.equal(state.forks.length, 1);
+});
+
+test("a keepalive is stamped at dispatch, before the request is sent", async (t) => {
+  const { panel, state } = await gateway(t);
+  await tick(panel, state, 100);
+  const sentAt = state.now;
+  await tick(panel, state, 478_000);
+  const ka = panel.mainRow(panel.get()).keepalives[0];
+  assert.ok(ka.startedAt >= sentAt + 470_000 && ka.startedAt <= state.now);
+});
+
+test("max_age_s shortens how long a policy answer is trusted before it is asked again", async (t) => {
+  const { panel, state } = await gateway(t, { policy: rows({ max_age_s: 60 }) });
+  await tick(panel, state, 100);
+  assert.equal(state.fetches.length, 1);
+  await tick(panel, state, 70_000);
+  assert.equal(state.fetches.length, 2, "re-asked after 60s, not 10 minutes");
 });

@@ -43,7 +43,8 @@ export function parsePolicy(body) {
     (row.safe_refresh_s == null || seconds(row.safe_refresh_s)) && (row.max_idle_s == null || seconds(row.max_idle_s)) &&
     (row.prefix_bucket == null || Number.isSafeInteger(row.prefix_bucket)) && (row.refresh_on_read == null || typeof row.refresh_on_read === 'boolean'))
     .map(row => ({ status: row.status, safe: row.safe_refresh_s ?? null, maxIdle: row.max_idle_s ?? null, bucket: row.prefix_bucket ?? 0,
-      refreshOnRead: row.refresh_on_read ?? null, source: SOURCES.includes(row.source) ? row.source : null,
+      refreshOnRead: row.refresh_on_read ?? null, anchorOnStart: row.anchor === 'start',
+      maxAgeMs: Number.isFinite(row.max_age_s) ? Math.min(600, Math.max(30, row.max_age_s)) * 1000 : null, source: SOURCES.includes(row.source) ? row.source : null,
       pResume: typeof row.p_resume === 'number' && row.p_resume >= 0 && row.p_resume <= 1 ? row.p_resume : null, reason: text(row.reason) ? row.reason : null,
       provider: text(row.upstream_provider) ? row.upstream_provider : null, model: text(row.upstream_model) ? row.upstream_model : null }));
   return rows.length && !kept.length ? null : kept;
@@ -63,7 +64,7 @@ export function pickRow(rows, prefixTokens) {
  *   headers?: () => Promise<Record<string, string>>, client?: string, harness?: string}} host
  */
 export function createPolicyClient(host) {
-  /** @type {Map<string, {at: number, rows: object[] | null, failures: number, retryAt: number, speaks?: number, lookup?: Promise<void>}>} */
+  /** @type {Map<string, {at: number, rows: object[] | null, ttl: number, failures: number, retryAt: number, speaks?: number, lookup?: Promise<void>}>} */
   const known = new Map();
   /** The last rows served for an alias, kept while refreshing or failing for up to an hour; [] is a real answer of no policy, null is unknown. */
   const peek = (alias, now) => {
@@ -77,7 +78,7 @@ export function createPolicyClient(host) {
         new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('timeout')), POLICY_TIMEOUT_MS); })]);
       const rows = response.status === 404 ? [] : response.status === 200 ? parsePolicy(response.text) : null;
       if (!rows) throw new Error('bad policy');
-      Object.assign(entry, { at: now, rows, failures: 0, retryAt: 0, speaks: response.status === 200 ? now : entry.speaks });
+      Object.assign(entry, { at: now, rows, ttl: Math.min(POLICY_TTL_MS, ...rows.map(row => row.maxAgeMs ?? POLICY_TTL_MS)), failures: 0, retryAt: 0, speaks: response.status === 200 ? now : entry.speaks });
     } catch {
       entry.failures++;
       entry.retryAt = now + BACKOFF_MS[Math.min(entry.failures, BACKOFF_MS.length) - 1];
@@ -91,10 +92,10 @@ export function createPolicyClient(host) {
     async refresh(base, alias, session, now) {
       const url = policyUrl(base, alias, session, host.client, host.harness);
       if (!url) return;
-      const entry = known.get(alias) ?? { at: 0, rows: null, failures: 0, retryAt: 0 };
+      const entry = known.get(alias) ?? { at: 0, rows: null, ttl: POLICY_TTL_MS, failures: 0, retryAt: 0 };
       known.set(alias, entry);
       if (entry.lookup) return entry.lookup;
-      if (now < entry.retryAt || entry.rows && now - entry.at < POLICY_TTL_MS) return;
+      if (now < entry.retryAt || entry.rows && now - entry.at < entry.ttl) return;
       entry.lookup = load(url, entry, now).finally(() => { entry.lookup = undefined; });
       return entry.lookup;
     },
