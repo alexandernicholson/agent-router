@@ -70,15 +70,16 @@ GET {base_url}/v1/cache/policy?alias=<model>&session=<id>
 | `upstream_provider` | string ≤ 200 | shown | Who serves it; shown in the panel (`via <provider>`). |
 | `upstream_model` | string ≤ 200 | stored | Backend model name. |
 | `alias` | string ≤ 200 | validated | Echo of the request. If present it must be a valid string. |
-| `cohort`, `resolution` (`exact` / `session` / `min`), `refresh_on_read`, `server_now`, any other field | any | ignored | Informational; clients must tolerate and servers may add more. |
+| `refresh_on_read` | boolean or null | used | See semantics. Any other type drops the row. |
+| `cohort`, `resolution` (`exact` / `session` / `min`), `server_now`, any other field | any | ignored | Informational; clients must tolerate and servers may add more. |
 
-A row with an invalid `status`, a non-integer or out-of-range `safe_refresh_s` / `max_idle_s`, or a non-integer `prefix_bucket` is ignored.
+A row with an invalid `status`, a non-integer or out-of-range `safe_refresh_s` / `max_idle_s`, or a non-integer `prefix_bucket` or a non-boolean `refresh_on_read` is ignored.
 
 ## 4. What the server must guarantee
 
 - **`safe_refresh_s`**: the longest time after the end of the last cache-touching request at which a refresh still hits the cache with high probability. The server applies its own safety margin (include request latency). The client fires within 5 s before `anchor + safe_refresh_s`, never after, and does not catch up a missed window, so a value that is too large costs a miss while a smaller one only costs a few extra reads.
 - **Only `enabled` warms.** `shadow`, `insufficient_data`, `demoted`, `fixed_window` and `native` are shown and never acted on. When unsure, return one of those. Never guess.
-- **`refresh_on_read`**: a refresh only helps if a cache read extends the lifetime. If reads do not extend it (a fixed window from first write), report `fixed_window`, not `enabled`.
+- **`refresh_on_read`** (`true`, `false` or `null`/absent): whether a cache read extends the lifetime. `null` means not yet known: the client fires **one** keepalive per idle period, timed from the end of the last *real* request (keepalives never move the anchor), and never chains; this is safe whatever the provider does. `true` lets the client chain: each keepalive that reports `cache_read_input_tokens > 0` becomes the new anchor. `false` (a fixed window from first write) must not be published as `enabled`, use `fixed_window`; a client treats `enabled` with `false` as monitor-only. Learn it from what happens on the next real request after a single keepalive.
 - **`max_idle_s`**: the point after which warming costs more than it saves, as measured by when users usually return. The client counts it from the last real request.
 - **`prefix_bucket`**: the client picks the highest bucket not above `floor(log2(cached prefix tokens))`; with a tie it takes the more cautious row (not `enabled`, then the smaller `safe_refresh_s`). Publish one bucket (0) if lifetime does not depend on size.
 - **Sessions**: if an alias can be served by several caches, return the row for the cache this `session` last hit (`resolution: "session"`). With no session information return the most conservative row (`min`: the smallest `safe_refresh_s`) rather than the best.

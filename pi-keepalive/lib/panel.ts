@@ -297,7 +297,7 @@ function sampleOf(c: Ctx, fields: object) {
     if (c.upkeep !== "warm" && c.upkeep !== "warmcomp") return;
     const model = row.last.model;
     if (c.settings.limit === undefined) await lookUpPrices(c, model);
-    const { action, dueAt } = policyAction(row, { status: policy.status, safe: policy.safe, maxIdle: policy.maxIdle }, eff(c, row));
+    const { action, dueAt } = policyAction(row, { status: policy.status, safe: policy.safe, maxIdle: policy.maxIdle, refreshOnRead: policy.refreshOnRead }, eff(c, row));
     if (action !== "fire" || c.actedAt === dueAt) return;
     c.actedAt = dueAt;
     if (keepaliveWorthwhile(row, c.prices.get(model)?.value, c.settings.limit)) return warm(c, model);

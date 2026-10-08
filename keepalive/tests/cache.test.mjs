@@ -470,7 +470,7 @@ test('time between requests reads in seconds, minutes or hours', () => {
 
 const gateway = (extra = {}, ...keepalives) => cacheRows([sample({ completedAt: 2000, ...extra }),
   ...keepalives.map((k, i) => sample({ turnId: `keepalive:${i}`, startedAt: 2500 + i, completedAt: 3000, ...k }))])[0];
-const enabled = { status: 'enabled', safe: 480, maxIdle: 3600 };
+const enabled = { status: 'enabled', safe: 480, maxIdle: 3600, refreshOnRead: true };
 
 test('a gateway policy counts down from the last confirmed cache touch and fires in the last tick, never later', () => {
   const row = gateway();
@@ -479,6 +479,18 @@ test('a gateway policy counts down from the last confirmed cache touch and fires
   assert.equal(policyAction(row, enabled, 482000 - POLICY_TICK_MS).action, 'fire');
   assert.equal(policyAction(row, enabled, 482000).action, 'fire');
   assert.equal(policyAction(row, enabled, 482001).action, 'missed');
+});
+
+test('without refresh_on_read the anchor is the last real turn and one keepalive is sent per idle period', () => {
+  const once = { ...enabled, refreshOnRead: null };
+  const chained = { ...enabled, refreshOnRead: true };
+  assert.deepEqual(policyAction(gateway(), once, 482000), { action: 'fire', dueAt: 482000 });
+  assert.equal(policyAction(gateway({}, { read: 900 }), once, 483000).action, 'sent');
+  assert.equal(policyAction(gateway({}, { read: 900 }), once, 483000).dueAt, 482000);
+  assert.equal(policyAction(gateway({}, { read: 0, write: 900 }), once, 100).action, 'sent');
+  assert.equal(policyAction(gateway({}, { read: 900, model: 'other/model' }), once, 482000).action, 'fire');
+  assert.equal(policyAction(gateway({}, { read: 900 }), chained, 483000).action, 'fire');
+  assert.equal(policyAction(gateway({}, { read: 900 }), { ...enabled, refreshOnRead: false }, 100).action, 'monitor');
 });
 
 test('only a keepalive that read the cache renews the anchor', () => {

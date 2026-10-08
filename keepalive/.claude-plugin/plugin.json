@@ -1,6 +1,6 @@
 {
   "name": "keepalive",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "license": "MIT",
   "description": "A prompt cache bar for every conversation, subagent and teammate, a dashboard with /keepalive, per-conversation cache TTLs, and upkeep that keeps an idle cache warm or compacts it before it expires. Requires Claude Code Mod function hooks enabled.",
   "author": {

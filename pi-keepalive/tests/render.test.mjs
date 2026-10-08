@@ -200,7 +200,8 @@ test("policy text: minutes, seconds, provider", async (t) => {
   const fake = (policy) => ({ policyOf: () => policy });
   assert.equal(policyText(fake(undefined), c, row), undefined);
   assert.equal(policyText(fake({ safe: null }), c, row), undefined);
-  assert.equal(policyText(fake({ safe: 480, provider: "phala", status: "enabled" }), c, row), "kimi-k3 via phala · safe 8m · enabled");
+  assert.equal(policyText(fake({ safe: 480, provider: "phala", status: "enabled", refreshOnRead: true }), c, row), "kimi-k3 via phala · safe 8m · enabled");
+  assert.equal(policyText(fake({ safe: 480, provider: "phala", status: "enabled", refreshOnRead: null }), c, row), "kimi-k3 via phala · safe 8m · once");
   assert.equal(policyText(fake({ safe: 95, status: "insufficient_data" }), c, row), "kimi-k3 · safe 1m 35s · insufficient data");
   assert.equal(policyText(fake({ safe: 45, status: "shadow" }), c, row), "kimi-k3 · safe 45s · shadow");
   void state;

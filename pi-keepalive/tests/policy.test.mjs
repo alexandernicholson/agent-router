@@ -4,7 +4,7 @@ import { createPanel } from "../lib/panel.ts";
 import { fakeHost, realRequest, settings, source } from "./helpers.mjs";
 
 const gw = (extra = {}) => source({ model: "kimi-k3", api: "openai-completions", baseUrl: "https://gateway.example.com/ai/openai/v1", payload: { messages: [], model: "kimi-k3" }, ...extra });
-const rows = (r = {}) => ({ status: 200, text: JSON.stringify({ rows: [{ alias: "kimi-k3", status: "enabled", safe_refresh_s: 480, max_idle_s: 1500, prefix_bucket: 0, upstream_provider: "phala", ...r }] }) });
+const rows = (r = {}) => ({ status: 200, text: JSON.stringify({ rows: [{ alias: "kimi-k3", status: "enabled", refresh_on_read: true, safe_refresh_s: 480, max_idle_s: 1500, prefix_bucket: 0, upstream_provider: "phala", ...r }] }) });
 
 async function gateway(t, { policy = rows(), set = {} } = {}) {
   const { host, state } = await fakeHost(t);
@@ -121,4 +121,23 @@ test("managed follows the policy: enabled yes, shadow no", async (t) => {
   const off = await gateway(t, { policy: rows({ status: "shadow" }) });
   await tick(off.panel, off.state, 100);
   assert.equal(off.panel.managed(), false);
+});
+
+test("single-shot: without refresh_on_read one keepalive fires, then nothing is chained", async (t) => {
+  for (const extra of [{ refresh_on_read: null }, { refresh_on_read: undefined }]) {
+    const { panel, state } = await gateway(t, { policy: rows(extra) });
+    await tick(panel, state, 100);
+    await tick(panel, state, 478_000);
+    assert.equal(state.forks.length, 1, "one keepalive at the last 5s before safe");
+    await tick(panel, state, 478_000);
+    await tick(panel, state, 478_000);
+    assert.equal(state.forks.length, 1, "the keepalive's read does not renew the countdown");
+  }
+});
+
+test("refresh_on_read false never warms", async (t) => {
+  const { panel, state } = await gateway(t, { policy: rows({ refresh_on_read: false }) });
+  await tick(panel, state, 100);
+  await tick(panel, state, 478_000);
+  assert.equal(state.forks.length, 0);
 });

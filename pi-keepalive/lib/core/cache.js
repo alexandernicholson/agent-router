@@ -184,19 +184,23 @@ export const POLICY_TICK_MS = 5000;
 export const policyRow = row => !!row?.last && !row.creation && !row.last.cacheCreation && row.last.read + row.last.write > 0;
 
 /**
- * What a gateway policy row says to do for a row it governs: the countdown anchors on the last confirmed cache-touching
- * request (the real one, or a keepalive that read the cache) and ends at anchor + safe; fire in the last tick before that, never after.
+ * What a gateway policy row says to do for a row it governs. With refreshOnRead true the countdown anchors on the last confirmed
+ * cache-touching request (the real one, or a keepalive that read the cache) and chains. Otherwise it anchors on the last real turn only
+ * and fires one keepalive per idle period. Either way it ends at anchor + safe: fire in the last tick before that, never after.
  * @param {CacheRow} row
- * @param {{status: string, safe: number | null, maxIdle: number | null} | undefined} policy
+ * @param {{status: string, safe: number | null, maxIdle: number | null, refreshOnRead?: boolean | null} | undefined} policy
  * @param {number} now
- * @returns {{action: 'monitor' | 'wait' | 'fire' | 'missed' | 'idle', dueAt?: number}}
+ * @returns {{action: 'monitor' | 'wait' | 'fire' | 'missed' | 'idle' | 'sent', dueAt?: number}}
  */
 export function policyAction(row, policy, now) {
-  if (!policyRow(row) || !policy || policy.status !== 'enabled' || !policy.safe) return { action: 'monitor' };
+  if (!policyRow(row) || !policy || policy.status !== 'enabled' || !policy.safe || policy.refreshOnRead === false) return { action: 'monitor' };
   const at = s => s.completedAt ?? s.startedAt;
-  const anchor = Math.max(at(row.last), ...row.keepalives.filter(s => s.read > 0 && sameModel(s.model, row.last.model)).map(at));
+  const same = row.keepalives.filter(s => sameModel(s.model, row.last.model) && s.startedAt >= row.last.startedAt);
+  const chained = policy.refreshOnRead === true;
+  const anchor = Math.max(at(row.last), ...(chained ? same.filter(s => s.read > 0).map(at) : []));
   const dueAt = anchor + policy.safe * 1000;
   if (policy.maxIdle && now - at(row.last) >= policy.maxIdle * 1000) return { action: 'idle', dueAt };
+  if (!chained && same.length) return { action: 'sent', dueAt };
   if (now > dueAt) return { action: 'missed', dueAt };
   return { action: now >= dueAt - POLICY_TICK_MS ? 'fire' : 'wait', dueAt };
 }

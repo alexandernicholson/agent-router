@@ -43,7 +43,7 @@ export function policyText(panel: Panel, c: Ctx, row: any): string | undefined {
   if (!policy?.safe) return undefined;
   const [minutes, seconds] = [Math.floor(policy.safe / 60), policy.safe % 60];
   const safe = minutes ? `${minutes}m${seconds ? ` ${seconds}s` : ""}` : `${seconds}s`;
-  return `${row.last.model}${policy.provider ? ` via ${policy.provider}` : ""} · safe ${safe} · ${policy.status.replace("_", " ")}`;
+  return `${row.last.model}${policy.provider ? ` via ${policy.provider}` : ""} · safe ${safe} · ${policy.status === "enabled" && policy.refreshOnRead !== true ? "once" : policy.status.replace("_", " ")}`;
 }
 
 export function segments(panel: Panel, c: Ctx, p: Paint, row: any): string {

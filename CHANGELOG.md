@@ -2,11 +2,19 @@
 
 Each release explains what changed for you, in 120 words or less.
 
+## Pi Keepalive 0.2.1
+
+- **One keepalive when the gateway can't promise more.** Same as Keepalive 0.3.1: an unconfirmed cache gets a single keepalive timed from your last message, shown as `· once`.
+
 ## Pi Keepalive 0.2.0
 
 - **Keepalive for Pi and OMP.** New `pi-keepalive` extension brings the Keepalive cache bar, dashboard (`/keepalive`), upkeep modes, keepalive limits and gateway cache policy to Pi and OMP sessions. Install by linking `pi-keepalive` into `~/.pi/agent/extensions` or `~/.omp/agent/extensions`.
 - **No double warming.** While it manages a session, it tells the built-in cache warmer to stop.
 - **What differs from Claude Code.** One conversation per session (no subagent or teammate rows), commands instead of buttons, and keepalives replay the last request with the keepalive prompt appended. See `pi-keepalive/PARITY.md`.
+
+## Keepalive 0.3.1
+
+- **One keepalive when the gateway can't promise more.** If the gateway hasn't learned whether a cache read extends its lifetime, `warm` times a single keepalive from your last message and stops, instead of chaining. The bar shows `kimi-k3 via phala · safe 8m · once`. Gateways that confirm reads extend the cache keep the chained behaviour.
 
 ## Keepalive 0.3.0
 

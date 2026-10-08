@@ -90,7 +90,7 @@ test("slash commands: status, upkeep, ttl, set, settings, dashboard, requests, c
   await x.emit("session_start");
   await turn(x);
   await run("");
-  assert.match(x.ui.notes.at(-1), /^keepalive v0\.2\.0\n\[ ● \]/);
+  assert.match(x.ui.notes.at(-1), /^keepalive v0\.2\.1\n\[ ● \]/);
   await run("upkeep compact");
   assert.match(x.ui.notes.at(-1), /upkeep: compact/);
   await run("upkeep");
@@ -144,7 +144,7 @@ test("the keepalive timer sends a marked request through the fetch fallback with
   assert.equal(calls[0].init.headers["x-api-key"], "sk-test");
   assert.equal(calls[0].init.headers["x-extra"], "1");
   assert.equal(calls[0].init.headers["content-length"], undefined);
-  assert.match(calls[0].body.messages.at(-1).content[0].text, /^<keepalive v="0\.2\.0"\/> Reply with only: K$/);
+  assert.match(calls[0].body.messages.at(-1).content[0].text, /^<keepalive v="0\.2\.1"\/> Reply with only: K$/);
   assert.equal(calls[0].body.stream, false);
   await new Promise((r) => setTimeout(r, 150));
   assert.match(x.ui.status.at(-1), /↻1/);
@@ -249,7 +249,7 @@ test("on a gateway the extension asks the policy with the session's credentials 
   await new Promise((r) => setTimeout(r, 100));
   const keepalive = calls.find((c) => String(c.url).endsWith("/chat/completions"));
   assert.ok(keepalive, "keepalive sent to the same base URL");
-  assert.match(JSON.parse(keepalive.init.body).messages.at(-1).content, /^<keepalive v="0\.2\.0"\/>/);
+  assert.match(JSON.parse(keepalive.init.body).messages.at(-1).content, /^<keepalive v="0\.2\.1"\/>/);
   x.ctx.modelRegistry.getApiKeyAndHeaders = async () => { throw new Error("no auth"); };
 });
 

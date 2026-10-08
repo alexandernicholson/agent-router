@@ -274,7 +274,7 @@ export function createCachePanel() {
     if (!policy?.safe) return undefined;
     const [minutes, seconds] = [Math.floor(policy.safe / 60), policy.safe % 60];
     const safe = minutes ? `${minutes}m${seconds ? ` ${seconds}s` : ''}` : `${seconds}s`;
-    return `${row.last!.model}${policy.provider ? ` via ${policy.provider}` : ''} · safe ${safe} · ${policy.status.replace('_', ' ')}`;
+    return `${row.last!.model}${policy.provider ? ` via ${policy.provider}` : ''} · safe ${safe} · ${policy.status === 'enabled' && policy.refreshOnRead !== true ? 'once' : policy.status.replace('_', ' ')}`;
   }
 
   function paint(elements: Elements[RenderSurface], parts: Segment[]): RenderElement[] {
@@ -628,7 +628,7 @@ export function createCachePanel() {
     if (current.upkeep !== 'warm' && current.upkeep !== 'warmcomp') return;
     const model = row.last!.model;
     if (current.limit === undefined) await lookUpPrices(current, model);
-    const { action, dueAt } = policyAction(row, { status: policy.status, safe: policy.safe, maxIdle: policy.maxIdle }, current.now);
+    const { action, dueAt } = policyAction(row, { status: policy.status, safe: policy.safe, maxIdle: policy.maxIdle, refreshOnRead: policy.refreshOnRead }, current.now);
     if (action !== 'fire' || current.actedAt === dueAt) return;
     current.actedAt = dueAt;
     if (keepaliveWorthwhile(row, current.prices.get(model)?.value, current.limit)) return warm(current, model);

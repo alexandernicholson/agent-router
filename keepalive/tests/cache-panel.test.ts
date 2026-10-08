@@ -1979,7 +1979,7 @@ test('a subagent miss chip opens its own history, and more than two causes are c
 });
 
 
-const policyRow = (extra: Record<string, unknown> = {}) => ({ alias: 'vendor/main', status: 'enabled', safe_refresh_s: 480, max_idle_s: 3600,
+const policyRow = (extra: Record<string, unknown> = {}) => ({ alias: 'vendor/main', status: 'enabled', safe_refresh_s: 480, max_idle_s: 3600, refresh_on_read: true,
   prefix_bucket: 8, upstream_provider: 'phala', upstream_model: 'moonshotai/kimi-k3', ...extra });
 const GATEWAY = { env: { ANTHROPIC_AUTH_TOKEN: 'secret-token' } };
 
@@ -1990,7 +1990,7 @@ test('the keepalive prompt names the plugin version and asks for one letter', as
   await cycleTo($, 'warm');
   await step($);
   await clock.advance(275000);
-  expect(world.forks).toEqual(['<keepalive v="0.3.0"/> Reply with only: K']);
+  expect(world.forks).toEqual(['<keepalive v="0.3.1"/> Reply with only: K']);
 });
 
 test('a gateway policy keeps a row without reported cache lifetimes warm by its safe time, renewing on confirmed reads', async ($, on) => {
@@ -2014,6 +2014,21 @@ test('a gateway policy keeps a row without reported cache lifetimes warm by its 
   await clock.advance(10000);
   expect(world.forks.length).toBe(2);
   expect(world.fetches.length).toBeLessThan(5);
+});
+
+test('a gateway row without refresh_on_read fires one keepalive per idle period and says once', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on, 'https://gateway.example', undefined, GATEWAY);
+  world.policy = [policyRow({ refresh_on_read: null })];
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(2000);
+  await clock.advance(30000);
+  expect(text(await $.ui.render(band())).includes('vendor/main via phala · safe 8m · once')).toBe(true);
+  await clock.advance(448000);
+  expect(world.forks.length).toBe(1);
+  await clock.advance(1200000);
+  expect(world.forks.length).toBe(1);
 });
 
 test('a keepalive that read nothing does not renew a gateway countdown, and the missed window is not retried', async ($, on) => {

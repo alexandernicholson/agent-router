@@ -31,8 +31,9 @@ export function parsePolicy(body) {
   if (!Array.isArray(rows) || rows.length > 64) return null;
   return rows.filter(row => row && STATUSES.includes(row.status) && text(row.alias ?? 'x') &&
     (row.safe_refresh_s == null || seconds(row.safe_refresh_s)) && (row.max_idle_s == null || seconds(row.max_idle_s)) &&
-    (row.prefix_bucket == null || Number.isSafeInteger(row.prefix_bucket)))
+    (row.prefix_bucket == null || Number.isSafeInteger(row.prefix_bucket)) && (row.refresh_on_read == null || typeof row.refresh_on_read === 'boolean'))
     .map(row => ({ status: row.status, safe: row.safe_refresh_s ?? null, maxIdle: row.max_idle_s ?? null, bucket: row.prefix_bucket ?? 0,
+      refreshOnRead: row.refresh_on_read ?? null,
       provider: text(row.upstream_provider) ? row.upstream_provider : null, model: text(row.upstream_model) ? row.upstream_model : null }));
 }
 
