@@ -2,12 +2,22 @@
 
 Each release explains what changed for you, in 120 words or less.
 
+## Keepalive 0.4.1
+
+- **Countdowns for non-Claude models.** A gateway or TTL-setting lifetime now counts down to the refresh time (`◇ 2m 9s · once`) with a live dial and colours, then reads `sent · once`, `idle` or `missed`.
+- **New gateway lifetimes.** `⟳` marks a gateway's probe lifetime, which it shortens when keepalives miss; administrator overrides show as `◇`. Prices come from your gateway's feed first, Claude included.
+- **No useless TTL button.** The 5m/1h request toggle shows only for Claude rows, where it works.
+
 ## Keepalive 0.4.0
 
 - **Warm, compact and warmcomp work on any model.** Pick **TTL for models that don't report one** in `/keepalive-settings`, globally or per model; a gateway's own lifetime always wins, and Claude is untouched.
 - **See where a lifetime comes from.** Icons mark it: ◉ provider, ✦ learned, ▣ documented, ◇ default, ✎ yours, ⊘ no cache.
 - **One keepalive per idle period** unless reads are known to extend the cache, and only when it pays off.
 - **Prices from your gateway.** Reads `/v1/cache/prices` or your own feed URL.
+
+## Pi Keepalive 0.3.1
+
+- **Live countdown for gateway and client lifetimes**, the `⟳` probe and `◇` override sources, Claude-only native TTL, and price feeds with `patterns` and `write_1h`. Same as Keepalive 0.4.1.
 
 ## Pi Keepalive 0.3.0
 

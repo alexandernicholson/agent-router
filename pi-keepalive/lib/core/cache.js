@@ -183,13 +183,13 @@ export const POLICY_TICK_MS = 5000;
 /** A row the gateway's policy governs: it has a cached prefix but Anthropic never reported its cache lifetimes. */
 export const policyRow = row => !!row?.last && !row.creation && !row.last.cacheCreation && row.last.read + row.last.write > 0;
 
-export const KEEPALIVE_SOURCES = ['native', 'learned', 'documented', 'default', 'client'];
+export const KEEPALIVE_SOURCES = ['native', 'learned', 'documented', 'default', 'override', 'probe', 'client'];
 /** The keepalive request text; src says which lifetime the keepalive was timed by. */
 export const keepalivePrompt = (version, source) => `<keepalive v="${version}" src="${source}"/> Reply with only: K`;
 
-export const SOURCE_ICONS = { native: '◉', learned: '✦', documented: '▣', default: '◇', client: '✎', none: '⊘', unknown: '◌' };
+export const SOURCE_ICONS = { native: '◉', learned: '✦', documented: '▣', default: '◇', override: '◇', probe: '⟳', client: '✎', none: '⊘', unknown: '◌' };
 export const SOURCE_NAMES = { native: 'reported by the provider', learned: 'learned by the gateway', documented: 'documented by the provider',
-  default: 'gateway default', client: 'your TTL setting', none: 'no cache', unknown: 'unknown' };
+  default: 'gateway default', override: 'set by your gateway administrator', probe: 'gateway probe', client: 'your TTL setting', none: 'no cache', unknown: 'unknown' };
 export const FALLBACK_TTLS = { '5m': 300000, '15m': 900000, '30m': 1800000, '45m': 2700000, '1h': 3600000 };
 /** @param {unknown} value @returns {'off' | keyof typeof FALLBACK_TTLS | undefined} */
 export const fallbackTtl = value => value === 'off' || typeof value === 'string' && Object.hasOwn(FALLBACK_TTLS, value) ? value : undefined;
@@ -202,7 +202,7 @@ export function parseTtlOverrides(text) {
 }
 /** The client TTL in ms for a model with no reported or served lifetime: the first matching override, else the global choice. Never for Claude. */
 export function clientTtl(model, global, overrides = []) {
-  if (/claude/i.test(model)) return null;
+  if (isClaudeModel(model)) return null;
   const choice = overrides.find(([pattern]) => globRegex(pattern).test(model))?.[1] ?? global ?? 'off';
   return choice === 'off' ? null : FALLBACK_TTLS[choice];
 }
@@ -241,10 +241,33 @@ export function lifetimeLabel(life, state = '') {
   if (life.source === 'native') return state || undefined;
   const icon = SOURCE_ICONS[life.source];
   if (life.source === 'none') return `${icon} no cache`;
+  if (life.phase === 'sent') return `${icon} sent · once`;
+  if (life.phase === 'idle' || life.phase === 'missed') return `${icon} ${life.phase}`;
+  if (life.left !== undefined) return life.left ? `${icon} ${span(life.left)}${life.once ? ' · once' : ''}` : `${icon} expired`;
   if (life.shownS) return `${icon} ${span(life.shownS)}${life.once ? ' · once' : ''}`;
   const why = life.status === 'demoted' ? `demoted${life.reason ? ` · ${life.reason}` : ''}`
     : life.status === 'monitor' ? `monitor${life.reason ? ` (${life.reason})` : ''}` : life.status?.replace('_', ' ');
   return `${icon} ${why ?? state}`.trimEnd();
+}
+
+/**
+ * The cache status of a row governed by a gateway or client lifetime: a countdown to the refresh time, from the same deadline
+ * policyAction fires on, so what is shown and what is sent cannot disagree. Rows without an actionable lifetime keep `base`.
+ * @param {CacheRow} row
+ * @param {ReturnType<typeof lifetimeOf>} life
+ * @param {number} now
+ * @param {CacheStatus} base
+ * @returns {CacheStatus & {phase?: string}}
+ */
+export function lifetimeStatus(row, life, now, base) {
+  if (!life.policy || ['compacted', 'caching disabled', 'uncached', 'no observation'].includes(base.state)) return base;
+  const { action, dueAt } = policyAction(row, life.policy, now);
+  if (dueAt === undefined) return base;
+  const ttlMs = life.policy.safe * 1000;
+  const leftMs = action === 'idle' || action === 'missed' ? 0 : Math.min(ttlMs, Math.max(0, dueAt - now));
+  const ttl = span(life.shownS);
+  return { ...base, state: leftMs ? 'warm' : 'expired', leftMs, ttl, phase: action, awaiting: undefined,
+    lifetimes: [{ ttl, ttlMs, tokens: row.last.read + row.last.write, leftMs }] };
 }
 
 /** Whether a keepalive pays for itself: the chance the user resumes times what a hit saves must beat what the keepalive costs. */
@@ -278,8 +301,7 @@ export function policyAction(row, policy, now) {
   } else anchor = Math.max(at(row.last), ...(chained ? sameKeepalives.filter(s => s.read > 0).map(at) : []));
   const dueAt = anchor + safeMs;
   if (policy.maxIdle && now - at(row.last) >= policy.maxIdle * 1000) return { action: 'idle', dueAt };
-  const sent = fixed ? sameKeepalives.filter(s => at(s) > anchor) : sameKeepalives;
-  if (!chained && sent.length) {
+  if (!chained && sameKeepalives.length) {
     return { action: 'sent', dueAt };
   }
   if (now > dueAt) return { action: 'missed', dueAt };
@@ -324,11 +346,13 @@ export function cacheStatus(row, now, pendingAt, unreported) {
  * @returns {CacheCreation | null}
  */
 function awaitedCreation(row, sample, now) {
-  if (sample !== row.last || !sample.write || sample.cacheCreation || !sample.requested) return null;
+  // Only Anthropic's own cache has a requested 5m/1h lifetime; a gateway's other models never get one made up.
+  if (sample !== row.last || !sample.write || sample.cacheCreation || !sample.requested || !isClaudeModel(sample.model)) return null;
   if (sample.completedAt !== undefined && now - sample.completedAt >= TTL_REPORT_MS) return null;
   return sample.requested === '1h' ? { fiveMinute: 0, oneHour: sample.write } : { fiveMinute: sample.write, oneHour: 0 };
 }
 
+export const isClaudeModel = model => /claude/i.test(model);
 const modelName = model => model.replace(/\[1m\]$/i, '');
 
 /**

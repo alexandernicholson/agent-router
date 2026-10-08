@@ -106,7 +106,7 @@ test("the client TTL times keepalives for a model with no served lifetime, tagge
     await tick(panel, state, 100);
     await tick(panel, state, 266_000);
     assert.equal(state.forks.length, expected, JSON.stringify(set));
-    if (expected) assert.match(state.forks[0].payload.messages.at(-1).content, /^<keepalive v="0\.3\.0" src="client"\/>/);
+    if (expected) assert.match(state.forks[0].payload.messages.at(-1).content, /^<keepalive v="0\.3\.1" src="client"\/>/);
     assert.equal(panel.managed(), expected === 1);
     if (expected) assert.equal(panel.lifetime(panel.get(), panel.mainRow(panel.get())).source, "client");
   }
@@ -232,4 +232,68 @@ test("a monitor row is shown as monitor with its reason and never warmed", async
   await tick(panel, state, 478_000);
   assert.equal(state.forks.length, 0);
   assert.match(statusLine(panel, panel.get(), painter({ NO_COLOR: "1" }, true)), /◌ monitor \(ttl_too_short\)/);
+});
+
+test("probe and override sources: icons, markers, countdown, and no 5m/1h control", async (t) => {
+  for (const [source, icon] of [["probe", "⟳"], ["override", "◇"]]) {
+    const { panel, state } = await gateway(t, { policy: rows({ source, safe_refresh_s: 480 }) });
+    await tick(panel, state, 100);
+    const line = statusLine(panel, panel.get(), painter({ NO_COLOR: "1" }, true));
+    assert.match(line, new RegExp(`${icon} (7m|8m)`), source);
+    assert.doesNotMatch(line, /TTL 5m/, "the 5m/1h control is hidden");
+    const text = dashboard(panel, panel.get(), painter({ NO_COLOR: "1" }, false), "all").join("\n");
+    assert.match(text, /⟳ gateway probe/);
+    assert.doesNotMatch(text, /chosen with \/keepalive ttl|the request's own cache_control/);
+    await tick(panel, state, 478_000);
+    assert.match(state.forks[0].payload.messages.at(-1).content, new RegExp(`src="${source}"`));
+  }
+});
+
+test("the countdown counts down from the same deadline the keepalive fires on", async (t) => {
+  const { panel, state } = await gateway(t);
+  await tick(panel, state, 100);
+  const status = panel.state(panel.get(), panel.mainRow(panel.get()));
+  assert.ok(status.leftMs > 0 && status.leftMs <= 480_000);
+  await tick(panel, state, 200_000);
+  assert.ok(panel.state(panel.get(), panel.mainRow(panel.get())).leftMs < status.leftMs - 190_000);
+});
+
+test("monitor reasons below_economic_floor and unreliable_cache are shown, never warmed", async (t) => {
+  for (const reason of ["below_economic_floor", "unreliable_cache"]) {
+    const { panel, state } = await gateway(t, { policy: rows({ status: "monitor", reason }) });
+    await tick(panel, state, 100);
+    await tick(panel, state, 478_000);
+    assert.equal(state.forks.length, 0);
+    assert.match(statusLine(panel, panel.get(), painter({ NO_COLOR: "1" }, true)), new RegExp(`◌ monitor \\(${reason}\\)`));
+  }
+});
+
+test("a non-Claude model without a policy URL gets no native TTL and no server opinion", async (t) => {
+  const { host, state } = await fakeHost(t);
+  const panel = createPanel();
+  await panel.initialize(host, "p", settings({ upkeep: "warm", keepalive_limit: "4" }));
+  await realRequest(panel, state, gw({ baseUrl: "https://api.anthropic.com" }), { write: 20_000 });
+  const c = panel.get();
+  assert.notEqual(panel.lifetime(c, panel.mainRow(c)).source, "native");
+  assert.equal(state.fetches.length, 0);
+});
+
+test("price lookups pass the feed context for every row; patterns and write_1h are honoured", async (t) => {
+  const seen = [];
+  const real = globalThis.fetch;
+  t.after(() => { globalThis.fetch = real; });
+  globalThis.fetch = async (url, init) => {
+    seen.push({ url: String(url), headers: init?.headers });
+    const body = JSON.stringify({ version: 1, models: {}, patterns: { "kimi-*": { input: 1, read: 0.1, write: 1.25, write_1h: 2, output: 5 } } });
+    return { ok: true, headers: { get: () => null }, text: async () => body };
+  };
+  const { panel, state } = await gateway(t, { set: { keepalive_limit: "default" } });
+  await tick(panel, state, 100);
+  await tick(panel, state, 478_000);
+  const feed = seen.find((s) => /\/v1\/cache\/prices$/.test(s.url));
+  assert.ok(feed, "the feed was asked");
+  assert.equal(feed.headers["x-api-key"], "k");
+  const price = panel.get().prices.get("kimi-k3")?.value;
+  assert.equal(price?.oneHour, 2);
+  assert.equal(price?.read, 0.1);
 });

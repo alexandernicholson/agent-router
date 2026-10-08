@@ -1,7 +1,7 @@
 // Pi/OMP port of keepalive/hooks/cache-panel.ts: the cache ledger, upkeep and policy logic, with no UI.
 // Everything environmental (clock, storage, network, model calls, compaction) comes in through PanelHost.
 import {
-  applyCacheCreation, cachePolicy, cacheRows, cacheStatus, isCompaction, isKeepalive, keepaliveWorthwhile, keepalivesLeft, loopKey,
+  applyCacheCreation, cachePolicy, cacheRows, cacheStatus, lifetimeStatus, isCompaction, isKeepalive, keepaliveWorthwhile, keepalivesLeft, loopKey,
   policyAction, policyRow, lifetimeOf, clientTtl, savingsWorthwhile, recentUsage, sampleKey, unreportedModels, validPrices, validSample,
 } from "./core/cache.js";
 import { handleRequest } from "./core/bridge.mjs";
@@ -99,7 +99,7 @@ export function createPanel() {
     const pending = c.pending;
     const value = cacheStatus(row, eff(c, row), pending?.startedAt, unreportedModels(rows(c), c.now));
     if (pending?.changed && row.last) return { ...value, state: "model changed · awaiting usage", leftMs: null, lifetimes: [], ttl: undefined };
-    return value;
+    return lifetimeStatus(row, lifetime(c, row), eff(c, row), value);
   }
 
   /** The gateway's served rows for a row it may govern: [] = no opinion (404, empty, no gateway), null = unknown or too stale. */
@@ -121,6 +121,9 @@ export function createPanel() {
     const client = rows && policyRow(row) ? clientTtl(row.last.model, c.settings.fallback.ttl, c.settings.fallback.models) : null;
     return lifetimeOf(row, rows ? pickRow(rows, policyRow(row) ? row.last.read + row.last.write : 0) : undefined, client);
   }
+
+  /** A lifetime from the gateway or the user's setting rules this row, so the 5m/1h request toggle does nothing for it. */
+  const ownLifetime = (c: Ctx, row: any) => !["native", "unknown"].includes(lifetime(c, row).source);
 
   /** Any non-Anthropic base URL may publish a cache policy; policyUrl refuses api.anthropic.com and unsafe URLs. */
   function gatewayBase(c: Ctx): string | undefined {
@@ -398,6 +401,6 @@ function sampleOf(c: Ctx, fields: object) {
   /** The model changed: nothing may be replayed until the next real request. */
   const forget = () => { if (ctx) ctx.last = undefined; };
 
-  return { get, forget, initialize, refresh, begin, finish, compacted, tick, setUpkeep, cycle, setTtl, introduce, managed, rows, mainRow, state, policyOf, lifetime, recentUsage, isKeepalive, isCompaction, keepalivesLeft, keepalivePrompt, eff, lookUpPrices, wantedTtl, gatewayBase, setSettings: (s: Resolved) => { if (ctx) ctx.settings = s; } };
+  return { get, forget, initialize, refresh, begin, finish, compacted, tick, setUpkeep, cycle, setTtl, introduce, managed, rows, mainRow, state, policyOf, lifetime, ownLifetime, recentUsage, isKeepalive, isCompaction, keepalivesLeft, keepalivePrompt, eff, lookUpPrices, wantedTtl, gatewayBase, setSettings: (s: Resolved) => { if (ctx) ctx.settings = s; } };
 }
 export type Panel = ReturnType<typeof createPanel>;

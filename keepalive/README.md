@@ -222,7 +222,8 @@ Keepalives are billed: each reads the cached context at the cache-read rate and 
 | ◉ | Reported by the provider (Claude's `cache_creation`) | `◉ ETA ~3:44` |
 | ✦ | Learned by your gateway from traffic | `✦ 8m · once` |
 | ▣ | Documented by the provider | `▣ 28m` |
-| ◇ | Gateway default | `◇ 5m · once` |
+| ◇ | Gateway default or administrator override | `◇ 5m · once` |
+| ⟳ | Gateway probe: a long starting guess the gateway shortens when keepalives miss | `⟳ 27m` |
 | ✎ | Your own TTL setting | `✎ 15m` |
 | ⊘ | No cache; never warmed or compacted | `⊘ no cache` |
 | ◌ | Unknown; monitored only | `◌ demoted · too many misses` |
@@ -236,7 +237,7 @@ Keepalives are billed: each reads the cached context at the cache-read rate and 
 
 **Is it worth it?** For these conversations a keepalive is sent only if the chance you return × (cache write price − cache read price) beats the read price it costs. The chance comes from your keepalive limit when you set one, else from the gateway's `p_resume` hint, else the usual price-based default.
 
-Each keepalive says which lifetime timed it: `<keepalive v="0.4.0" src="learned"/> Reply with only: K` (`src` is `native`, `learned`, `documented`, `default` or `client`).
+Each keepalive says which lifetime timed it: `<keepalive v="0.4.1" src="learned"/> Reply with only: K` (`src` is `native`, `learned`, `documented`, `default`, `override`, `probe` or `client`).
 
 Server authors: see the [cache policy protocol](docs/cache-policy-protocol.md).
 
@@ -248,7 +249,7 @@ The **Compaction threshold** in `/keepalive-settings` (`compact_threshold`) is t
 
 Keepalive costs come from price sources, asked in order for any model the earlier ones did not price. In `warm` and `warmcomp` with the `default` keepalive limit, the panel looks up the main conversation's model once an hour, and the dashboard names the source that priced it.
 
-1. **Price feed.** Your gateway's `{base}/v1/cache/prices`, or the **Price feed URL** (`keepalive_price_url`; `off` disables it), as `{"version":1,"models":{"alias":{"input":1,"read":0.1,"write":1.25,"output":5}}}`. Values may be relative multipliers or dollars. Credentials go only to the gateway's own origin; a `404` means no feed; the answer is cached for an hour.
+1. **Price feed.** Your gateway's `{base}/v1/cache/prices`, or the **Price feed URL** (`keepalive_price_url`; `off` disables it), as `{"version":1,"models":{"alias":{"input":1,"read":0.1,"write":1.25,"output":5}}}`. Add an optional `write_1h` for 1-hour cache writes, and a `patterns` object (`{"claude-opus-*": {…}}`; `*` is the only wildcard, first match wins, `[1m]` suffix ignored, case-insensitive) for model families. The feed is authoritative: it is tried first for every model, Claude included, and only a model it lacks falls back to Anthropic's list prices, then models.dev. Values may be relative multipliers or dollars. Credentials go only to the gateway's own origin; a `404` means no feed; the answer is cached for an hour.
 2. **Anthropic pricing.** The [prompt caching price table](https://platform.claude.com/docs/en/build-with-claude/prompt-caching#pricing) for every Claude model, including 1-hour cache writes at 2× input, as built into Keepalive (checked 2026-10-05). It prices Claude models however a gateway, Bedrock, or Google Cloud spells them, with no download.
 3. **models.dev.** The public [models.dev](https://models.dev) catalog, for everything else. It lists 5-minute cache writes only, so a 1-hour cache it prices is costed at its 5-minute write price: warming stops sooner than the exact price would allow, never later.
 

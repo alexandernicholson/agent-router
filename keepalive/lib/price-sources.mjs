@@ -2,7 +2,7 @@ import { ANTHROPIC_PRICES } from './anthropic-prices.js';
 import { priceIndex, matchPrices } from './model-match.js';
 import { modelPrices } from './model-prices.mjs';
 import { validPrices } from './cache.js';
-import { priceFeed, parsePriceFeed, POLICY_TIMEOUT_MS, POLICY_MAX_BYTES } from './shared/policy.mjs';
+import { priceFeed, parsePriceFeed, feedPrice, POLICY_TIMEOUT_MS, POLICY_MAX_BYTES } from './shared/policy.mjs';
 
 /**
  * @typedef {{read: number, output: number, fiveMinute?: number, oneHour?: number, provider?: string, id?: string}} SourcePrices
@@ -42,7 +42,7 @@ export const customUrlPrices = {
       headers: { accept: 'application/json', ...(feed.authorize ? request.headers : {}) } });
     if (!response.ok || Number(response.headers?.get?.('content-length')) > POLICY_MAX_BYTES) return {};
     const found = parsePriceFeed(await response.text());
-    return Object.fromEntries(models.map(model => [model, found?.[model] ?? null]));
+    return Object.fromEntries(models.map(model => [model, found ? feedPrice(found, model) : null]));
   },
 };
 

@@ -64,7 +64,7 @@ GET {base_url}/v1/cache/policy?alias=<model>&session=<id>
 |---|---|---|---|
 | `rows` | array | yes | One row per cache the alias can land in, per prefix bucket. |
 | `status` | string, required | yes | `enabled`, `insufficient_data`, `fixed_window`, `demoted`, `monitor`, `no_cache`, `native`, or the deprecated `shadow` (clients treat it like `insufficient_data`: no opinion). Any other value drops the row. |
-| `source` | `learned`, `documented` or `default` | yes | Where the lifetime comes from (see §4). Anything else counts as `learned`. |
+| `source` | `learned`, `documented`, `default`, `override` or `probe` | yes | Where the lifetime comes from (see §4). Anything else counts as `learned`. |
 | `p_resume` | number 0–1 | yes | Optional hint: the chance the user resumes within the next window. Used to decide whether a keepalive pays for itself. |
 | `reason` | string ≤ 200 | shown | Why a row is `demoted`; shown next to it. |
 | `safe_refresh_s` | integer seconds, 1–604800, or `null` | yes | See §4. |
@@ -82,7 +82,7 @@ A row with an invalid `status`, a non-integer or out-of-range `safe_refresh_s` /
 
 - **`safe_refresh_s`**: the longest time after the end of the last cache-touching request at which a refresh still hits the cache with high probability. The server applies its own safety margin (include request latency). The client fires within 5 s before `anchor + safe_refresh_s`, never after, and does not catch up a missed window, so a value that is too large costs a miss while a smaller one only costs a few extra reads.
 - **Only `enabled` warms or compacts.** A served `enabled` row is authoritative: it overrides any lifetime the user configured on the client ("server controlled"). `insufficient_data` means "no opinion" (the deprecated `shadow` is treated the same): the client falls through to the user's own TTL setting, if any, else monitors only. `demoted`, `fixed_window` and `monitor` are monitor-only and never overridden by a user TTL (`reason` is shown, e.g. `◌ monitor (ttl_too_short)`). Use `monitor` when you know the lifetime but warming must not happen (lifetime shorter than a safe refresh, live load). The user's own TTL applies only when there is no row at all: no endpoint, a `404`, or an empty `rows`. While a refresh is pending or failing the client keeps using your last rows for up to an hour, then monitors. `no_cache` means the model has no cache: never warmed or compacted, shown as "no cache". When unsure, return `insufficient_data`. Never guess.
-- **`source`**: tells the user how much to trust the number: `learned` (measured from traffic), `documented` (the provider's published lifetime) or `default` (an administrator's fallback, typically 300 s). The client shows it as an icon (✦ learned, ▣ documented, ◇ default) and passes it back in the keepalive marker.
+- **`source`**: tells the user how much to trust the number: `learned` (measured from traffic), `documented` (the provider's published lifetime), `default` (a fallback, typically 300 s), `override` (a lifetime an administrator set for the alias; shown like `default`, older servers send `default` for it), or `probe` (a long starting guess, such as 30 min, that the server shortens when keepalives miss). The client shows `probe` as ⟳ and treats it like any other `enabled` row. Typical `monitor` reasons: `ttl_too_short`, `below_economic_floor` (warming that often costs more than the rewrite saves), `unreliable_cache` (hits are inconsistent even at short gaps; keepalives cannot help). `prefix_bucket` may always be 0. The client shows it as an icon (✦ learned, ▣ documented, ◇ default, ⟳ probe) and passes it back in the keepalive marker.
 - **`refresh_on_read`** (`true`, `false` or `null`/absent): whether a cache read extends the lifetime. `null` means not yet known: the client fires **one** keepalive per idle period, timed from the end of the last *real* request (keepalives never move the anchor), and never chains; this is safe whatever the provider does. `true` lets the client chain: each keepalive that reports `cache_read_input_tokens > 0` becomes the new anchor. `false` (a fixed window from the write): the window is counted from the latest request that mostly wrote the prefix (write ≥ half its cached+written tokens), not from later reads; with no such request the client only monitors. The client sends at most one keepalive inside the window and never chains. Use `fixed_window` instead when a keepalive cannot help at all. Learn it from what happens on the next real request after a single keepalive.
 - **`max_idle_s`**: the point after which warming costs more than it saves, as measured by when users usually return. The client counts it from the last real request.
 - **`prefix_bucket`**: the client picks the highest bucket not above `floor(log2(cached prefix tokens))`; with a tie it takes the more cautious row (not `enabled`, then the smaller `safe_refresh_s`). Publish one bucket (0) if lifetime does not depend on size.
@@ -99,10 +99,10 @@ The client confirms every keepalive from the response's Anthropic Messages `usag
 
 ## 6. Recognising a keepalive
 
-The last user message begins with `<keepalive v="X.Y.Z" src="SOURCE"/> Reply with only: K` (`X.Y.Z` is the plugin version; `SOURCE` is the lifetime that timed it: `native`, `learned`, `documented`, `default` or `client`). Older plugins omit `src`. Match it with:
+The last user message begins with `<keepalive v="X.Y.Z" src="SOURCE"/> Reply with only: K` (`X.Y.Z` is the plugin version; `SOURCE` is the lifetime that timed it: `native`, `learned`, `documented`, `default`, `override`, `probe` or `client`). Older plugins omit `src`. Match it with:
 
 ```
-<keepalive v="(?P<version>[0-9A-Za-z.+-]{1,32})"(?: src="(?P<src>native|learned|documented|default|client)")?/>
+<keepalive v="(?P<version>[0-9A-Za-z.+-]{1,32})"(?: src="(?P<src>native|learned|documented|default|override|probe|client)")?/>
 ```
 
 A server may use it to classify, bill (it is mostly cache-read tokens), or count adoption. It must be routed to the same backend, replica or slot as the session's real requests, or it will not hit the cache: keep session affinity for keepalives exactly as for normal requests.
@@ -112,8 +112,12 @@ A server may use it to classify, bill (it is mostly cache-read tokens), or count
 `GET {base}/v1/cache/prices`, same origin and authentication as the policy, under 64 KB, cached 1 h by the client, `404` = none:
 
 ```json
-{"version": 1, "models": {"kimi-k3": {"input": 1.0, "read": 0.1, "write": 1.25, "output": 5.0}}}
+{"version": 1,
+ "models":   {"kimi-k3": {"input": 1.0, "read": 0.1, "write": 1.25, "output": 5.0}},
+ "patterns": {"claude-opus-*": {"input": 5, "read": 0.5, "write": 6.25, "write_1h": 10, "output": 25}}}
 ```
+
+`models` match an alias exactly and win. `patterns` use `*` as the only wildcard, the first match in order wins, a trailing `[1m]` on the model name is ignored and matching is case-insensitive; `patterns` may be empty or absent. `write_1h` is optional (1-hour cache writes). The feed is authoritative over public price lists: per model the client tries the feed (exact, then pattern), then built-in public list prices, then a public catalogue.
 
 Values are per-token prices in any consistent unit (relative multipliers are fine; dollars work too). The client uses only their ratios to decide whether a keepalive is cheaper than rewriting the cache. Users can point the client at their own feed instead.
 

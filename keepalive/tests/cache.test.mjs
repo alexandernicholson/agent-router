@@ -4,7 +4,7 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { cachePolicy, validSample, validPrices, cacheRows, cacheStatus, cacheBar, cacheClock, loopKey, applyCacheCreation, cacheGrade, cachePercent, lifeGrade, isKeepalive, keepaliveWorthwhile, keepalivesLeft, cacheDial, cacheBarParts, isCompaction,
-  recentUsage, recentMisses, sampleTtl, unreportedModels, sessionMatrix, sessionUsage, cacheGap, lifetimeOf, lifetimeLabel, clientTtl, parseTtlOverrides, fallbackTtl, savingsWorthwhile, keepalivePrompt, SOURCE_ICONS, policyAction, policyRow, POLICY_TICK_MS, MISS_WINDOW_MS, TTL_REPORT_MS } from '../lib/cache.js';
+  recentUsage, recentMisses, sampleTtl, unreportedModels, sessionMatrix, sessionUsage, cacheGap, lifetimeOf, lifetimeLabel, lifetimeStatus, clientTtl, parseTtlOverrides, fallbackTtl, savingsWorthwhile, keepalivePrompt, SOURCE_ICONS, policyAction, policyRow, POLICY_TICK_MS, MISS_WINDOW_MS, TTL_REPORT_MS } from '../lib/cache.js';
 import { recordCacheSample, resetCache, cacheSnapshot, linkSession } from '../lib/cache-state.mjs';
 import { recordPath, writeRecord, routerData } from '../lib/state.mjs';
 import { handleRequest } from '../lib/bridge.mjs';
@@ -369,25 +369,26 @@ test('misses are counted by cause for a window of time', () => {
 });
 
 test('a write whose TTL is not yet reported counts down from the requested TTL until the report is due', () => {
-  const written = sample({ startedAt: 0, completedAt: 1000, read: 900, write: 100, requested: '1h' });
+  const written = sample({ startedAt: 0, completedAt: 1000, read: 900, write: 100, requested: '1h', model: 'claude-opus-5-5' });
   const status = now => cacheStatus(cacheRows([written])[0], now);
   assert.equal(status(2000).ttl, '1h');
   assert.equal(status(2000).awaiting, true);
   assert.equal(status(2000).leftMs, 3598000);
   assert.equal(status(1000 + TTL_REPORT_MS).state, 'TTL not reported');
   assert.equal(cacheStatus(cacheRows([sample({ completedAt: 1000 })])[0], 2000).state, 'TTL not reported');
+  assert.equal(cacheStatus(cacheRows([{ ...written, model: 'gpt-5.6' }])[0], 2000).awaiting, undefined);
   const reported = applyCacheCreation(written, { fiveMinute: 100, oneHour: 0 });
   assert.equal(cacheStatus(cacheRows([reported])[0], 2000).ttl, '5m');
   assert.equal(cacheStatus(cacheRows([reported])[0], 2000).awaiting, undefined);
 });
 
 test('a model seen not to report its TTL gets no provisional countdown on later writes, in any loop', () => {
-  const first = sample({ turnId: 'a', startedAt: 0, completedAt: 1000, read: 0, write: 900, requested: '5m', model: 'gateway/alias[1m]' });
-  const later = sample({ turnId: 'b', startedAt: 40000, completedAt: 41000, read: 900, write: 100, requested: '5m', model: 'gateway/alias' });
-  const elsewhere = sample({ agentId: 'child', turnId: 'c', startedAt: 40000, completedAt: 41000, read: 0, write: 500, requested: '5m', model: 'gateway/alias' });
+  const first = sample({ turnId: 'a', startedAt: 0, completedAt: 1000, read: 0, write: 900, requested: '5m', model: 'claude-gateway[1m]' });
+  const later = sample({ turnId: 'b', startedAt: 40000, completedAt: 41000, read: 900, write: 100, requested: '5m', model: 'claude-gateway' });
+  const elsewhere = sample({ agentId: 'child', turnId: 'c', startedAt: 40000, completedAt: 41000, read: 0, write: 500, requested: '5m', model: 'claude-gateway' });
   const rows = cacheRows([first, later, elsewhere]);
   const quiet = unreportedModels(rows, 42000);
-  assert.deepEqual([...quiet], ['gateway/alias']);
+  assert.deepEqual([...quiet], ['claude-gateway']);
   for (const row of rows) assert.equal(cacheStatus(row, 42000, undefined, quiet).state, 'TTL not reported');
   assert.equal(cacheStatus(rows[0], 42000).awaiting, true);
   assert.deepEqual([...unreportedModels(cacheRows([first]), 2000)], []);
@@ -604,12 +605,12 @@ test('a fixed window runs from the write that established the prefix, not from l
   assert.equal(policyAction(fixedRow({ at: 1000, read: 900, write: 100, fresh: 10 }), fixed, 1000).action, 'monitor');
 });
 
-test('a fixed window gets one keepalive; one that rewrote the cache opens a new window', () => {
+test('a fixed window gets one keepalive, even when it rewrote the cache', () => {
   const row = (extra = {}) => cacheRows([sample({ completedAt: 1000, startedAt: 900, read: 0, write: 900 }), sample({ turnId: 'keepalive:1', startedAt: 150000, completedAt: 150100, ...extra })])[0];
   const read = policyAction(row({ read: 900, write: 0 }), fixed, 160000);
   assert.equal(read.action, 'sent');
   const rewrote = policyAction(row({ read: 0, write: 900 }), fixed, 160000);
-  assert.deepEqual([rewrote.action, rewrote.dueAt], ['wait', 390100]);
+  assert.equal(rewrote.action, 'sent');
 });
 
 test('a client TTL counts from the start of the request, a served row from its completion', () => {
@@ -626,4 +627,28 @@ test('a fixed window anchors only on a write of at least half the current prefix
   assert.equal(policyAction(rows({ read: 40000, write: 60000 }), fixed, 100000).dueAt, 100000 + 240000);
   assert.equal(policyAction(rows({ read: 60000, write: 40000 }), fixed, 100000).action, 'monitor');
   assert.equal(policyAction(rows({ read: 40000, write: 20000 }), fixed, 100000).dueAt, 1000 + 240000);
+});
+
+test('a governed row counts down to the refresh time from the same deadline policyAction fires on', () => {
+  const row = gateway();
+  const life = lifetimeOf(row, served({ source: 'default', safe: 229 }), null);
+  const base = cacheStatus(row, 100000);
+  const status = lifetimeStatus(row, life, 100000, base);
+  assert.equal(status.leftMs, 2000 + 229000 - 100000);
+  assert.equal(status.state, 'warm');
+  assert.equal(status.lifetimes[0].ttlMs, 229000);
+  assert.equal(cacheDial(status), '◕');
+  assert.equal(lifetimeLabel({ ...life, left: 129 }), '◇ 2m 9s · once');
+  assert.equal(lifetimeLabel({ ...life, left: 0 }), '◇ expired');
+  assert.equal(lifetimeLabel({ ...life, phase: 'sent' }), '◇ sent · once');
+  assert.equal(lifetimeLabel({ ...life, phase: 'idle' }), '◇ idle');
+  assert.equal(lifetimeLabel({ ...life, phase: 'missed' }), '◇ missed');
+  assert.equal(lifetimeLabel({ source: 'default', left: 60 }), '◇ 1m');
+  assert.equal(lifetimeStatus(row, life, 400000, base).state, 'expired');
+  assert.equal(lifetimeStatus(row, life, 400000, base).phase, 'missed');
+  assert.equal(lifetimeStatus(row, { source: 'unknown' }, 1, base), base);
+  assert.equal(lifetimeStatus(row, life, 1, { ...base, state: 'uncached' }).state, 'uncached');
+  const noWrite = fixedRow({ at: 1000, read: 900, write: 100, fresh: 10 });
+  const fixedLife = lifetimeOf(noWrite, served({ refreshOnRead: false }), null);
+  assert.equal(lifetimeStatus(noWrite, fixedLife, 1, cacheStatus(noWrite, 1)).state, cacheStatus(noWrite, 1).state);
 });

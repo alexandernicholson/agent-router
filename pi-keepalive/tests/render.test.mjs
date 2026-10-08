@@ -207,3 +207,13 @@ test("lifetime line: source, provider, control; native and plain unknown rows ha
   assert.equal(lifetimeLine(fake({ source: "unknown", status: "shadow" }), c, row), "◌ shadow · unknown");
   void state;
 });
+
+test("the dashboard legend names the probe icon", async () => {
+  const { dashboard, painter } = await import("../lib/render.ts");
+  const { createPanel } = await import("../lib/panel.ts");
+  const { fakeHost, settings } = await import("./helpers.mjs");
+  const { host } = await fakeHost({ after() {} });
+  const panel = createPanel();
+  await panel.initialize(host, "p", settings());
+  assert.match(dashboard(panel, panel.get(), painter({ NO_COLOR: "1" }, false), "all").join("\n"), /⟳ gateway probe/);
+});

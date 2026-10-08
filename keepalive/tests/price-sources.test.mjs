@@ -120,3 +120,20 @@ test('the bridge hands only credential headers to the price feed', async t => {
   await handleRequest({ action: 'cache-prices', session_id: 's', models: ['m'], feed: { base: 'https://gateway.example' } }, { CLAUDE_PLUGIN_DATA: root }, {}, fetcher);
   await handleRequest({ action: 'cache-prices', session_id: 's', models: ['m'], feed: {} }, { CLAUDE_PLUGIN_DATA: root }, {}, fetcher);
 });
+
+test('the feed prices Claude too: a pattern with write_1h beats Anthropic list prices, and a model it lacks falls back', async () => {
+  const feed = { version: 1, models: {}, patterns: { 'claude-opus-*': { input: 2, read: 0.4, write: 5, write_1h: 8, output: 10 } } };
+  const fetcher = async () => new Response(JSON.stringify(feed));
+  const context = { fetcher, feed: { base: 'https://gateway.example' } };
+  const { prices } = await lookUpPrices(['claude-opus-5-5', 'claude-opus-5-5[1m]', 'claude-sonnet-5'], context);
+  for (const model of ['claude-opus-5-5', 'claude-opus-5-5[1m]']) {
+    assert.deepEqual([prices[model].read, prices[model].fiveMinute, prices[model].oneHour, prices[model].source], [0.2, 2.5, 4, 'price feed']);
+  }
+  assert.equal(prices['claude-sonnet-5'].source, 'Anthropic pricing');
+  near(prices['claude-sonnet-5'].read, 0.1);
+  const exact = { version: 1, models: { 'claude-opus-5-5': { input: 1, read: 0.9, write: 1, output: 1 } }, patterns: feed.patterns };
+  const won = await lookUpPrices(['claude-opus-5-5'], { fetcher: async () => new Response(JSON.stringify(exact)), feed: { base: 'https://gateway.example' } });
+  assert.equal(won.prices['claude-opus-5-5'].read, 0.9);
+  const none = await lookUpPrices(['claude-opus-5-5'], { fetcher: async () => new Response('x', { status: 404 }), feed: { base: 'https://gateway.example' } });
+  assert.equal(none.prices['claude-opus-5-5'].source, 'Anthropic pricing');
+});

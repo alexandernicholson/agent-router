@@ -1,9 +1,9 @@
 import type { AgentInfo, Elements, EngineInterface, RenderElement, RenderSurface, SessionCompacted, TurnStepInput, TurnUsage } from 'claude-code';
-import { applyCacheCreation, reportedCacheCreation, cacheBar, cacheBarParts, cacheClock, cacheDial, cacheGrade, cachePercent, cachePolicy, cacheRows, cacheStatus, cacheTokens, isCompaction, isKeepalive, keepaliveWorthwhile, keepalivesLeft, lifeGrade, policyAction, policyRow, lifetimeOf, lifetimeLabel, clientTtl, savingsWorthwhile, keepalivePrompt, SOURCE_ICONS, SOURCE_NAMES, loopKey, recentMisses, recentUsage, sampleKey, sampleTtl, unreportedModels, validSample, sessionMatrix, sessionUsage, cacheGap, MISS_WINDOW_MS, RATE_REQUESTS } from '../lib/cache.js';
+import { applyCacheCreation, reportedCacheCreation, cacheBar, cacheBarParts, cacheClock, cacheDial, cacheGrade, cachePercent, cachePolicy, cacheRows, cacheStatus, cacheTokens, isCompaction, isKeepalive, keepaliveWorthwhile, keepalivesLeft, lifeGrade, policyAction, policyRow, lifetimeOf, lifetimeLabel, lifetimeStatus, clientTtl, savingsWorthwhile, keepalivePrompt, SOURCE_ICONS, SOURCE_NAMES, loopKey, recentMisses, recentUsage, sampleKey, sampleTtl, unreportedModels, validSample, sessionMatrix, sessionUsage, cacheGap, MISS_WINDOW_MS, RATE_REQUESTS } from '../lib/cache.js';
 import { validPrices } from '../lib/cache.js';
 import type { CachePrices, CacheRow, CacheSample, CacheReset, CacheStatus } from '../lib/cache.js';
 import { CACHE_COLORS, themeFamily } from '../lib/cache-colors.js';
-import { createPolicyClient, pickRow } from '../lib/shared/policy.mjs';
+import { createPolicyClient, pickRow, policyUrl } from '../lib/shared/policy.mjs';
 import { VERSION } from '../lib/version.js';
 import { displayText } from '../lib/shared/text.js';
 import { isPaneTeammate, isTeammate, sameModel } from '../lib/shared/models.js';
@@ -39,7 +39,7 @@ const INTRO = [
   '    warm sends cheap keepalive requests, by default while they cost less than rewriting the cache; ↻ shows how many are left.',
   '    compact summarises a conversation at or over the compaction threshold, 100k tokens unless changed, while it is still cached.',
   '    warmcomp warms first, then compacts.',
-  '  Icons say where a cache lifetime comes from: ◉ reported by the provider, ✦ learned by your gateway, ▣ documented by the provider, ◇ gateway default, ✎ your own TTL setting, ⊘ no cache, ◌ unknown.',
+  '  Lifetime icons: ◉ provider-reported, ✦ learned, ▣ documented, ◇ default, ⟳ probe, ✎ your TTL, ⊘ no cache, ◌ unknown.',
   '  Keepalives and compactions are billed. Set how many, and each kind of conversation\'s defaults, with /keepalive-settings.',
 ];
 type Upkeep = typeof UPKEEP[number];
@@ -235,7 +235,7 @@ export function createCachePanel() {
     if (pending?.changed && row.last) {
       return { ...value, state: 'model changed · awaiting usage', leftMs: null, lifetimes: [], ttl: undefined };
     }
-    return value;
+    return lifetimeStatus(row, lifetime(current, row), current.now, value);
   }
 
   const palette = (current: Context) => CACHE_COLORS[current.family];
@@ -257,6 +257,12 @@ export function createCachePanel() {
       const { before, after } = status.compacted!;
       return [...result, { text: ` · cmpt ✓${before !== undefined && after !== undefined ? ` ${cacheTokens(before)} → ${cacheTokens(after)}` : ''}` }];
     }
+    const governing = lifetime(current, row);
+    if (governing.policy && status.ttl) {
+      const grade = lifeGrade(status.leftMs);
+      return [...result, { text: ` · ${lifetimeLabel({ ...governing, left: Math.ceil(status.leftMs! / 1000), phase: (status as { phase?: string }).phase })}`,
+        color: palette(current)[status.leftMs && grade ? grade : 'poor'] }];
+    }
     if (!status.ttl) return [...result, { text: ` · ${segmentLabel(current, row, status.state)}` }];
     const wanted = row.sessionId === current.sessionId ? ttlChoice(current, row.agentId).ttl : undefined;
     if (wanted && status.ttl !== wanted) result.push({ text: ` · ${status.ttl} reported` });
@@ -269,12 +275,16 @@ export function createCachePanel() {
   /** The lifetime governing a row: native, the gateway's row by source, the client TTL setting, or unknown. */
   function lifetime(current: Context, row: CacheRow | undefined) {
     const governed = policyRow(row);
-    const rows = current.endpoint && governed ? current.policy.peek(row!.last!.model, current.now) : [];
+    // A base URL no policy can be asked of (none, Anthropic's own, unsafe) has no server opinion at all.
+    const rows = governed && policyUrl(current.endpoint, 'x') ? current.policy.peek(row!.last!.model, current.now) : [];
     const served = rows ? pickRow(rows, governed ? row!.last!.read + row!.last!.write : 0) : undefined;
     // Without a base URL, or after a real 404 or empty answer, nobody has an opinion; while the gateway's answer is unknown or too old, nobody may substitute one.
     const client = governed && rows ? clientTtl(row!.last!.model, current.fallback.ttl, current.fallback.models) : null;
     return lifetimeOf(row, served, client);
   }
+
+  /** A lifetime from the gateway or the user's setting rules this row, so the 5m/1h request toggle does nothing for it. */
+  const ownLifetime = (current: Context, row: CacheRow) => !['native', 'unknown'].includes(lifetime(current, row).source);
 
   function segmentLabel(current: Context, row: CacheRow, state: string) {
     return lifetimeLabel(lifetime(current, row), state);
@@ -709,7 +719,8 @@ export function createCachePanel() {
       Button({ key: 'agent-cache-open', label: cacheDial(status), onPress: show }),
       Box({ flexDirection: 'row', children: marker(elements, current, upkeeps ? current.upkeep : undefined) }),
       ...(upkeeps ? [Button({ key: 'agent-cache-upkeep', label: current.upkeep, plain: true, onPress: cycle })] : []),
-      ttl.locked ? Text({ dimColor: true, children: [`TTL ${ttl.ttl}`] })
+      row && ownLifetime(current, row) ? Text({ children: [''] })
+        : ttl.locked ? Text({ dimColor: true, children: [`TTL ${ttl.ttl}`] })
         : Button({ key: 'agent-cache-ttl', label: `TTL ${ttl.ttl}`, plain: true, onPress: () => cycleTtl(agentId ?? null) }),
       Box({ flexDirection: 'row', children: [...paint(elements, parts.slice(0, 3)), ...missChip(elements, current, agentId ?? null), ...paint(elements, parts.slice(3)),
         Text({ wrap: 'truncate-end', children: [`${counts}${current.available ? '' : ' · storage unavailable'}`] })] }),
@@ -929,8 +940,8 @@ export function createCachePanel() {
         Box({ flexDirection: 'row', children: [Text({ dimColor: true, children: [node.prefix] }),
           Button({ key: `cache-agent:${key}`, label: `${displayText(row.label, 120)}${kind}`, plain: true, onPress: () => { selected = key; historyScope = 'agent'; redraw(current); } })] }),
         Box({ flexDirection: 'row', children: [Text({ children: [`${indent}${cacheDial(state(current, row))} `] }), ...marker(elements, current, node.upkeep),
-          Text({ children: [node.upkeep ? ` ${node.upkeep} ` : ' '] }), Text({ children: [`TTL ${ttlLabel(current, row)} `] }), ...paint(elements, segments(current, row))] }),
-        ...(row.sessionId === current.sessionId ? [Text({ dimColor: true, children: [`${indent}TTL ${ttlChoice(current, row.agentId).ttl} · ${ttlChoice(current, row.agentId).reason}`] })] : []),
+          Text({ children: [node.upkeep ? ` ${node.upkeep} ` : ' '] }), Text({ children: [ownLifetime(current, row) ? '' : `TTL ${ttlLabel(current, row)} `] }), ...paint(elements, segments(current, row))] }),
+        ...(row.sessionId === current.sessionId && !ownLifetime(current, row) ? [Text({ dimColor: true, children: [`${indent}TTL ${ttlChoice(current, row.agentId).ttl} · ${ttlChoice(current, row.agentId).reason}`] })] : []),
         ...(lifetimeLine(current, row) ? [Text({ dimColor: true, children: [`${indent}${lifetimeLine(current, row)}`] })] : []),
         ...life,
         ...keepalives,

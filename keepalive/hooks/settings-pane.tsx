@@ -185,7 +185,7 @@ export function createSettingsPane() {
       {choose('unreported-ttl', fallbackLabel, FALLBACKS)}
       {choose('unreported-ttl-models', value => value || 'None', [''])}
       {other('unreported-ttl-models')}
-      <Text dimColor>The lifetime Keepalive assumes when neither the provider nor your gateway gives one, so warm, compact and warmcomp can work. A gateway's own lifetime always wins; Claude is never affected. Overrides look like kimi*=15m, glm-5.3=off. Icons: ◉ provider-reported, ✦ gateway-learned, ▣ documented, ◇ gateway default, ✎ your setting, ⊘ no cache, ◌ unknown.</Text>
+      <Text dimColor>The lifetime Keepalive assumes when neither the provider nor your gateway gives one, so warm, compact and warmcomp can work. A gateway's own lifetime always wins; Claude is never affected. Overrides look like kimi*=15m, glm-5.3=off. Icons: ◉ provider-reported, ✦ gateway-learned, ▣ documented, ◇ gateway default, ⟳ gateway probe, ✎ your setting, ⊘ no cache, ◌ unknown.</Text>
       {other('price-url')}
       <Text dimColor>{`Price feed: ${(() => { try { return String(ownedRow(rows, host.plugin.name, 'price-url').value) || 'your gateway'; } catch { return 'unavailable'; } })()}. Prices decide whether a keepalive is worth its cost.`}</Text>
       <Text dimColor>The smallest conversation compact and warmcomp compact. A smaller one is left to expire, since rewriting its cache costs little.</Text>

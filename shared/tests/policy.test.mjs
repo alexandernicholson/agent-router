@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { priceFeed, parsePriceFeed, policyUrl, parsePolicy, pickRow, createPolicyClient, POLICY_TTL_MS, POLICY_STALE_MS } from '../lib/policy.mjs';
+import { priceFeed, parsePriceFeed, feedPrice, policyUrl, parsePolicy, pickRow, createPolicyClient, POLICY_TTL_MS, POLICY_STALE_MS } from '../lib/policy.mjs';
 
 const row = (extra = {}) => ({ alias: 'kimi-k3', status: 'enabled', safe_refresh_s: 480, max_idle_s: 3600, prefix_bucket: 12,
   upstream_provider: 'phala', upstream_model: 'moonshotai/kimi-k3', ...extra });
@@ -102,8 +102,22 @@ test('the price feed is the gateway default, a user URL, or off, and credentials
   for (const bad of ['nonsense', 'http://other.example/p', 'https://u:p@other.example/p']) assert.equal(priceFeed('https://gateway.example', bad), null);
 });
 
-test('a price feed maps relative units to cache prices and skips unusable entries', () => {
-  const feed = JSON.stringify({ version: 1, models: { a: { input: 2, read: 0.2, write: 2.5, output: 10 }, b: { input: 0, read: 1, write: 1, output: 1 }, c: { input: 1 }, d: null } });
-  assert.deepEqual(parsePriceFeed(feed), { a: { read: 0.1, fiveMinute: 1.25, output: 5 } });
+test('a price feed maps relative units, exact models and glob patterns, and skips unusable entries', () => {
+  const feed = parsePriceFeed(JSON.stringify({ version: 1,
+    models: { a: { input: 2, read: 0.2, write: 2.5, output: 10 }, b: { input: 0, read: 1, write: 1, output: 1 }, c: { input: 1 }, d: null, 'claude-opus-5-5': { input: 1, read: 1, write: 1, output: 1 } },
+    patterns: { 'claude-opus-*': { input: 5, read: 0.5, write: 6.25, write_1h: 10, output: 25 }, '*': { input: 1, read: 1, write: 1, write_1h: 'x', output: 1 }, bad: { input: 0 }, ['x'.repeat(201)]: { input: 1, read: 1, write: 1, output: 1 } } }));
+  assert.deepEqual(feedPrice(feed, 'a'), { read: 0.1, fiveMinute: 1.25, output: 5 });
+  assert.equal(feedPrice(feed, 'claude-opus-5-5').read, 1);
+  assert.deepEqual(feedPrice(feed, 'claude-opus-5-1'), { read: 0.1, fiveMinute: 1.25, oneHour: 2, output: 5 });
+  assert.deepEqual(feedPrice(feed, 'CLAUDE-OPUS-4[1M]'), { read: 0.1, fiveMinute: 1.25, oneHour: 2, output: 5 });
+  assert.equal(feedPrice(feed, 'gpt-5').oneHour, undefined);
+  assert.equal(feedPrice(feed, 'b'), feedPrice(feed, 'b'));
+  assert.equal(feedPrice(parsePriceFeed(JSON.stringify({ version: 1, models: {} })), 'x'), null);
+  assert.equal(feedPrice(parsePriceFeed(JSON.stringify({ version: 1, models: {}, patterns: [] })), 'constructor'), null);
   for (const bad of ['{', JSON.stringify({ version: 2, models: {} }), JSON.stringify({ version: 1 }), JSON.stringify({ version: 1, models: [] }), 'x'.repeat(70000), 5]) assert.equal(parsePriceFeed(bad), null);
+});
+
+test('every served source is accepted, including probe and override', () => {
+  const sources = parsePolicy(body(['learned', 'documented', 'default', 'override', 'probe'].map(source => row({ source })))).map(r => r.source);
+  assert.deepEqual(sources, ['learned', 'documented', 'default', 'override', 'probe']);
 });

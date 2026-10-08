@@ -162,10 +162,10 @@ async function dashboard($: Engine) {
 test('main and child cache bars remain distinct and native stream and response survive observation', async ($, on) => {
   response(on);
   const { world } = await setup($, on);
-  const main = await step($);
+  const main = await step($, { model: 'claude-main' });
   expect(main.chunks).toEqual([{ kind: 'text', index: 0, text: 'PRIVATE_ANSWER' }]);
   expect(main.result.answer).toBe('PRIVATE_ANSWER');
-  await step($, { index: 1 });
+  await step($, { model: 'claude-main', index: 1 });
   world.roster = [{ id: 'child', type: 'agent-router:scout', description: 'Search', status: 'running' }];
   await step($, { agentId: 'child', model: 'vendor/scout' });
   expect(world.samples.length).toBe(3);
@@ -303,18 +303,19 @@ test('a response whose TTL never reaches the transcript stops being rechecked', 
   expect(text(await $.ui.render(band())).includes('not reported')).toBe(true);
 });
 
-test('a gateway model that never reports its TTL stops showing a countdown that then vanishes', async ($, on) => {
+test('a gateway model that never reports its TTL never shows a made-up countdown, while a Claude model awaiting its report does', async ($, on) => {
   response(on);
   const { clock } = await setup($, on);
   await step($, { model: 'gateway/alias-code[1m]' });
-  expect(text(await $.ui.render(band())).includes('ETA ~5:00')).toBe(true);
+  let shown = text(await $.ui.render(band()));
+  expect(shown.includes('ETA')).toBe(false);
+  expect(shown.includes('not reported')).toBe(true);
   await clock.advance(31000);
-  expect(text(await $.ui.render(band())).includes('not reported')).toBe(true);
   await step($, { model: 'gateway/alias-code[1m]', index: 1 });
-  const shown = text(await $.ui.render(band()));
+  shown = text(await $.ui.render(band()));
   expect(shown.includes('not reported')).toBe(true);
   expect(shown.includes('ETA')).toBe(false);
-  await step($, { model: 'vendor/main', index: 2 });
+  await step($, { model: 'claude-main', index: 2 });
   expect(text(await $.ui.render(band())).includes('ETA ~5:00')).toBe(true);
 });
 
@@ -495,7 +496,7 @@ const dial = async ($: Engine, agentId?: string) => button(await $.ui.render(ban
 test('the band opens with a bordered dial and the bare upkeep mode', async ($, on) => {
   response(on);
   await setup($, on);
-  await step($);
+  await step($, { model: 'claude-main' });
   const rendered = await $.ui.render(band());
   const shown = text(rendered);
   expect(shown.includes('Cache')).toBe(false);
@@ -637,7 +638,7 @@ test('a new write shows the TTL it asked for until the transcript reports one, n
   await $.classic.SessionStart({ source: 'startup', session_id: world.sessionId, transcript_path: transcript });
   await $.ui.render(band());
   await $.ui.press({ plugin: 'keepalive', key: 'agent-cache-ttl', requestId: 'cache-band' });
-  await step($);
+  await step($, { model: 'claude-main' });
   let shown = text(await $.ui.render(band()));
   expect(shown.includes('not reported')).toBe(false);
   expect(shown.includes('ETA ~60:00')).toBe(true);
@@ -649,7 +650,7 @@ test('a new write shows the TTL it asked for until the transcript reports one, n
   expect(shown.includes('ETA ~59:59')).toBe(true);
   expect(text(await $.ui.render(pane)).includes('awaiting report')).toBe(false);
   world.flushed = undefined;
-  await step($, { index: 1 });
+  await step($, { model: 'claude-main', index: 1 });
   await clock.advance(29000);
   expect(text(await $.ui.render(band())).includes('not reported')).toBe(false);
   await clock.advance(1000);
@@ -1108,9 +1109,9 @@ test('viewing an agent that cannot be warmed shows a dash in place of the mode b
   response(on);
   const { world } = await setup($, on);
   await cycleTo($, 'warm');
-  await step($);
+  await step($, { model: 'claude-main' });
   world.roster = [{ id: 'child', type: 'agent-router:scout', description: 'Search', status: 'running' }];
-  await step($, { agentId: 'child' });
+  await step($, { model: 'claude-main', agentId: 'child' });
   const child = await $.ui.render(band('child'));
   expect(button(child, 'agent-cache-upkeep')).toBe(undefined);
   expect(/● – TTL 5m █/.test(text(child))).toBe(true);
@@ -1832,9 +1833,9 @@ test('usage reports are measured as the response gave them, and impossible ones 
 test('two requests in flight on one conversation each settle on their own', async ($, on) => {
   response(on);
   const { world } = await setup($, on);
-  const first = $.turn.step({ turnId: 'same-turn', index: 1, messageCount: 1, model: 'vendor/main' });
+  const first = $.turn.step({ turnId: 'same-turn', index: 1, messageCount: 1, model: 'claude-main' });
   await first.next();
-  const second = $.turn.step({ turnId: 'same-turn', index: 2, messageCount: 1, model: 'vendor/main' });
+  const second = $.turn.step({ turnId: 'same-turn', index: 2, messageCount: 1, model: 'claude-main' });
   await second.next();
   while (!(await first.next()).done);
   expect(await dial($)).toBe('●');
@@ -1990,7 +1991,7 @@ test('the keepalive prompt names the plugin version and asks for one letter', as
   await cycleTo($, 'warm');
   await step($);
   await clock.advance(275000);
-  expect(world.forks).toEqual(['<keepalive v="0.4.0" src="native"/> Reply with only: K']);
+  expect(world.forks).toEqual(['<keepalive v="0.4.1" src="native"/> Reply with only: K']);
 });
 
 test('a gateway policy keeps a row without reported cache lifetimes warm by its safe time, renewing on confirmed reads', async ($, on) => {
@@ -2004,7 +2005,7 @@ test('a gateway policy keeps a row without reported cache lifetimes warm by its 
   expect(world.fetches[0].url).toBe('https://gateway.example/v1/cache/policy?alias=vendor%2Fmain&session=cache-session');
   expect(world.fetches[0].headers?.authorization).toBe('Bearer secret-token');
   await clock.advance(30000);
-  expect(text(await $.ui.render(band())).includes('✦ 8m')).toBe(true);
+  expect(text(await $.ui.render(band()))).toMatch(/✦ 7m \d+s/);
   await clock.advance(438000);
   expect(world.forks.length).toBe(0);
   await clock.advance(10000);
@@ -2024,7 +2025,7 @@ test('a gateway row without refresh_on_read fires one keepalive per idle period 
   await step($);
   await clock.advance(2000);
   await clock.advance(30000);
-  expect(text(await $.ui.render(band())).includes('✦ 8m · once')).toBe(true);
+  expect(text(await $.ui.render(band()))).toMatch(/✦ 7m \d+s · once/);
   await clock.advance(448000);
   expect(world.forks.length).toBe(1);
   await clock.advance(1200000);
@@ -2039,11 +2040,11 @@ test('a client TTL warms a model nobody else gives a lifetime for, once per idle
   await cycleTo($, 'warm');
   await step($);
   await clock.advance(35000);
-  expect(text(await $.ui.render(band())).includes('✎ 5m')).toBe(true);
+  expect(text(await $.ui.render(band()))).toMatch(/✎ 3m \d+s/);
   await clock.advance(225000);
   expect(world.forks.length).toBe(0);
   await clock.advance(12000);
-  expect(world.forks).toEqual(['<keepalive v="0.4.0" src="client"/> Reply with only: K']);
+  expect(world.forks).toEqual(['<keepalive v="0.4.1" src="client"/> Reply with only: K']);
   await clock.advance(1200000);
   expect(world.forks.length).toBe(1);
   expect((await dashboard($)).includes('✎ 5m · your TTL setting')).toBe(true);
@@ -2080,7 +2081,7 @@ test('a 404 from the gateway means no opinion, so the client TTL applies', { opt
   await cycleTo($, 'warm');
   await step($);
   await clock.advance(35000);
-  expect(text(await $.ui.render(band())).includes('✎ 5m')).toBe(true);
+  expect(text(await $.ui.render(band()))).toMatch(/✎ 3m \d+s/);
 });
 
 test('a monitor row shows its reason and is never warmed or replaced by the client TTL', { options: { unreported_ttl: '5m' } }, async ($, on) => {
@@ -2196,9 +2197,9 @@ test('a served enabled lifetime overrides the client TTL, and its source rides t
   await cycleTo($, 'warm');
   await step($);
   await clock.advance(32000);
-  expect(text(await $.ui.render(band())).includes('▣ 4m')).toBe(true);
+  expect(text(await $.ui.render(band()))).toMatch(/▣ 3m \d+s/);
   await clock.advance(212000);
-  expect(world.forks).toEqual(['<keepalive v="0.4.0" src="documented"/> Reply with only: K']);
+  expect(world.forks).toEqual(['<keepalive v="0.4.1" src="documented"/> Reply with only: K']);
   expect((await dashboard($)).includes('server controlled')).toBe(true);
 });
 
@@ -2396,8 +2397,8 @@ test('a gateway request without credentials sends none', async ($, on) => {
   expect(world.fetches[0].headers?.['x-api-key']).toBeUndefined();
 });
 
-for (const [safe, provider, shown] of [[45, undefined, '✦ 45s'], [95, 'phala', '✦ 1m 35s'], [120, undefined, '✦ 2m']] as const) {
-  test(`a policy safe time of ${safe}s is shown as "${shown}"`, async ($, on) => {
+for (const [safe, provider, shown] of [[45, undefined, '✦ 12s'], [95, 'phala', '✦ 1m 2s'], [120, undefined, '✦ 1m 27s']] as const) {
+  test(`a policy safe time of ${safe}s counts down to "${shown}"`, async ($, on) => {
     response(on);
     const { world, clock } = await setup($, on, 'https://gateway.example', undefined, GATEWAY);
     world.reported = undefined;
@@ -2430,4 +2431,284 @@ test('a credential that cannot be read leaves the policy request without credent
   await clock.advance(2000);
   expect(world.fetches[0].headers?.authorization).toBeUndefined();
   expect(world.fetches[0].headers?.['x-api-key']).toBeUndefined();
+});
+
+test('a served default shows time left counting down, a live dial and no TTL chip', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on, 'https://gateway.example', undefined, GATEWAY);
+  world.reported = undefined;
+  world.policy = [policyRow({ source: 'default', safe_refresh_s: 229, refresh_on_read: null, max_idle_s: null })];
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(2000);
+  await clock.advance(98000);
+  const first = text(await $.ui.render(band()));
+  expect(first).toContain('◇ 2m 9s · once');
+  expect(first).not.toContain('TTL 1h');
+  expect(first).not.toContain('TTL 5m');
+  expect(first).not.toContain('[ ◌ ]');
+  expect(first).toMatch(/[◔◑◕●]/);
+  await clock.advance(5000);
+  expect(text(await $.ui.render(band()))).toContain('◇ 2m 4s · once');
+  expect((await dashboard($)).includes('TTL 5m ·')).toBe(false);
+});
+
+test('after its single keepalive the bar says sent, and after max idle it says idle', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on, 'https://gateway.example', undefined, GATEWAY);
+  world.reported = undefined;
+  world.policy = [policyRow({ source: 'default', safe_refresh_s: 100, refresh_on_read: null, max_idle_s: 400 })];
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(98000);
+  await clock.advance(5000);
+  expect(world.forks.length).toBe(1);
+  expect(text(await $.ui.render(band()))).toContain('◇ sent · once');
+  await clock.advance(400000);
+  expect(text(await $.ui.render(band()))).toContain('◇ idle');
+});
+
+test('a window that was missed reads missed', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on, 'https://gateway.example', undefined, GATEWAY);
+  world.reported = undefined;
+  world.policy = [policyRow({ source: 'default', safe_refresh_s: 100, refresh_on_read: null, max_idle_s: null })];
+  await cycleTo($, 'off');
+  await step($);
+  await clock.advance(200000);
+  expect(text(await $.ui.render(band()))).toContain('◇ missed');
+});
+
+test('a gateway OpenAI model with a documented lifetime shows a countdown from it, never a native 1h cache', async ($, on) => {
+  response(on, 0, 30200, 10);
+  const { world, clock } = await setup($, on, 'https://gateway.example', undefined, GATEWAY);
+  world.reported = undefined;
+  world.prices['gateway-code-task'] = { read: 0.1, fiveMinute: 1.25, output: 5 };
+  world.policy = [policyRow({ alias: 'gateway-code-task', source: 'documented', safe_refresh_s: 1680, refresh_on_read: true, max_idle_s: null })];
+  await cycleTo($, 'warmcomp');
+  await step($, { model: 'gateway-code-task' });
+  for (const wait of [0, 2000, 40000]) {
+    await clock.advance(wait);
+    const shown = text(await $.ui.render(band()));
+    expect(shown).not.toContain('◉');
+    expect(shown).not.toContain('TTL 1h');
+    expect(shown).not.toContain('ETA ~59');
+  }
+  expect(text(await $.ui.render(band()))).toMatch(/▣ 2\dm \d+s/);
+  await clock.advance(3500000);
+  expect(world.forks.every(prompt => prompt.includes('src="documented"'))).toBe(true);
+  expect(world.forks.length).toBeGreaterThan(0);
+});
+
+test('a Claude model behind a gateway still shows its requested TTL while the report is awaited', async ($, on) => {
+  response(on, 0, 30200, 10);
+  const { world } = await setup($, on, 'https://gateway.example', undefined, GATEWAY);
+  world.policy = [policyRow({ alias: 'claude-opus-5', status: 'enabled' })];
+  await step($, { model: 'claude-opus-5' });
+  const shown = text(await $.ui.render(band()));
+  expect(shown).toContain('ETA ~');
+  expect(shown).toContain('TTL 5m');
+});
+
+// ---- Panel matrix, generated: lifetime source × upkeep mode × conversation size -------------------------------------------------------
+const WRITE = 300;
+const TOTAL = WRITE + 10;
+type Source = { name: string; row?: Record<string, unknown>; client?: string; native?: boolean; actionable: boolean; chained: boolean; advance: number; src?: string };
+const SOURCES: Source[] = [
+  { name: 'learned chained', row: { source: 'learned', refresh_on_read: true }, actionable: true, chained: true, advance: 482000, src: 'learned' },
+  { name: 'probe unknown refresh', row: { source: 'probe', refresh_on_read: null }, actionable: true, chained: false, advance: 482000, src: 'probe' },
+  { name: 'override chained', row: { source: 'override', refresh_on_read: true }, actionable: true, chained: true, advance: 482000, src: 'override' },
+  { name: 'documented unknown refresh', row: { source: 'documented', refresh_on_read: null }, actionable: true, chained: false, advance: 482000, src: 'documented' },
+  { name: 'default fixed window', row: { source: 'default', refresh_on_read: false }, actionable: true, chained: false, advance: 482000, src: 'default' },
+  { name: 'client 5m', client: '5m', actionable: true, chained: false, advance: 275000, src: 'client' },
+  { name: 'client 15m', client: '15m', actionable: true, chained: false, advance: 815000, src: 'client' },
+  { name: 'insufficient_data with client 5m', row: { status: 'insufficient_data', safe_refresh_s: null }, client: '5m', actionable: true, chained: false, advance: 275000, src: 'client' },
+  { name: 'deprecated shadow with client 5m', row: { status: 'shadow', safe_refresh_s: null }, client: '5m', actionable: true, chained: false, advance: 275000, src: 'client' },
+  { name: 'native Claude', native: true, actionable: true, chained: true, advance: 275000, src: 'native' },
+  { name: 'no_cache', row: { status: 'no_cache', safe_refresh_s: null }, client: '5m', actionable: false, chained: false, advance: 700000 },
+  { name: 'monitor', row: { status: 'monitor', reason: 'ttl_too_short' }, client: '5m', actionable: false, chained: false, advance: 700000 },
+  { name: 'monitor below_economic_floor', row: { status: 'monitor', reason: 'below_economic_floor' }, client: '5m', actionable: false, chained: false, advance: 700000 },
+  { name: 'monitor unreliable_cache', row: { status: 'monitor', reason: 'unreliable_cache' }, client: '5m', actionable: false, chained: false, advance: 700000 },
+  { name: 'demoted', row: { status: 'demoted', reason: 'misses' }, client: '5m', actionable: false, chained: false, advance: 700000 },
+  { name: 'fixed_window status', row: { status: 'fixed_window' }, client: '5m', actionable: false, chained: false, advance: 700000 },
+  { name: 'insufficient_data without client TTL', row: { status: 'insufficient_data', safe_refresh_s: null }, actionable: false, chained: false, advance: 700000 },
+  { name: 'no server row without client TTL', actionable: false, chained: false, advance: 700000 },
+  { name: 'client off', client: 'off', actionable: false, chained: false, advance: 700000 },
+];
+const SIZES: [string, string, boolean][] = [['below', String(TOTAL + 1), false], ['at', String(TOTAL), true], ['over', String(TOTAL - 1), true]];
+const expectOutcome = (source: Source, mode: string, big: boolean) => {
+  if (!source.actionable || mode === 'off') return 'nothing';
+  if (mode === 'warm') return 'forks';
+  if (mode === 'compact') return big ? 'compactions' : 'nothing';
+  return big && !source.chained && !source.native ? 'compactions' : 'forks';
+};
+async function prepare($: Engine, on: On, source: Source) {
+  response(on, 0, WRITE, 10);
+  const made = await setup($, on, 'https://gateway.example', undefined, GATEWAY);
+  const model = source.native ? 'claude-main' : 'vendor/main';
+  made.world.prices['claude-main'] = { read: 0.1, fiveMinute: 1.25, output: 5 };
+  made.world.reported = source.native ? { fiveMinute: WRITE, oneHour: 0 } : undefined;
+  made.world.policy = source.row ? [policyRow({ alias: model, ...source.row })] : [];
+  return { ...made, model };
+}
+for (const source of SOURCES) for (const mode of ['off', 'warm', 'compact', 'warmcomp']) for (const [size, threshold, big] of SIZES) {
+  const outcome = expectOutcome(source, mode, big);
+  const options = { compact_threshold: threshold, ...(source.client ? { unreported_ttl: source.client } : {}) };
+  test(`matrix panel: ${source.name} × ${mode} × ${size} threshold → ${outcome}`, { options }, async ($, on) => {
+    const { world, clock, model } = await prepare($, on, source);
+    await cycleTo($, mode);
+    await step($, { model });
+    await clock.advance(source.advance);
+    expect(world.forks.length > 0).toBe(outcome === 'forks');
+    expect(world.compactions.length > 0).toBe(outcome === 'compactions');
+    if (outcome === 'forks') expect(world.forks[0]).toBe(`<keepalive v="0.4.1" src="${source.src}"/> Reply with only: K`);
+    const shown = text(await $.ui.render(band()));
+    if (!source.native) {
+      expect(shown).not.toContain('TTL 1h');
+      expect(shown).not.toContain('◉');
+      if (source.actionable) expect(shown).not.toContain('[ ◌ ]');
+    }
+  });
+}
+
+// ---- in flight: nothing is sent while a turn is pending; afterwards the schedule restarts from that turn -----------------------------------
+for (const source of SOURCES.filter(item => item.actionable && !item.native && item.name !== 'client 15m')) for (const mode of ['warm', 'compact', 'warmcomp']) {
+  // A client TTL counts from the start of a request; this one started a whole lifetime ago, so its window is already lost and nothing may be sent late.
+  const outcome = source.client ? 'nothing' : expectOutcome(source, mode, true);
+  test(`matrix in flight: ${source.name} × ${mode}`, { options: { compact_threshold: String(TOTAL), ...(source.client ? { unreported_ttl: source.client } : {}) } }, async ($, on) => {
+    const { world, clock } = await prepare($, on, source);
+    await cycleTo($, mode);
+    await step($);
+    await clock.advance(source.advance - 200000);
+    const pending = $.turn.step({ turnId: 'slow', index: 1, messageCount: 1, model: 'vendor/main' });
+    await pending.next();
+    await clock.advance(source.advance + 100000);
+    expect(world.forks.length + world.compactions.length).toBe(0);
+    while (!(await pending.next()).done);
+    expect(world.forks.length + world.compactions.length).toBe(0);
+    await clock.advance(source.advance);
+    expect(world.forks.length > 0).toBe(outcome === 'forks');
+    expect(world.compactions.length > 0).toBe(outcome === 'compactions');
+  });
+}
+
+// ---- limits and the savings rule, crossed with each actionable lifetime -------------------------------------------------------------------
+type Limit = { name: string; limit?: string; prices: boolean; p: number | null };
+const LIMITS: Limit[] = [
+  { name: 'default limit with prices', prices: true, p: null }, { name: 'default limit without prices', prices: false, p: null },
+  { name: 'savings pass', prices: true, p: 0.9 }, { name: 'savings fail', prices: true, p: 0.05 }, { name: 'savings without prices', prices: false, p: 0.9 },
+  { name: 'numeric limit 1', limit: '1', prices: false, p: 0.05 }, { name: 'infinite limit', limit: 'infinite', prices: false, p: 0.05 },
+];
+for (const source of SOURCES.filter(item => item.actionable && !item.native)) for (const limit of LIMITS) {
+  if (limit.p !== null && !source.row?.refresh_on_read && source.client) continue;
+  const served = !!source.row && source.row.status === undefined;
+  const hint = served ? limit.p : null;
+  const pays = limit.limit ? true : limit.prices && (hint === null || hint > 0.1);
+  test(`matrix limits: ${source.name} × ${limit.name} → ${pays ? 'warms' : 'holds back'}`,
+    { options: { ...(source.client ? { unreported_ttl: source.client } : {}), ...(limit.limit ? { keepalive_limit: limit.limit } : {}) } }, async ($, on) => {
+      const { world, clock } = await prepare($, on, source);
+      if (!limit.prices) world.prices = {};
+      if (served && limit.p !== null) world.policy = [policyRow({ alias: 'vendor/main', ...source.row, p_resume: limit.p })];
+      await cycleTo($, 'warm');
+      await step($);
+      await clock.advance(source.advance);
+      expect(world.forks.length > 0).toBe(pays);
+    });
+}
+for (const source of SOURCES.filter(item => item.actionable && !item.native)) {
+  test(`matrix limits: ${source.name} stops at a numeric limit of 1`, { options: { keepalive_limit: '1', ...(source.client ? { unreported_ttl: source.client } : {}) } }, async ($, on) => {
+    const { world, clock } = await prepare($, on, source);
+    await cycleTo($, 'warm');
+    await step($);
+    await clock.advance(source.advance * 3);
+    expect(world.forks.length).toBe(1);
+  });
+}
+
+// ---- seeded random timelines through the whole panel --------------------------------------------------------------------------------------
+function random(seed: number) { let x = seed >>> 0; return () => { x = (x * 1664525 + 1013904223) >>> 0; return x / 2 ** 32; }; }
+const FIRING = SOURCES.filter(item => !item.native && item.name !== 'client 15m');
+for (let run = 0; run < 20; run++) {
+  const pick = random(7000 + run);
+  const source = FIRING[Math.floor(pick() * FIRING.length)];
+  const mode = ['off', 'warm', 'compact', 'warmcomp'][Math.floor(pick() * 4)];
+  const [, threshold] = SIZES[Math.floor(pick() * 3)];
+  const limit = [undefined, '1', '2', 'infinite'][Math.floor(pick() * 4)];
+  const options = { compact_threshold: threshold, ...(source.client ? { unreported_ttl: source.client } : {}), ...(limit ? { keepalive_limit: limit } : {}) };
+  test(`property: random timeline ${run} (${source.name}, ${mode}, limit ${limit ?? 'default'})`, { options }, async ($, on) => {
+    const { world, clock } = await prepare($, on, source);
+    await cycleTo($, mode);
+    const ttl = source.client ? { '5m': 300, '15m': 900 }[source.client]! : 480;
+    const safe = source.client ? ttl - Math.max(10, ttl / 10) : 480;
+    let t = 0;
+    let realAt = 0;
+    let sinceReal = { forks: 0, compactions: 0 };
+    let pending: AsyncGenerator<any, any> | undefined;
+    let frozen: { forks: number; compactions: number } | undefined;
+    await step($);
+    for (let second = 0; second < 700; second++) {
+      const before = { forks: world.forks.length, compactions: world.compactions.length };
+      if (!pending && pick() < 0.002) {
+        pending = $.turn.step({ turnId: `r${second}`, index: second, messageCount: 1, model: 'vendor/main' }) as AsyncGenerator<any, any>;
+        await pending.next();
+        frozen = { ...before };
+      } else if (pending && pick() < 0.02) {
+        while (!(await pending.next()).done);
+        pending = undefined;
+        expect({ forks: world.forks.length, compactions: world.compactions.length }).toEqual(frozen);
+        realAt = t;
+        sinceReal = { forks: world.forks.length, compactions: world.compactions.length };
+      }
+      await clock.advance(1000);
+      t++;
+      const sent = world.forks.length - before.forks;
+      const compacted = world.compactions.length - before.compactions;
+      if (pending) expect(sent + compacted).toBe(0);
+      if (sent || compacted) {
+        // never late: the first action after a real turn is within its lifetime, and never for something that cannot be warmed
+        expect(source.actionable && mode !== 'off').toBe(true);
+        if (world.forks.length - sinceReal.forks === sent && world.compactions.length - sinceReal.compactions === compacted) {
+          expect(t - realAt).toBeLessThanOrEqual(source.client ? ttl : safe + 100);
+        }
+        if (compacted) expect(mode === 'compact' || mode === 'warmcomp').toBe(true);
+      }
+      if (!source.chained && !limit) expect(world.forks.length - sinceReal.forks).toBeLessThanOrEqual(1);
+      if (limit === '1') expect(world.forks.length - sinceReal.forks).toBeLessThanOrEqual(1);
+    }
+    if (pending) while (!(await pending.next()).done);
+  });
+}
+
+test('matrix panel: direct api.anthropic.com never asks a gateway and a non-Claude model stays monitor-only without a client TTL', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on, 'https://api.anthropic.com');
+  world.reported = undefined;
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(700000);
+  expect(world.fetches.length).toBe(0);
+  expect(world.forks.length).toBe(0);
+});
+
+test('a native Claude row asks the price feed too, with the gateway and credentials', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on, 'https://gateway.example', undefined, GATEWAY);
+  world.reported = { fiveMinute: 100, oneHour: 0 };
+  await cycleTo($, 'warm');
+  await step($, { model: 'claude-opus-5-5' });
+  await clock.advance(2000);
+  const lookup = world.calls.find(call => call.action === 'cache-prices');
+  expect(lookup?.models).toEqual(['claude-opus-5-5']);
+  expect(lookup?.feed).toEqual({ base: 'https://gateway.example', url: '', headers: { authorization: 'Bearer secret-token' } });
+});
+
+test('a probe lifetime shows ⟳ and overrides the client TTL', { options: { unreported_ttl: '5m' } }, async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on, 'https://gateway.example', undefined, GATEWAY);
+  world.policy = [policyRow({ source: 'probe', safe_refresh_s: 1620, refresh_on_read: null, max_idle_s: null })];
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(40000);
+  expect(text(await $.ui.render(band()))).toMatch(/⟳ 2\dm \d+s · once/);
+  expect((await dashboard($)).includes('gateway probe')).toBe(true);
 });

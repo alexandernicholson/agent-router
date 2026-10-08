@@ -55,6 +55,11 @@ export function segments(panel: Panel, c: Ctx, p: Paint, row: any): string {
     return `${result} · cmpt ✓${before !== undefined && after !== undefined ? ` ${cacheTokens(before)} → ${cacheTokens(after)}` : ""}`;
   }
   if (!status.ttl) return `${result} · ${lifetimeLabel(panel.lifetime(c, row), status.state)}`;
+  const governing = panel.lifetime(c, row);
+  if (governing.policy) {
+    const grade = lifeGrade(status.leftMs);
+    return `${result} · ${p.color(grade!, lifetimeLabel({ ...governing, left: Math.ceil(status.leftMs! / 1000), phase: (status as { phase?: string }).phase })!)}`;
+  }
   const wanted = panel.wantedTtl(c);
   const reported = wanted && status.ttl !== wanted ? ` · ${status.ttl} reported` : "";
   const life = lifeGrade(status.leftMs);
@@ -111,7 +116,7 @@ export function statusLine(panel: Panel, c: Ctx, p: Paint): string {
   const parts = row.last || row.compaction ? segments(panel, c, p, row) : "no observation";
   const [head, ...rest] = parts.split(" · ");
   const body = [head + missChip(c, p, [row]), ...rest].join(" · ");
-  return `[ ${cacheDial(status)} ] ${marker(p, c.upkeep)} ${c.upkeep} TTL ${ttl} ${body}${counts}${c.available ? "" : " · storage unavailable"}`;
+  return `[ ${cacheDial(status)} ] ${marker(p, c.upkeep)} ${c.upkeep} ${panel.ownLifetime(c, row) ? "" : `TTL ${ttl} `}${body}${counts}${c.available ? "" : " · storage unavailable"}`;
 }
 
 export function matrixLines(p: Paint, rows: any[], columns: number): string[] {
@@ -189,11 +194,11 @@ export function dashboard(panel: Panel, c: Ctx, p: Paint, filter: RequestFilter,
   if (line) out.push(p.color("fair", line));
   if (!c.available) out.push(p.color("fair", "Storage unavailable · showing last known observations"));
   out.push(p.dim(`Upkeep: ${upkeepText(c)}`));
-  out.push(p.dim("Lifetime icons: ◉ provider-reported · ✦ gateway-learned · ▣ documented · ◇ gateway default · ✎ your TTL setting · ⊘ no cache · ◌ unknown"));
+  out.push(p.dim("Lifetime icons: ◉ provider-reported · ✦ gateway-learned · ▣ documented · ◇ gateway default · ⟳ gateway probe · ✎ your TTL setting · ⊘ no cache · ◌ unknown"));
   out.push(p.dim(`Bars show the hit rate over the last ${RATE_REQUESTS} requests, coloured for the context size. Time left counts from the last request that read or wrote the cache.`));
   out.push("", `Main`);
-  out.push(`${cacheDial(status)} ${marker(p, c.upkeep)} ${c.upkeep} TTL ${panel.wantedTtl(c) ?? row.last?.requested ?? "5m"} ${segments(panel, c, p, row)}`);
-  out.push(p.dim(`TTL ${panel.wantedTtl(c) ?? "5m"} · ${c.ttl ? "chosen with /keepalive ttl" : c.settings.ttl ? "ttl in /keepalive settings" : "the request's own cache_control"}`));
+  out.push(`${cacheDial(status)} ${marker(p, c.upkeep)} ${c.upkeep} ${panel.ownLifetime(c, row) ? "" : `TTL ${panel.wantedTtl(c) ?? row.last?.requested ?? "5m"} `}${segments(panel, c, p, row)}`);
+  if (!panel.ownLifetime(c, row)) out.push(p.dim(`TTL ${panel.wantedTtl(c) ?? "5m"} · ${c.ttl ? "chosen with /keepalive ttl" : c.settings.ttl ? "ttl in /keepalive settings" : "the request's own cache_control"}`));
   const lifetime = lifetimeLine(panel, c, row);
   if (lifetime) out.push(p.dim(lifetime));
   for (const part of status.lifetimes) {

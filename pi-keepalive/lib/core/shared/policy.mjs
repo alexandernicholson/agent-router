@@ -7,7 +7,7 @@ export const POLICY_STALE_MS = 3600000;
 export const POLICY_MAX_BYTES = 65536;
 const BACKOFF_MS = [30000, 60000, 120000, 300000, 600000];
 const STATUSES = ['native', 'enabled', 'shadow', 'insufficient_data', 'demoted', 'fixed_window', 'no_cache', 'monitor'];
-const SOURCES = ['learned', 'documented', 'default'];
+const SOURCES = ['learned', 'documented', 'default', 'override', 'probe'];
 const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]']);
 const seconds = v => Number.isSafeInteger(v) && v > 0 && v <= 604800;
 const text = v => typeof v === 'string' && v.length > 0 && v.length <= 200;
@@ -115,21 +115,36 @@ export function priceFeed(base, custom) {
   return { url: url.href, authorize: !!base && sameOrigin(url.href, base) && !!policyUrl(base, 'x') };
 }
 
+const priceOf = value => {
+  const [input, read, write, output] = ['input', 'read', 'write', 'output'].map(key => value?.[key]);
+  if (![input, read, write, output].every(n => typeof n === 'number' && Number.isFinite(n) && n >= 0) || input <= 0) return null;
+  const hour = value.write_1h;
+  return { read: read / input, fiveMinute: write / input, output: output / input,
+    ...(typeof hour === 'number' && Number.isFinite(hour) && hour >= 0 ? { oneHour: hour / input } : {}) };
+};
+const globPattern = glob => new RegExp(`^${glob.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`, 'i');
+
 /**
- * Prices in relative units (or dollars) per model, as CachePrices (input = 1).
+ * A price feed: exact `models` by alias, then `patterns` (only * is a wildcard; first match in order wins). Prices are relative to input.
  * @param {string} body
- * @returns {Record<string, {read: number, output: number, fiveMinute: number}> | null}
+ * @returns {{models: Record<string, object>, patterns: [RegExp, object][]} | null}
  */
 export function parsePriceFeed(body) {
   if (typeof body !== 'string' || body.length > POLICY_MAX_BYTES) return null;
   let feed;
   try { feed = JSON.parse(body); } catch { return null; }
+  const table = value => value && typeof value === 'object' && !Array.isArray(value) ? Object.entries(value).slice(0, 256) : [];
   if (feed?.version !== 1 || !feed.models || typeof feed.models !== 'object' || Array.isArray(feed.models)) return null;
-  const prices = {};
-  for (const [alias, value] of Object.entries(feed.models).slice(0, 256)) {
-    const [input, read, write, output] = ['input', 'read', 'write', 'output'].map(key => value?.[key]);
-    if (![input, read, write, output].every(n => typeof n === 'number' && Number.isFinite(n) && n >= 0) || input <= 0) continue;
-    prices[alias] = { read: read / input, fiveMinute: write / input, output: output / input };
-  }
-  return prices;
+  const models = {};
+  for (const [alias, value] of table(feed.models)) { const price = priceOf(value); if (price) models[alias] = price; }
+  const patterns = [];
+  for (const [glob, value] of table(feed.patterns)) { const price = priceOf(value); if (price && glob.length <= 200) patterns.push([globPattern(glob), price]); }
+  return { models, patterns };
+}
+
+/** The feed's price for a model: exact alias, else the first matching pattern after dropping a [1m] suffix; null when it has none. */
+export function feedPrice(feed, model) {
+  if (Object.hasOwn(feed.models, model)) return feed.models[model];
+  const name = model.replace(/\[1m\]$/i, '');
+  return feed.patterns.find(([pattern]) => pattern.test(name))?.[1] ?? null;
 }
