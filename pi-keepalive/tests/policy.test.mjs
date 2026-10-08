@@ -5,7 +5,7 @@ import { dashboard, painter, statusLine } from "../lib/render.ts";
 import { fakeHost, realRequest, settings, source } from "./helpers.mjs";
 
 const gw = (extra = {}) => source({ model: "kimi-k3", api: "openai-completions", baseUrl: "https://gateway.example.com/ai/openai/v1", payload: { messages: [], model: "kimi-k3" }, ...extra });
-const rows = (r = {}) => ({ status: 200, text: JSON.stringify({ rows: [{ alias: "kimi-k3", status: "enabled", refresh_on_read: true, safe_refresh_s: 480, max_idle_s: 1500, prefix_bucket: 0, upstream_provider: "phala", ...r }] }) });
+const rows = (r = {}) => ({ status: 200, text: JSON.stringify({ rows: [{ alias: "kimi-k3", status: "enabled", refresh_on_read: true, safe_refresh_s: 480, max_idle_s: 1500, prefix_bucket: 0, ...r }] }) });
 
 async function gateway(t, { policy = rows(), set = {} } = {}) {
   const { host, state } = await fakeHost(t);
@@ -21,7 +21,7 @@ test("enabled policy: the countdown starts at the last cache-touching request an
   const { panel, state } = await gateway(t);
   await tick(panel, state, 100);
   assert.equal(state.fetches.length, 1);
-  assert.match(state.fetches[0].url, /^https:\/\/gateway\.example\.com\/ai\/openai\/v1\/v1\/cache\/policy\?alias=kimi-k3&session=p&client=pi-keepalive%2F0\.3\.3&harness=pi$/);
+  assert.match(state.fetches[0].url, /^https:\/\/gateway\.example\.com\/ai\/openai\/v1\/v1\/cache\/policy\?alias=kimi-k3&session=p&client=pi-keepalive%2F0\.3\.4&harness=pi$/);
   assert.equal(state.fetches[0].init.headers["x-api-key"], "k");
   assert.equal(panel.policyOf(panel.get(), panel.mainRow(panel.get())).status, "enabled");
   await tick(panel, state, 470_000);
@@ -116,7 +116,7 @@ test("the dashboard shows the lifetime line and the icon legend", async (t) => {
   const { panel, state } = await gateway(t, { policy: rows({ refresh_on_read: true, source: "learned" }) });
   await tick(panel, state, 100);
   const text = dashboard(panel, panel.get(), painter({ NO_COLOR: "1" }, false), "all").join("\n");
-  assert.match(text, /✦ 8m · learned by the gateway via phala · server controlled/);
+  assert.match(text, /✦ 8m · learned by the gateway · server controlled/);
   assert.match(text, /Lifetime icons: ◉/);
 });
 

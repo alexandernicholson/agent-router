@@ -45,15 +45,12 @@ GET {base_url}/v1/cache/policy?alias=<model>&session=<id>
   "rows": [
     {
       "alias": "kimi-k3",
-      "cohort": "openrouter|phala|moonshotai/kimi-k3",
       "resolution": "exact",
       "status": "enabled",
       "safe_refresh_s": 480,
       "max_idle_s": 3600,
       "refresh_on_read": true,
-      "prefix_bucket": 12,
-      "upstream_provider": "phala",
-      "upstream_model": "moonshotai/kimi-k3"
+      "prefix_bucket": 12
     }
   ],
   "server_now": "2026-10-07T12:00:00Z"
@@ -70,11 +67,9 @@ GET {base_url}/v1/cache/policy?alias=<model>&session=<id>
 | `safe_refresh_s` | integer seconds, 1–604800, or `null` | yes | See §4. |
 | `max_idle_s` | integer seconds, 1–604800, or `null` | yes | Stop warming after this much real idle time. `null` = no server limit. |
 | `prefix_bucket` | integer, or omitted (= 0) | yes | `floor(log2(prefix tokens))` this row applies to. |
-| `upstream_provider` | string ≤ 200 | shown | Who serves it; shown in the panel (`via <provider>`). |
-| `upstream_model` | string ≤ 200 | stored | Backend model name. |
 | `alias` | string ≤ 200 | validated | Echo of the request. If present it must be a valid string. |
 | `refresh_on_read` | boolean or null | used | See semantics. Any other type drops the row. |
-| `cohort`, `resolution` (`exact` / `session` / `min`), `server_now`, any other field | any | ignored | Informational; clients must tolerate and servers may add more. |
+| `cohort`, `upstream_provider`, `upstream_model`, `resolution` (`exact` / `session` / `min`), `server_now`, any other field | any | ignored | Informational; clients must tolerate and servers may add more. Gateways SHOULD NOT expose internal routing (backend provider, model or cohort names); clients neither parse, store nor display them. |
 
 A row with an invalid `status`, a non-integer or out-of-range `safe_refresh_s` / `max_idle_s`, or a non-integer `prefix_bucket` or a non-boolean `refresh_on_read` is ignored.
 
@@ -155,7 +150,6 @@ def policy(alias, session):
         "safe_refresh_s": TTL_S - MARGIN_S,
         "max_idle_s": 3600,
         "refresh_on_read": REFRESH_EXTENDS,
-        "upstream_model": model.name,
     }], "server_now": utcnow()}
 ```
 

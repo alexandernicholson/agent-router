@@ -200,7 +200,7 @@ test("lifetime line: source, provider, control; native and plain unknown rows ha
   const fake = (life, served) => ({ lifetime: () => life, policyOf: () => served });
   assert.equal(lifetimeLine(fake({ source: "native" }), c, row), undefined);
   assert.equal(lifetimeLine(fake({ source: "unknown" }), c, row), undefined);
-  assert.equal(lifetimeLine(fake({ source: "learned", shownS: 480, controlled: true }, { provider: "phala" }), c, row), "✦ 8m · learned by the gateway via phala · server controlled");
+  assert.equal(lifetimeLine(fake({ source: "learned", shownS: 480, controlled: true }), c, row), "✦ 8m · learned by the gateway · server controlled");
   assert.equal(lifetimeLine(fake({ source: "learned", shownS: 480, once: true, controlled: true }), c, row), "✦ 8m · once · learned by the gateway · server controlled");
   assert.equal(lifetimeLine(fake({ source: "client", shownS: 900 }), c, row), "✎ 15m · your TTL setting");
   assert.equal(lifetimeLine(fake({ source: "none" }), c, row), "⊘ no cache · no cache");

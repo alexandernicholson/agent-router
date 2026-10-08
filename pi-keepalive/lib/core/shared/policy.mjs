@@ -45,8 +45,7 @@ export function parsePolicy(body) {
     .map(row => ({ status: row.status, safe: row.safe_refresh_s ?? null, maxIdle: row.max_idle_s ?? null, bucket: row.prefix_bucket ?? 0,
       refreshOnRead: row.refresh_on_read ?? null, anchorOnStart: row.anchor === 'start',
       maxAgeMs: Number.isFinite(row.max_age_s) ? Math.min(600, Math.max(30, row.max_age_s)) * 1000 : null, source: SOURCES.includes(row.source) ? row.source : null,
-      pResume: typeof row.p_resume === 'number' && row.p_resume >= 0 && row.p_resume <= 1 ? row.p_resume : null, reason: text(row.reason) ? row.reason : null,
-      provider: text(row.upstream_provider) ? row.upstream_provider : null, model: text(row.upstream_model) ? row.upstream_model : null }));
+      pResume: typeof row.p_resume === 'number' && row.p_resume >= 0 && row.p_resume <= 1 ? row.p_resume : null, reason: text(row.reason) ? row.reason : null }));
   return rows.length && !kept.length ? null : kept;
 }
 

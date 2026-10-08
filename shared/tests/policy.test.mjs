@@ -16,7 +16,7 @@ test('the policy URL is built only for a safe non-Anthropic gateway', () => {
 });
 
 test('parsePolicy keeps valid rows and rejects oversized or malformed bodies', () => {
-  assert.deepEqual(parsePolicy(body([row()])), [{ status: 'enabled', safe: 480, maxIdle: 3600, bucket: 12, refreshOnRead: null, anchorOnStart: false, maxAgeMs: null, source: null, pResume: null, reason: null, provider: 'phala', model: 'moonshotai/kimi-k3' }]);
+  assert.deepEqual(parsePolicy(body([row()])), [{ status: 'enabled', safe: 480, maxIdle: 3600, bucket: 12, refreshOnRead: null, anchorOnStart: false, maxAgeMs: null, source: null, pResume: null, reason: null }]);
   assert.deepEqual(parsePolicy(body([row({ refresh_on_read: true }), row({ refresh_on_read: false })])).map(r => r.refreshOnRead), [true, false]);
   assert.equal(parsePolicy(body([row({ refresh_on_read: 'yes' }), row({ refresh_on_read: 1 })])), null);
   assert.equal(parsePolicy(body([row({ status: 'weird' }), row({ safe_refresh_s: -1 }), row({ safe_refresh_s: 1.5 })])), null);
@@ -71,8 +71,8 @@ test('the client caches ten minutes, serves stale rows for an hour while refresh
 
 test('policy rows take defaults for missing fields and a lookup in flight is shared', async () => {
   const rows = parsePolicy(JSON.stringify({ rows: [{ status: 'enabled' }, { status: 'shadow', alias: 'a', safe_refresh_s: 60, max_idle_s: 90, prefix_bucket: 3, upstream_provider: 'p', upstream_model: 'm' }] }));
-  assert.deepEqual(rows[0], { status: 'enabled', safe: null, maxIdle: null, bucket: 0, refreshOnRead: null, anchorOnStart: false, maxAgeMs: null, source: null, pResume: null, reason: null, provider: null, model: null });
-  assert.deepEqual(rows[1], { status: 'shadow', safe: 60, maxIdle: 90, bucket: 3, refreshOnRead: null, anchorOnStart: false, maxAgeMs: null, source: null, pResume: null, reason: null, provider: 'p', model: 'm' });
+  assert.deepEqual(rows[0], { status: 'enabled', safe: null, maxIdle: null, bucket: 0, refreshOnRead: null, anchorOnStart: false, maxAgeMs: null, source: null, pResume: null, reason: null });
+  assert.deepEqual(rows[1], { status: 'shadow', safe: 60, maxIdle: 90, bucket: 3, refreshOnRead: null, anchorOnStart: false, maxAgeMs: null, source: null, pResume: null, reason: null });
   let release;
   let calls = 0;
   const client = createPolicyClient({ fetch: () => { calls++; return new Promise(resolve => { release = () => resolve({ status: 200, text: JSON.stringify({ rows: [{ status: 'enabled', safe_refresh_s: 60 }] }) }); }); } });

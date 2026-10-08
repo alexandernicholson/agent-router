@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.4
+
+- **No upstream names shown.** The dashboard no longer says which provider or model a gateway routes to (`via …`); a served lifetime reads `✦ 8m · learned by the gateway · server controlled`.
+
 ## 0.3.3
 
 - **Start-anchored lifetimes.** A gateway row with `anchor: "start"` is timed from when the request was dispatched, as providers measure cache lifetime from request start; keepalives fire by start + safe. Completion-anchored rows are unchanged. The `client=pi-keepalive/0.3.3` heartbeat is what makes a gateway serve these rows.

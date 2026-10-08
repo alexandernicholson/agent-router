@@ -42,9 +42,7 @@ export function rate(p: Paint, usage: { read: number; write: number; fresh: numb
 export function lifetimeLine(panel: Panel, c: Ctx, row: any): string | undefined {
   const life = panel.lifetime(c, row);
   if (life.source === "native" || (life.source === "unknown" && !life.status)) return undefined;
-  const served = panel.policyOf(c, row);
-  const via = served?.provider ? ` via ${displayText(served.provider, 60)}` : "";
-  return `${lifetimeLabel(life)} · ${SOURCE_NAMES[life.source as keyof typeof SOURCE_NAMES]}${via}${life.controlled ? " · server controlled" : ""}`;
+  return `${lifetimeLabel(life)} · ${SOURCE_NAMES[life.source as keyof typeof SOURCE_NAMES]}${life.controlled ? " · server controlled" : ""}`;
 }
 
 export function segments(panel: Panel, c: Ctx, p: Paint, row: any): string {

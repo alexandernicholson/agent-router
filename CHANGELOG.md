@@ -2,6 +2,10 @@
 
 Each release explains what changed for you, in 120 words or less.
 
+## Keepalive 0.4.4
+
+- **No more backend names.** The panel no longer shows which provider a gateway routed to, and the plugin ignores any such details the gateway sends.
+
 ## Keepalive 0.4.3
 
 - **Timed from request start when your gateway says so.** Refreshes land a little earlier and never late, matching how providers restart the cache clock.
@@ -23,6 +27,10 @@ Each release explains what changed for you, in 120 words or less.
 - **See where a lifetime comes from.** Icons mark it: ◉ provider, ✦ learned, ▣ documented, ◇ default, ✎ yours, ⊘ no cache.
 - **One keepalive per idle period** unless reads are known to extend the cache, and only when it pays off.
 - **Prices from your gateway.** Reads `/v1/cache/prices` or your own feed URL.
+
+## Pi Keepalive 0.3.4
+
+- **Your gateway's upstream is no longer named.** Lifetimes show where they come from, not which provider serves them.
 
 ## Pi Keepalive 0.3.3
 

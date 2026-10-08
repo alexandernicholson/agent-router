@@ -2018,7 +2018,7 @@ test('a confirmed keepalive behind a protocol gateway is reported to its reports
   expect(sent.length).toBeGreaterThan(0);
   expect(sent[0].url).toBe('https://gateway.example/v1/cache/reports');
   const body = JSON.parse(sent[0].body!);
-  expect(body.client).toBe('keepalive/0.4.3');
+  expect(body.client).toBe('keepalive/0.4.4');
   expect(body.harness).toBe('claude_cli');
   expect(body.reports[0]).toMatchObject({ kind: 'keepalive', session: 'cache-session', alias: 'gateway-code-task', src: 'documented' });
   expect(typeof body.reports[0].started_at_ms).toBe('number');
@@ -2083,7 +2083,7 @@ test('a Claude-only session behind a gateway sends the heartbeat at most once pe
   await clock.advance(30000);
   const gets = () => world.fetches.filter(f => f.method !== 'POST');
   expect(gets().length).toBe(1);
-  expect(gets()[0].url).toContain('client=keepalive%2F0.4.3&harness=claude_cli');
+  expect(gets()[0].url).toContain('client=keepalive%2F0.4.4&harness=claude_cli');
   expect(gets()[0].headers?.authorization).toBe('Bearer secret-token');
   await clock.advance(500000);
   expect(gets().length).toBe(1);
@@ -2138,7 +2138,7 @@ test('a gateway policy keeps a row without reported cache lifetimes warm by its 
   await step($);
   await clock.advance(2000);
   expect(world.fetches.length).toBe(1);
-  expect(world.fetches[0].url).toBe('https://gateway.example/v1/cache/policy?alias=vendor%2Fmain&session=cache-session&client=keepalive%2F0.4.3&harness=claude_cli');
+  expect(world.fetches[0].url).toBe('https://gateway.example/v1/cache/policy?alias=vendor%2Fmain&session=cache-session&client=keepalive%2F0.4.4&harness=claude_cli');
   expect(world.fetches[0].headers?.authorization).toBe('Bearer secret-token');
   await clock.advance(30000);
   expect(text(await $.ui.render(band()))).toMatch(/✦ 7m \d+s/);

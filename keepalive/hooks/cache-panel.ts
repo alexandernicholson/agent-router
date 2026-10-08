@@ -295,9 +295,7 @@ export function createCachePanel() {
   function lifetimeLine(current: Context, row: CacheRow) {
     const life = lifetime(current, row);
     if (life.source === 'native' || life.source === 'unknown' && !life.status) return undefined;
-    const served = current.endpoint ? pickRow(current.policy.peek(row.last!.model, current.now), row.last!.read + row.last!.write) : undefined;
-    const via = served?.provider ? ` via ${displayText(served.provider, 60)}` : '';
-    return `${lifetimeLabel(life)} · ${SOURCE_NAMES[life.source as keyof typeof SOURCE_NAMES]}${via}${life.controlled ? ' · server controlled' : ''}`;
+    return `${lifetimeLabel(life)} · ${SOURCE_NAMES[life.source as keyof typeof SOURCE_NAMES]}${life.controlled ? ' · server controlled' : ''}`;
   }
 
   function paint(elements: Elements[RenderSurface], parts: Segment[]): RenderElement[] {
