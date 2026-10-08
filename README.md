@@ -6,6 +6,7 @@ Two Claude Code Mods, installed from one marketplace. Each works on its own; tog
 | --- | --- | --- |
 | [**agent-router**](agent-router/README.md) | Assigns an exact model and effort to each subagent role and to agent team teammates, from your Anthropic-compatible endpoint, and records routing and usage | `/agent-models`, `/agent-models-apply`, `/agent-router:routes` |
 | [**keepalive**](keepalive/README.md) | Shows how well every conversation, subagent and teammate reuses its prompt cache, sets each one's cache TTL, and keeps an idle cache warm or compacts it before it expires | `/keepalive`, `/keepalive-settings` |
+| [**pi-keepalive**](pi-keepalive/README.md) | Keepalive for Pi and OMP: the same cache bar, dashboard, upkeep and gateway cache policy, as a Pi/OMP extension | `/keepalive` |
 
 ## Install
 

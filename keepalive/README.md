@@ -180,7 +180,7 @@ The mode button next to the dial shows the current upkeep mode for the main conv
 | Mode | What happens 30 seconds before the main conversation's TTL ends |
 | --- | --- |
 | `off` (default) | Nothing. No requests are sent. |
-| `warm` | A keepalive request: one tool-less request over the conversation as last sent, asking for `OK`. Its prompt-cache read refreshes the entry. |
+| `warm` | A keepalive request: one tool-less request over the conversation as last sent, asking for one letter. It opens with `<keepalive v="x.y.z"/>`, the plugin version, so a gateway can recognise it. Its prompt-cache read refreshes the entry. |
 | `compact` | The conversation is compacted, as `/compact` does, while its cache is still warm, if its context is at or over the compaction threshold: 100k tokens unless you change it (see **Compaction threshold**). |
 | `warmcomp` | Keepalives as in `warm`. Once the keepalive limit is reached, the conversation is compacted as in `compact` instead; a conversation under the compaction threshold is left to expire. |
 
@@ -212,6 +212,16 @@ Pick a common number from the list or type any whole number into **Other number*
 Split-pane teammates use the keepalive limit too, unless **Teammate keepalive limit** (`teammate_keepalive_limit`) gives them their own. It takes the same values, plus `same`, its default, which follows the keepalive limit. A teammate reads it when it starts.
 
 Keepalives are billed: each reads the cached context at the cache-read rate and adds a few uncached and output tokens. With the `default` limit, warming pauses once the keepalives since the last request, plus one more, would cost more than letting the entry expire and writing the cached context again. Each keepalive's measured tokens are priced as multiples of the model's input price, taken from Anthropic's price table for Claude models and from [models.dev](https://models.dev) otherwise: the cache-read, cache-write, and output prices (see **Model prices** below). With Claude Opus 5.5's listed prices that is about 23 keepalives on a 5-minute TTL, roughly an hour and 50 minutes of idle time; with the more common 0.1× cache reads, about 11, roughly 55 minutes. That point is when `warmcomp` compacts: until then each keepalive costs less than the rewrite it prevents, and past it only a shorter conversation makes your return cheaper. Your gateway's own pricing may differ from the public listing. A real request resets the count. In `warm` and `warmcomp`, the bar shows how many keepalives are left: `↻11` for 11 more, or `↻∞` with an `infinite` limit. On a `warmcomp` conversation large enough to compact, it shows `↻11 ➜ cmpt`, then `➜ cmpt` once the next action is the compaction. The dashboard spells this out (`11 keepalives, then compact`) and adds how many have been sent since your last request. With `default`, the count assumes each remaining keepalive costs what the last one did, so it can shift by one after the first. Keepalives only pay off if you return to the conversation; if you don't, they are spent for nothing. Keepalives appear in the dashboard's request history and totals, but not in the bar's hit rate. A keepalive sent after a compaction would replay the summary without a cache breakpoint on it, so no mode warms a compacted conversation. Compaction runs only between turns; if it is refused, the debug log says why.
+
+### Gateway cache policy
+
+When `ANTHROPIC_BASE_URL` points at an inference gateway that publishes a cache policy (not `api.anthropic.com`), `warm` and `warmcomp` also cover models whose cache lifetime the response does not report. The plugin asks the gateway, at most every 10 minutes per model, for `GET {base}/v1/cache/policy?alias=<model>&session=<id>`, sending your `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY` to that same origin only (the base URL Claude Code already sends it to; `ANTHROPIC_API_KEY` only when there is no `ANTHROPIC_AUTH_TOKEN`). Residual risk: Claude Code's host `fetch` exposes neither the final URL nor a no-redirect option, so a gateway that redirects the policy request to another origin could receive the custom `x-api-key` header (an `Authorization` header is dropped on a cross-origin redirect). The answer has a status, a safe refresh time and a maximum idle time, and the bar shows them, for example `kimi-k3 via phala · safe 8m · enabled`.
+
+- **`enabled`**: the countdown starts when the last request that touched the cache completes. A keepalive is sent in the last 5 seconds before the safe time, never after; a window missed, such as after sleep, is not caught up. Only a keepalive that read the cache restarts the countdown. Warming stops after the maximum idle time and at your keepalive limit, `default` included. `compact` and `warmcomp` do not compact these conversations.
+- **`shadow`, `insufficient data`, `demoted`, `fixed window`**: shown only; nothing is sent.
+- **`native`, a reported cache lifetime, or no answer** (offline, an error, a redirect, a body over 64 KB): the 5-minute and 1-hour behaviour above, unchanged.
+
+Server authors: see the [cache policy protocol](docs/cache-policy-protocol.md).
 
 ### Compaction threshold
 

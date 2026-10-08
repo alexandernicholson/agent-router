@@ -3,21 +3,25 @@ import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = process.argv.find(arg => arg.startsWith('--root='))?.slice(7) ?? fileURLToPath(new URL('..', import.meta.url));
-const PLUGINS = ['agent-router', 'keepalive'];
-const TARGETS = [['shared/lib', 'lib/shared'], ['shared/hooks', 'hooks/shared']];
+const COPY_LIB = name => /\.m?js$/.test(name) && name !== 'version.js';
+const PLUGINS = {
+  'agent-router': [['shared/lib', 'lib/shared'], ['shared/hooks', 'hooks/shared']],
+  keepalive: [['shared/lib', 'lib/shared'], ['shared/hooks', 'hooks/shared']],
+  'pi-keepalive': [['shared/lib', 'lib/core/shared'], ['keepalive/lib', 'lib/core', COPY_LIB]],
+};
 const check = process.argv.includes('--check');
 
-async function files(directory) {
-  try { return (await readdir(directory)).filter(name => !name.startsWith('.')).sort(); }
+async function files(directory, keep = () => true) {
+  try { return (await readdir(directory)).filter(name => !name.startsWith('.') && keep(name)).sort(); }
   catch (error) { if (error.code === 'ENOENT') return []; throw error; }
 }
 
 const drift = [];
-for (const plugin of PLUGINS) {
-  for (const [source, target] of TARGETS) {
+for (const [plugin, targets] of Object.entries(PLUGINS)) {
+  for (const [source, target, keep] of targets) {
     const from = join(root, source);
     const to = join(root, plugin, target);
-    const wanted = await files(from);
+    const wanted = await files(from, keep);
     const present = await files(to);
     for (const name of wanted) {
       const text = await readFile(join(from, name), 'utf8');

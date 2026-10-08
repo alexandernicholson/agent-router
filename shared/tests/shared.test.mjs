@@ -158,12 +158,13 @@ test('the sync script copies, updates and prunes shared files, and --check repor
   assert.match(checked.stderr, /agent-router\/lib\/shared\/a\.js/);
   const synced = run();
   assert.equal(synced.status, 0, synced.stderr);
-  assert.match(synced.stdout, /Synced 5 file\(s\)/);
+  assert.match(synced.stdout, /Synced 6 file\(s\)/);
+  assert.equal(await readFile(join(directory, 'pi-keepalive', 'lib', 'core', 'shared', 'a.js'), 'utf8'), 'one');
   assert.equal(await readFile(join(directory, 'agent-router', 'hooks', 'shared', 'b.ts'), 'utf8'), 'two');
   assert.equal(run().stdout, 'Shared library copies are current.\n');
   assert.equal(run('--check').status, 0);
   await writeFile(join(directory, 'shared', 'lib', 'a.js'), 'changed');
-  assert.match(run().stdout, /Synced 2 file\(s\)/);
+  assert.match(run().stdout, /Synced 3 file\(s\)/);
   await rm(join(directory, 'shared', 'hooks'), { recursive: true });
   await writeFile(join(directory, 'shared', 'hooks'), 'not a folder');
   const broken = run();

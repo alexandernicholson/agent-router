@@ -1,8 +1,10 @@
 import type { AgentInfo, Elements, EngineInterface, RenderElement, RenderSurface, SessionCompacted, TurnStepInput, TurnUsage } from 'claude-code';
-import { applyCacheCreation, reportedCacheCreation, cacheBar, cacheBarParts, cacheClock, cacheDial, cacheGrade, cachePercent, cachePolicy, cacheRows, cacheStatus, cacheTokens, isCompaction, isKeepalive, keepaliveWorthwhile, keepalivesLeft, lifeGrade, loopKey, recentMisses, recentUsage, sampleKey, sampleTtl, unreportedModels, validSample, sessionMatrix, sessionUsage, cacheGap, MISS_WINDOW_MS, RATE_REQUESTS } from '../lib/cache.js';
+import { applyCacheCreation, reportedCacheCreation, cacheBar, cacheBarParts, cacheClock, cacheDial, cacheGrade, cachePercent, cachePolicy, cacheRows, cacheStatus, cacheTokens, isCompaction, isKeepalive, keepaliveWorthwhile, keepalivesLeft, lifeGrade, policyAction, policyRow, loopKey, recentMisses, recentUsage, sampleKey, sampleTtl, unreportedModels, validSample, sessionMatrix, sessionUsage, cacheGap, MISS_WINDOW_MS, RATE_REQUESTS } from '../lib/cache.js';
 import { validPrices } from '../lib/cache.js';
 import type { CachePrices, CacheRow, CacheSample, CacheReset, CacheStatus } from '../lib/cache.js';
 import { CACHE_COLORS, themeFamily } from '../lib/cache-colors.js';
+import { createPolicyClient, pickRow } from '../lib/shared/policy.mjs';
+import { VERSION } from '../lib/version.js';
 import { displayText } from '../lib/shared/text.js';
 import { isPaneTeammate, isTeammate, sameModel } from '../lib/shared/models.js';
 import { createTtlGate, isTtl, resolveDefaultTtl } from '../lib/cache-ttl.js';
@@ -16,7 +18,7 @@ const COMPACT_MIN_TOKENS = 100000;
 const UNITS: Record<string, number> = { '': 1, k: 1000, m: 1000000 };
 const UPKEEP = ['off', 'warm', 'compact', 'warmcomp'] as const;
 const UPKEEP_KEY = 'cache-upkeep';
-const KEEPALIVE_PROMPT = 'Reply with only: OK';
+const KEEPALIVE_PROMPT = `<keepalive v="${VERSION}"/> Reply with only: K`;
 const PRICES_MS = 3600000;
 const MISS_FRESH_MS = 300000;
 const TTL_KEY = 'cache-ttl';
@@ -73,6 +75,8 @@ export type CachePanelHost = {
   env: Pick<EngineInterface['env'], 'set'>;
   settings: Pick<EngineInterface['settings'], 'read'>;
   auth: () => Promise<TtlAuth>;
+  http: Pick<EngineInterface['http'], 'fetch'>;
+  credentials: () => Promise<Record<string, string>>;
 };
 type Context = {
   host: CachePanelHost;
@@ -95,6 +99,7 @@ type Context = {
   requested: Map<string, string>;
   rechecks: Map<string, number>;
   rechecking?: Promise<void>;
+  policy: ReturnType<typeof createPolicyClient>;
   prices: Map<string, { at: number; value: CachePrices | null; settled: boolean; lookup?: Promise<void> }>;
   actedAt?: number;
   upkeeping?: Promise<void>;
@@ -250,13 +255,26 @@ export function createCachePanel() {
       const { before, after } = status.compacted!;
       return [...result, { text: ` · cmpt ✓${before !== undefined && after !== undefined ? ` ${cacheTokens(before)} → ${cacheTokens(after)}` : ''}` }];
     }
-    if (!status.ttl) return [...result, { text: ` · ${status.state}` }];
+    if (!status.ttl) return [...result, { text: ` · ${policyText(current, row) ?? status.state}` }];
     const wanted = row.sessionId === current.sessionId ? ttlChoice(current, row.agentId).ttl : undefined;
     if (wanted && status.ttl !== wanted) result.push({ text: ` · ${status.ttl} reported` });
     const life = lifeGrade(status.leftMs);
     result.push(status.leftMs && life ? { text: ` · ETA ~${cacheClock(status.leftMs)}`, color: palette(current)[life] }
       : { text: ' · expired', color: palette(current).poor });
     return result;
+  }
+
+  function policyOf(current: Context, row: CacheRow | undefined) {
+    if (!current.endpoint || !policyRow(row)) return undefined;
+    return pickRow(current.policy.peek(row!.last!.model, current.now), row!.last!.read + row!.last!.write);
+  }
+
+  function policyText(current: Context, row: CacheRow) {
+    const policy = policyOf(current, row);
+    if (!policy?.safe) return undefined;
+    const [minutes, seconds] = [Math.floor(policy.safe / 60), policy.safe % 60];
+    const safe = minutes ? `${minutes}m${seconds ? ` ${seconds}s` : ''}` : `${seconds}s`;
+    return `${row.last!.model}${policy.provider ? ` via ${policy.provider}` : ''} · safe ${safe} · ${policy.status.replace('_', ' ')}`;
   }
 
   function paint(elements: Elements[RenderSurface], parts: Segment[]): RenderElement[] {
@@ -405,7 +423,7 @@ export function createCachePanel() {
     const subagent = resolve('subagent');
     const current: Context = { host, bridge, sessionId, endpoint, selfLabel, env: configuration.env, upkeep: saved ?? configuration.upkeep ?? 'off',
       limit: configuration.limit, compactAt: configuration.compactAt ?? COMPACT_MIN_TOKENS, family: themeFamily(undefined, configuration.env.COLORFGBG),
-      samples: new Map(), resets: [], labels: new Map(), roster: [], routes: null, now: 0, pending: new Map(), requested: new Map(), rechecks: new Map(), prices: new Map(), available: true,
+      samples: new Map(), resets: [], labels: new Map(), roster: [], routes: null, now: 0, pending: new Map(), requested: new Map(), rechecks: new Map(), policy: createPolicyClient({ fetch: (url, init) => host.http.fetch(url, init), headers: host.credentials }), prices: new Map(), available: true,
       defaults: { main: resolve('main'), subagent }, ttlDefaults: configuration.ttl,
       ttls: new Map((await savedTtls(host)).filter(([id]) => id === sessionId).map(([, key, ttl]) => [key, ttl])), kinds: new Map(),
       gate: createTtlGate(value => setTtlEnv(host, TTL_ENV.subagent, value ?? configuration.env[TTL_ENV.subagent])),
@@ -591,6 +609,8 @@ export function createCachePanel() {
     if (current.upkeep === 'off' || current.pending.has(loopKey(current.sessionId, null))) return;
     const row = mainRow(current);
     const sample = row?.last;
+    const policy = policyOf(current, row);
+    if (row && sample && policy) return policyUpkeep(current, row, policy);
     if (!row || !sample || row.touchedAt === undefined || current.actedAt === row.touchedAt) return;
     const warms = current.upkeep === 'warm' || current.upkeep === 'warmcomp';
     if (warms && current.limit === undefined) await lookUpPrices(current, sample.model);
@@ -602,6 +622,17 @@ export function createCachePanel() {
     if (warms) current.host.ui.log(current.limit !== undefined && row.keepalives.length >= current.limit
       ? `Keepalive: cache warming stopped at the keepalive limit of ${current.limit}.`
       : 'Keepalive: cache warming paused; another keepalive would cost more than rewriting the cache.', { to: 'debug' });
+  }
+
+  async function policyUpkeep(current: Context, row: CacheRow, policy: NonNullable<ReturnType<typeof policyOf>>) {
+    if (current.upkeep !== 'warm' && current.upkeep !== 'warmcomp') return;
+    const model = row.last!.model;
+    if (current.limit === undefined) await lookUpPrices(current, model);
+    const { action, dueAt } = policyAction(row, { status: policy.status, safe: policy.safe, maxIdle: policy.maxIdle }, current.now);
+    if (action !== 'fire' || current.actedAt === dueAt) return;
+    current.actedAt = dueAt;
+    if (keepaliveWorthwhile(row, current.prices.get(model)?.value, current.limit)) return warm(current, model);
+    current.host.ui.log('Keepalive: cache warming stopped at its limit.', { to: 'debug' });
   }
 
   async function cycle() {
@@ -617,6 +648,8 @@ export function createCachePanel() {
     const current = context;
     if (!current) return;
     current.now = await current.host.clock.now();
+    const governed = mainRow(current);
+    if (current.endpoint && policyRow(governed)) void current.policy.refresh(current.endpoint, governed!.last!.model, current.sessionId, current.now);
     if (!current.rechecking) current.rechecking = recheck(current).finally(() => { current.rechecking = undefined; });
     await current.rechecking;
     if (!current.upkeeping) current.upkeeping = upkeep(current).catch(() => undefined).finally(() => { current.upkeeping = undefined; });

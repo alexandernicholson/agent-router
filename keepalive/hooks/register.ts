@@ -113,6 +113,12 @@ export function register(on: On, options: PluginOptions) {
           : $.env.set('CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL', value) },
         settings: { read: input => $.settings.read(input) },
         auth,
+        http: { fetch: (url, init) => $.http.fetch(url, init) },
+        credentials: async (): Promise<Record<string, string>> => {
+          const token = await $.env.get('ANTHROPIC_AUTH_TOKEN').catch(() => undefined);
+          const key = await $.env.get('ANTHROPIC_API_KEY').catch(() => undefined);
+          return token ? { authorization: `Bearer ${token}` } : key ? { 'x-api-key': key } : {};
+        },
       }, bridge, sessionId, await $.env.get('ANTHROPIC_BASE_URL').catch(() => undefined), teammate ? teammate.agentName || teammate.agentId : undefined, {
         env: cacheEnv,
         ttl: teammate

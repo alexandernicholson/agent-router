@@ -4,7 +4,7 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { cachePolicy, validSample, validPrices, cacheRows, cacheStatus, cacheBar, cacheClock, loopKey, applyCacheCreation, cacheGrade, cachePercent, lifeGrade, isKeepalive, keepaliveWorthwhile, keepalivesLeft, cacheDial, cacheBarParts, isCompaction,
-  recentUsage, recentMisses, sampleTtl, unreportedModels, sessionMatrix, sessionUsage, cacheGap, MISS_WINDOW_MS, TTL_REPORT_MS } from '../lib/cache.js';
+  recentUsage, recentMisses, sampleTtl, unreportedModels, sessionMatrix, sessionUsage, cacheGap, policyAction, policyRow, POLICY_TICK_MS, MISS_WINDOW_MS, TTL_REPORT_MS } from '../lib/cache.js';
 import { recordCacheSample, resetCache, cacheSnapshot, linkSession } from '../lib/cache-state.mjs';
 import { recordPath, writeRecord, routerData } from '../lib/state.mjs';
 import { handleRequest } from '../lib/bridge.mjs';
@@ -466,4 +466,44 @@ test('time between requests reads in seconds, minutes or hours', () => {
   assert.equal(cacheGap(252000), '4m 12s');
   assert.equal(cacheGap(3780000), '1h 03m');
   assert.equal(cacheGap(-5), '0.0s');
+});
+
+const gateway = (extra = {}, ...keepalives) => cacheRows([sample({ completedAt: 2000, ...extra }),
+  ...keepalives.map((k, i) => sample({ turnId: `keepalive:${i}`, startedAt: 2500 + i, completedAt: 3000, ...k }))])[0];
+const enabled = { status: 'enabled', safe: 480, maxIdle: 3600 };
+
+test('a gateway policy counts down from the last confirmed cache touch and fires in the last tick, never later', () => {
+  const row = gateway();
+  assert.equal(policyRow(row), true);
+  assert.deepEqual(policyAction(row, enabled, 2000 + 480000 - POLICY_TICK_MS - 1), { action: 'wait', dueAt: 482000 });
+  assert.equal(policyAction(row, enabled, 482000 - POLICY_TICK_MS).action, 'fire');
+  assert.equal(policyAction(row, enabled, 482000).action, 'fire');
+  assert.equal(policyAction(row, enabled, 482001).action, 'missed');
+});
+
+test('only a keepalive that read the cache renews the anchor', () => {
+  assert.equal(policyAction(gateway({}, { read: 0, write: 900 }), enabled, 100).dueAt, 482000);
+  assert.equal(policyAction(gateway({}, { read: 900, write: 0 }), enabled, 100).dueAt, 483000);
+  assert.equal(policyAction(gateway({}, { read: 900, write: 0, model: 'other/model' }), enabled, 100).dueAt, 482000);
+});
+
+test('a gateway policy stops after max idle and only enabled rows with a safe time act', () => {
+  assert.equal(policyAction(gateway({ completedAt: 1000 }, { read: 900 }), { ...enabled, maxIdle: 600 }, 601000).action, 'idle');
+  for (const status of ['shadow', 'insufficient_data', 'demoted', 'fixed_window', 'native']) assert.equal(policyAction(gateway(), { ...enabled, status }, 100).action, 'monitor');
+  assert.equal(policyAction(gateway(), { ...enabled, safe: null }, 100).action, 'monitor');
+  assert.equal(policyAction(gateway(), undefined, 100).action, 'monitor');
+});
+
+test('rows with a reported cache creation, such as Claude behind a gateway, are never governed by a policy', () => {
+  const claude = gateway({ model: 'claude-opus-5', cacheCreation: { fiveMinute: 100, oneHour: 0 } });
+  assert.equal(policyRow(claude), false);
+  assert.equal(policyAction(claude, enabled, 100).action, 'monitor');
+  assert.equal(cacheStatus(claude, 2000).state, 'warm');
+  assert.equal(cacheStatus(claude, 2000).ttl, '5m');
+  assert.equal(policyRow(gateway({ read: 0, write: 0 })), false);
+});
+
+test('the policy anchor falls back to the start time of a request that never completed', () => {
+  const row = cacheRows([sample({ startedAt: 2000, read: 0, write: 900, fresh: 10 })])[0];
+  assert.equal(policyAction(row, { status: 'enabled', safe: 480, maxIdle: null }, 2000).dueAt, 482000);
 });

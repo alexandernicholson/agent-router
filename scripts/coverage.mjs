@@ -15,9 +15,9 @@ const PLUGINS = {
   'agent-router': { parts: ['.claude-plugin', 'agents', 'commands', 'hooks', 'lib', 'scripts', 'tests', 'package.json'] },
   keepalive: { parts: ['.claude-plugin', 'hooks', 'lib', 'scripts', 'tests', 'package.json'] },
 };
-const NODE_INCLUDE = ['shared/lib/**', 'scripts/sync-shared.mjs', 'agent-router/lib/**', 'agent-router/scripts/**', 'keepalive/lib/**', 'keepalive/scripts/**'];
-const PLUGIN_COPIES = ['agent-router/lib/shared/', 'keepalive/lib/shared/'];
-const NODE_TESTS = ['shared/tests/*.test.mjs', 'agent-router/tests/*.test.mjs', 'keepalive/tests/*.test.mjs'];
+const NODE_INCLUDE = ['shared/lib/**', 'scripts/sync-shared.mjs', 'agent-router/lib/**', 'agent-router/scripts/**', 'keepalive/lib/**', 'keepalive/scripts/**', 'pi-keepalive/index.ts', 'pi-keepalive/lib/**'];
+const PLUGIN_COPIES = [['agent-router/lib/shared/', 'shared/lib'], ['keepalive/lib/shared/', 'shared/lib'], ['pi-keepalive/lib/core/shared/', 'shared/lib'], ['pi-keepalive/lib/core/', 'keepalive/lib']];
+const NODE_TESTS = ['shared/tests/*.test.mjs', 'agent-router/tests/*.test.mjs', 'keepalive/tests/*.test.mjs', 'pi-keepalive/tests/*.test.mjs'];
 
 const KIT = `import * as kit from 'claude-code/testing';
 export * from 'claude-code/testing';
@@ -145,7 +145,7 @@ async function nodeCoverage() {
       for (const name of await readdir(join(root, folder))) if (name.endsWith(suffix)) tests.push(join(folder, name));
     }
     const argv = [process.execPath, join(root, 'node_modules', 'c8', 'bin', 'c8.js'), '--all', '--src', root,
-      ...NODE_INCLUDE.flatMap(pattern => ['--include', pattern]), '--exclude', '**/tests/**',
+      ...NODE_INCLUDE.flatMap(pattern => ['--include', pattern]), '--exclude', '**/tests/**', '--exclude', '**/*.d.ts',
       '--reporter', 'json', '--report-dir', directory, '--temp-directory', join(directory, 'tmp'),
       process.execPath, '--test', '--test-isolation=none', '--experimental-test-module-mocks', ...tests];
     const result = await run(argv, { cwd: root, env: process.env });
@@ -153,8 +153,8 @@ async function nodeCoverage() {
     const raw = JSON.parse(await readFile(join(directory, 'coverage-final.json'), 'utf8').catch(() => '{}'));
     const map = libCoverage.createCoverageMap({});
     for (const [path, data] of Object.entries(raw)) {
-      const copy = PLUGIN_COPIES.find(prefix => relative(root, path).startsWith(prefix));
-      const shared = copy ? join(root, 'shared', 'lib', relative(join(root, copy), path)) : path;
+      const copy = PLUGIN_COPIES.find(([prefix]) => relative(root, path).startsWith(prefix));
+      const shared = copy ? join(root, copy[1], relative(join(root, copy[0]), path)) : path;
       map.merge({ [shared]: { ...data, path: shared } });
     }
     return { map, failed, output: failed ? `${result.stdout}\n${result.stderr}` : '', tests: tests.length };

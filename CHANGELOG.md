@@ -2,6 +2,17 @@
 
 Each release explains what changed for you, in 120 words or less.
 
+## Pi Keepalive 0.2.0
+
+- **Keepalive for Pi and OMP.** New `pi-keepalive` extension brings the Keepalive cache bar, dashboard (`/keepalive`), upkeep modes, keepalive limits and gateway cache policy to Pi and OMP sessions. Install by linking `pi-keepalive` into `~/.pi/agent/extensions` or `~/.omp/agent/extensions`.
+- **No double warming.** While it manages a session, it tells the built-in cache warmer to stop.
+- **What differs from Claude Code.** One conversation per session (no subagent or teammate rows), commands instead of buttons, and keepalives replay the last request with the keepalive prompt appended. See `pi-keepalive/PARITY.md`.
+
+## Keepalive 0.3.0
+
+- **Keepalives say who sent them.** The request now opens with `<keepalive v="0.3.0"/>` and asks for one letter, so a gateway can tell a keepalive from your own prompt.
+- **Keep non-Anthropic caches warm.** Behind a gateway that publishes a cache policy, `warm` follows the gateway's published safe refresh time for models that don't report their cache lifetime, and the bar shows it (`kimi-k3 via phala · safe 8m · enabled`). Models the gateway has not enabled are shown, never warmed. Claude keeps its 5-minute and 1-hour behaviour.
+
 ## Keepalive 0.2.0
 
 - **Choose the upkeep every session starts in.** `/keepalive-settings` now has **Main conversation upkeep**: `off`, `warm`, `compact` or `warmcomp`. New sessions start in it; the mode button still changes it for the session you're in.

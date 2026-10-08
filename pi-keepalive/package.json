@@ -1,0 +1,14 @@
+{
+  "name": "pi-keepalive",
+  "version": "0.2.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "Prompt-cache keepalive extension for Pi and OMP (oh-my-pi)",
+  "engines": { "node": ">=22.18" },
+  "pi": { "extensions": ["./index.ts"] },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "typecheck": "../keepalive/node_modules/.bin/tsc -p tsconfig.json"
+  }
+}

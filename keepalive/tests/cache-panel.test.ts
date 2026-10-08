@@ -33,7 +33,10 @@ async function setup($: Engine, on: On, endpoint = 'https://gateway.example', st
   const env: Record<string, string | undefined> = { ...(endpoint ? { ANTHROPIC_BASE_URL: endpoint } : {}), ...extra.env };
   const envSets: [string, string | undefined][] = [];
   liveEnv = env;
-  on('env.get', ($, e) => ({ value: env[e.name] }));
+  on('env.get', ($, e) => {
+    if (faults.has('credentials') && /^ANTHROPIC_(AUTH_TOKEN|API_KEY)$/.test(e.name)) throw new Error('env offline');
+    return { value: env[e.name] };
+  });
   on('env.set', ($, e) => {
     if (extra.refuseEnv) throw new Error('env.set refused');
     envSets.push([e.name, e.value]); env[e.name] = e.value; return { value: undefined };
@@ -44,7 +47,7 @@ async function setup($: Engine, on: On, endpoint = 'https://gateway.example', st
     roster: [] as AgentInfo[], sessionId: 'cache-session', failSave: false, failRead: false, logs: [] as string[],
     reported: undefined as { fiveMinute: number; oneHour: number } | undefined,
     flushed: undefined as { fiveMinute: number; oneHour: number } | undefined,
-    forks: [] as string[], compactions: [] as string[], theme: 'dark',
+    forks: [] as string[], fetches: [] as { url: string; headers?: Record<string, string> }[], policy: null as null | Record<string, unknown>[], compactions: [] as string[], theme: 'dark',
     forkUsage: { input_tokens: 10, output_tokens: 2, cache_read_input_tokens: 900, cache_creation_input_tokens: 0 },
     compaction: {} as Record<string, unknown>,
     prices: { 'vendor/main': { read: 0.1, fiveMinute: 1.25, output: 5, provider: 'example', id: 'main-1', source: 'models.dev' } } as Record<string, unknown>,
@@ -72,6 +75,11 @@ async function setup($: Engine, on: On, endpoint = 'https://gateway.example', st
   });
   on('classic.SessionStart', () => ({}));
   on('classic.Stop', () => ({}));
+  on('http.fetch', ($, e) => {
+    world.fetches.push({ url: e.url, headers: e.init?.headers });
+    if (!world.policy) throw new Error('policy offline');
+    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ rows: world.policy, server_now: 1 }) } };
+  });
   on('model.fork', async ($, e) => {
     const early = await world.before['model.fork']?.(e);
     if (early) return early as any;
@@ -1970,3 +1978,187 @@ test('a subagent miss chip opens its own history, and more than two causes are c
   expect(text(await $.ui.render(pane)).includes('Recent requests · agent-router:scout (child) (last 30 misses)')).toBe(true);
 });
 
+
+const policyRow = (extra: Record<string, unknown> = {}) => ({ alias: 'vendor/main', status: 'enabled', safe_refresh_s: 480, max_idle_s: 3600,
+  prefix_bucket: 8, upstream_provider: 'phala', upstream_model: 'moonshotai/kimi-k3', ...extra });
+const GATEWAY = { env: { ANTHROPIC_AUTH_TOKEN: 'secret-token' } };
+
+test('the keepalive prompt names the plugin version and asks for one letter', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 100, oneHour: 0 };
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(275000);
+  expect(world.forks).toEqual(['<keepalive v="0.3.0"/> Reply with only: K']);
+});
+
+test('a gateway policy keeps a row without reported cache lifetimes warm by its safe time, renewing on confirmed reads', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on, 'https://gateway.example', undefined, GATEWAY);
+  world.policy = [policyRow()];
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(2000);
+  expect(world.fetches.length).toBe(1);
+  expect(world.fetches[0].url).toBe('https://gateway.example/v1/cache/policy?alias=vendor%2Fmain&session=cache-session');
+  expect(world.fetches[0].headers?.authorization).toBe('Bearer secret-token');
+  await clock.advance(30000);
+  expect(text(await $.ui.render(band())).includes('vendor/main via phala · safe 8m · enabled')).toBe(true);
+  await clock.advance(438000);
+  expect(world.forks.length).toBe(0);
+  await clock.advance(10000);
+  expect(world.forks.length).toBe(1);
+  await clock.advance(460000);
+  expect(world.forks.length).toBe(1);
+  await clock.advance(10000);
+  expect(world.forks.length).toBe(2);
+  expect(world.fetches.length).toBeLessThan(5);
+});
+
+test('a keepalive that read nothing does not renew a gateway countdown, and the missed window is not retried', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.policy = [policyRow()];
+  world.forkUsage = { input_tokens: 10, output_tokens: 2, cache_read_input_tokens: 0, cache_creation_input_tokens: 900 };
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(485000);
+  expect(world.forks.length).toBe(1);
+  await clock.advance(600000);
+  expect(world.forks.length).toBe(1);
+});
+
+test('a gateway row whose policy is not enabled is only shown', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.policy = [policyRow({ status: 'shadow' })];
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(700000);
+  expect(world.forks.length).toBe(0);
+  expect(text(await $.ui.render(band())).includes('vendor/main via phala · safe 8m · shadow')).toBe(true);
+});
+
+test('gateway warming stops after the policy max idle time', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.policy = [policyRow({ max_idle_s: 1000 })];
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(2000000);
+  expect(world.forks.length).toBe(2);
+});
+
+test('gateway warming obeys the default cost rule and a numeric keepalive limit', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.policy = [policyRow({ max_idle_s: null })];
+  await cycleTo($, 'warm');
+  await step($);
+  for (let i = 0; i < 15; i++) await clock.advance(480000);
+  expect(world.forks.length).toBe(9);
+});
+
+test('a numeric keepalive limit also stops gateway warming', { options: { keepalive_limit: '2' } }, async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.policy = [policyRow({ max_idle_s: null })];
+  await cycleTo($, 'warm');
+  await step($);
+  for (let i = 0; i < 6; i++) await clock.advance(480000);
+  expect(world.forks.length).toBe(2);
+});
+
+test('the policy is not fetched for api.anthropic.com or without a base URL, and a failing policy changes nothing', async ($, on) => {
+  response(on);
+  const first = await setup($, on, 'https://api.anthropic.com');
+  await cycleTo($, 'warm');
+  await step($);
+  await first.clock.advance(60000);
+  expect(first.world.fetches.length).toBe(0);
+});
+
+test('a gateway that cannot be reached leaves a row without reported lifetimes as it was, and backs off', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(700000);
+  expect(world.forks.length).toBe(0);
+  expect(world.fetches.length).toBeLessThan(6);
+  expect(text(await $.ui.render(band())).includes('TTL not reported')).toBe(true);
+});
+
+test('Claude behind a gateway keeps the native 5m path even when the policy says enabled', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.policy = [policyRow()];
+  world.reported = { fiveMinute: 100, oneHour: 0 };
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(260000);
+  expect(world.forks.length).toBe(0);
+  await clock.advance(15000);
+  expect(world.forks.length).toBe(1);
+  expect(world.fetches.length).toBe(0);
+  expect(text(await $.ui.render(band())).includes('ETA ~4:55')).toBe(true);
+});
+
+test('the gateway policy is asked with the API key when there is no auth token, and with no credentials when there is neither', async ($, on) => {
+  response(on);
+  const keyed = await setup($, on, 'https://gateway.example', undefined, { env: { ANTHROPIC_API_KEY: 'secret-key' } });
+  keyed.world.policy = [policyRow()];
+  await cycleTo($, 'warm');
+  await step($);
+  await keyed.clock.advance(2000);
+  expect(keyed.world.fetches[0].headers?.['x-api-key']).toBe('secret-key');
+  expect(keyed.world.fetches[0].headers?.authorization).toBeUndefined();
+});
+
+test('a gateway request without credentials sends none', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.policy = [policyRow()];
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(2000);
+  expect(world.fetches[0].headers?.authorization).toBeUndefined();
+  expect(world.fetches[0].headers?.['x-api-key']).toBeUndefined();
+});
+
+for (const [safe, provider, shown] of [[45, undefined, 'vendor/main · safe 45s · enabled'], [95, 'phala', 'vendor/main via phala · safe 1m 35s · enabled'], [120, undefined, 'vendor/main · safe 2m · enabled']] as const) {
+  test(`a policy safe time of ${safe}s is shown as "${shown}"`, async ($, on) => {
+    response(on);
+    const { world, clock } = await setup($, on, 'https://gateway.example', undefined, GATEWAY);
+    world.reported = undefined;
+    world.policy = [policyRow({ safe_refresh_s: safe, upstream_provider: provider })];
+    await cycleTo($, 'warm');
+    await step($);
+    await clock.advance(2000);
+    await clock.advance(31000);
+    expect(text(await $.ui.render(band())).slice(0, 200)).toContain(shown);
+  });
+}
+
+test('compact upkeep sends nothing for a gateway row', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on, 'https://gateway.example', undefined, GATEWAY);
+  world.policy = [policyRow()];
+  await cycleTo($, 'compact');
+  await step($);
+  await clock.advance(600000);
+  expect(world.forks.length).toBe(0);
+  expect(world.compactions.length).toBe(0);
+});
+
+test('a credential that cannot be read leaves the policy request without credentials', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on, 'https://gateway.example', undefined, { env: { ANTHROPIC_AUTH_TOKEN: 't', ANTHROPIC_API_KEY: 'k' }, broken: ['credentials'] });
+  world.policy = [policyRow()];
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(2000);
+  expect(world.fetches[0].headers?.authorization).toBeUndefined();
+  expect(world.fetches[0].headers?.['x-api-key']).toBeUndefined();
+});
