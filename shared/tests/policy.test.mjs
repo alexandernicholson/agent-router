@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { priceFeed, parsePriceFeed, feedPrice, policyUrl, parsePolicy, pickRow, createPolicyClient, POLICY_TTL_MS, POLICY_STALE_MS } from '../lib/policy.mjs';
+import { priceFeed, parsePriceFeed, feedPrice, policyUrl, parsePolicy, pickRow, createPolicyClient, createReportClient, reportsUrl, REPORT_QUEUE, REPORT_STOP_MS, POLICY_TTL_MS, POLICY_STALE_MS } from '../lib/policy.mjs';
 
 const row = (extra = {}) => ({ alias: 'kimi-k3', status: 'enabled', safe_refresh_s: 480, max_idle_s: 3600, prefix_bucket: 12,
   upstream_provider: 'phala', upstream_model: 'moonshotai/kimi-k3', ...extra });
@@ -120,4 +120,79 @@ test('a price feed maps relative units, exact models and glob patterns, and skip
 test('every served source is accepted, including probe and override', () => {
   const sources = parsePolicy(body(['learned', 'documented', 'default', 'override', 'probe'].map(source => row({ source })))).map(r => r.source);
   assert.deepEqual(sources, ['learned', 'documented', 'default', 'override', 'probe']);
+});
+
+test('speaks is true only after a valid 200 answer, including empty rows, for an hour', async () => {
+  let reply = { status: 404, text: '' };
+  const client = createPolicyClient({ fetch: async () => reply });
+  assert.equal(client.speaks(0), false);
+  await client.refresh('https://gateway.example', 'a', 's', 0);
+  assert.equal(client.speaks(0), false);
+  reply = { status: 200, text: JSON.stringify({ rows: [] }) };
+  await client.refresh('https://gateway.example', 'b', 's', 0);
+  assert.equal(client.speaks(1), true);
+  assert.equal(client.speaks(POLICY_STALE_MS), false);
+  const failing = createPolicyClient({ fetch: async () => ({ status: 500, text: '' }) });
+  await failing.refresh('https://gateway.example', 'a', 's', 0);
+  assert.equal(failing.speaks(0), false);
+});
+
+test('the policy URL carries the client heartbeat and reportsUrl follows the same safety rules', () => {
+  assert.equal(policyUrl('https://g.example', 'a', 's', 'keepalive/0.4.2'), 'https://g.example/v1/cache/policy?alias=a&session=s&client=keepalive%2F0.4.2');
+  assert.equal(policyUrl('https://g.example', 'a', undefined, 'k/1', 'pi'), 'https://g.example/v1/cache/policy?alias=a&client=k%2F1&harness=pi');
+  assert.equal(reportsUrl('https://g.example/'), 'https://g.example/v1/cache/reports');
+  for (const bad of ['https://api.anthropic.com', 'http://g.example', undefined, 'https://u:p@g.example']) assert.equal(reportsUrl(bad), null);
+});
+
+test('the policy client sends its heartbeat in the query', async () => {
+  const urls = [];
+  const client = createPolicyClient({ fetch: async url => { urls.push(url); return { status: 200, text: body([row()]) }; }, client: 'keepalive/1.2.3', harness: 'omp' });
+  await client.refresh('https://g.example', 'a', 's', 0);
+  assert.match(urls[0], /client=keepalive%2F1\.2\.3&harness=omp/);
+});
+
+test('reports are batched, bounded, retried with backoff and stopped for an hour by a 404', async () => {
+  const calls = [];
+  let status = 200;
+  let boom = false;
+  const client = createReportClient({ client: 'keepalive/1', headers: async () => ({ authorization: 'x' }),
+    fetch: async (url, init) => { calls.push(JSON.parse(init.body)); if (boom) throw new Error('down'); return { status }; } });
+  const report = n => ({ kind: 'keepalive', n });
+  const withHarness = createReportClient({ client: 'k/1', harness: 'pi', fetch: async (url, init) => { calls.push(JSON.parse(init.body)); return { status: 202 }; } });
+  withHarness.add(report(0), 0);
+  await withHarness.flush('https://g.example', 0);
+  assert.equal(calls.pop().harness, 'pi');
+  const base = 'https://g.example';
+  await client.flush(base, 0);
+  assert.equal(calls.length, 0);
+  for (let n = 0; n < 120; n++) client.add(report(n), 0);
+  await client.flush('http://insecure.example', 0);
+  assert.equal(calls.length, 0);
+  await client.flush(base, 0);
+  assert.deepEqual(calls.map(call => call.reports.length), [50, 50, 20]);
+  assert.equal(client.size, 0);
+  for (let n = 0; n < 250; n++) client.add(report(n), 1);
+  assert.equal(client.size, REPORT_QUEUE);
+  boom = true;
+  await client.flush(base, 10);
+  assert.equal(client.size, REPORT_QUEUE);
+  const attempts = calls.length;
+  await client.flush(base, 10 + 29999);
+  assert.equal(calls.length, attempts);
+  boom = false;
+  const first = client.flush(base, 40000);
+  assert.equal(client.flush(base, 40000), first);
+  await first;
+  assert.equal(client.size, 0);
+  status = 500;
+  client.add(report(1), 50000);
+  await client.flush(base, 50000);
+  assert.equal(client.size, 1);
+  status = 404;
+  await client.flush(base, 50000 + 600000);
+  assert.equal(client.size, 0);
+  client.add(report(2), 700000);
+  assert.equal(client.size, 0);
+  client.add(report(3), 650000 + REPORT_STOP_MS);
+  assert.equal(client.size, 1);
 });

@@ -237,7 +237,7 @@ Keepalives are billed: each reads the cached context at the cache-read rate and 
 
 **Is it worth it?** For these conversations a keepalive is sent only if the chance you return × (cache write price − cache read price) beats the read price it costs. The chance comes from your keepalive limit when you set one, else from the gateway's `p_resume` hint, else the usual price-based default.
 
-Each keepalive says which lifetime timed it: `<keepalive v="0.4.1" src="learned"/> Reply with only: K` (`src` is `native`, `learned`, `documented`, `default`, `override`, `probe` or `client`).
+The keepalive is always plain `Reply with only: K`, so no provider sees anything about the plugin. A gateway that answers the policy endpoint is also told about each keepalive and compaction (kind, model, lifetime source, token counts) at `/v1/cache/reports`, for its own statistics; direct providers are never sent anything.
 
 Server authors: see the [cache policy protocol](docs/cache-policy-protocol.md).
 

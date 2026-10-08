@@ -183,9 +183,8 @@ export const POLICY_TICK_MS = 5000;
 /** A row the gateway's policy governs: it has a cached prefix but Anthropic never reported its cache lifetimes. */
 export const policyRow = row => !!row?.last && !row.creation && !row.last.cacheCreation && row.last.read + row.last.write > 0;
 
-export const KEEPALIVE_SOURCES = ['native', 'learned', 'documented', 'default', 'override', 'probe', 'client'];
-/** The keepalive request text; src says which lifetime the keepalive was timed by. */
-export const keepalivePrompt = (version, source) => `<keepalive v="${version}" src="${source}"/> Reply with only: K`;
+/** The keepalive request text: nothing plugin-specific ever reaches a model provider. */
+export const KEEPALIVE_PROMPT = 'Reply with only: K';
 
 export const SOURCE_ICONS = { native: '◉', learned: '✦', documented: '▣', default: '◇', override: '◇', probe: '⟳', client: '✎', none: '⊘', unknown: '◌' };
 export const SOURCE_NAMES = { native: 'reported by the provider', learned: 'learned by the gateway', documented: 'documented by the provider',

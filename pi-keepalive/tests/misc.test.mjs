@@ -3,16 +3,14 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { COMPACT_MIN_TOKENS, DEFAULT_SETTINGS, SETTING_ROWS, compactThreshold, keepaliveLimit, mergeSettings, resolveSettings, ttlOption, upkeepMode } from "../lib/settings.ts";
 import { applyTtl, buildKeepalivePayload, endpointFor, replayApi, requestedTtl, usageFromBody } from "../lib/replay.ts";
-import { KEEPALIVE_PROMPT_TEMPLATE, VERSION, keepalivePrompt } from "../lib/version.ts";
+import { KEEPALIVE_PROMPT, VERSION, keepalivePrompt } from "../lib/version.ts";
 import { createStore, dataRoot, readJson, writeJson, trace } from "../lib/storage.ts";
 import { tempRoot } from "./helpers.mjs";
 
 test("version matches package.json and the gateway prompt contract", () => {
   assert.equal(VERSION, JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version);
-  assert.equal(KEEPALIVE_PROMPT_TEMPLATE, '<keepalive v="{version}"/> Reply with only: K');
-  assert.equal(keepalivePrompt("1.2.3"), '<keepalive v="1.2.3"/> Reply with only: K');
-  assert.equal(keepalivePrompt("1.2.3", "learned"), '<keepalive v="1.2.3" src="learned"/> Reply with only: K');
-  assert.match(keepalivePrompt(), /^<keepalive v="[0-9A-Za-z.+-]{1,32}"\/>/);
+  assert.equal(KEEPALIVE_PROMPT, "Reply with only: K");
+  assert.equal(keepalivePrompt(), "Reply with only: K");
 });
 
 test("settings parse like the Claude plugin's", () => {
@@ -46,10 +44,10 @@ test("settings: defaults < file < environment; resolved values fall back safely"
 test("replay payloads keep the cached prefix and cap output", () => {
   const p = { model: "m", system: [{ type: "text", text: "S" }], tools: [{ name: "t" }], max_tokens: 8000, messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] };
   const orig = structuredClone(p);
-  const r = buildKeepalivePayload("anthropic-messages", p, "9.9.9");
+  const r = buildKeepalivePayload("anthropic-messages", p);
   assert.deepEqual(p, orig);
   assert.deepEqual(r.payload.messages[0], p.messages[0]);
-  assert.equal(r.payload.messages.at(-1).content[0].text, '<keepalive v="9.9.9"/> Reply with only: K');
+  assert.equal(r.payload.messages.at(-1).content[0].text, 'Reply with only: K');
   assert.equal(r.payload.max_tokens, 1);
   assert.deepEqual([r.payload.system, r.payload.tools], [p.system, p.tools]);
   assert.equal(buildKeepalivePayload("anthropic-messages", { messages: [], thinking: { type: "enabled" } }, "1").ok, false);

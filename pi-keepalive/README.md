@@ -3,8 +3,7 @@
 Keeps the prompt cache warm for [Pi](https://github.com/badlogic/pi-mono) and
 OMP (oh-my-pi) sessions by sending a tiny cache-reading request shortly before
 the cache expires. Same idea as the Claude Code `keepalive` plugin, and it
-follows the gateway cache-policy protocol (`<keepalive v="X.Y.Z" src="SRC"/> Reply with only: K`, SRC = native, learned, documented, default, override, probe or client,
-max output ~1 token).
+follows the gateway cache-policy protocol (the keepalive prompt is exactly `Reply with only: K`, max output ~1 token; a `client=pi-keepalive/X.Y.Z` heartbeat on policy requests and `POST /v1/cache/reports` after each keepalive or compaction tell a speaking gateway which lifetime source, `native`, `learned`, `documented`, `override`, `probe` or `client`, timed it; a policy request is made at least every 10 minutes).
 
 ## Install
 

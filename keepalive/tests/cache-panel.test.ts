@@ -47,7 +47,7 @@ async function setup($: Engine, on: On, endpoint = 'https://gateway.example', st
     roster: [] as AgentInfo[], sessionId: 'cache-session', failSave: false, failRead: false, logs: [] as string[],
     reported: undefined as { fiveMinute: number; oneHour: number } | undefined,
     flushed: undefined as { fiveMinute: number; oneHour: number } | undefined,
-    forks: [] as string[], fetches: [] as { url: string; headers?: Record<string, string> }[], policy: null as null | Record<string, unknown>[], policyStatus: 200, compactions: [] as string[], theme: 'dark',
+    forks: [] as string[], fetches: [] as { url: string; headers?: Record<string, string>; method?: string; body?: string }[], reportStatus: 200, reportFail: false, policy: null as null | Record<string, unknown>[], policyStatus: 200, compactions: [] as string[], theme: 'dark',
     forkUsage: { input_tokens: 10, output_tokens: 2, cache_read_input_tokens: 900, cache_creation_input_tokens: 0 },
     compaction: {} as Record<string, unknown>,
     prices: { 'vendor/main': { read: 0.1, fiveMinute: 1.25, output: 5, provider: 'example', id: 'main-1', source: 'models.dev' } } as Record<string, unknown>,
@@ -76,7 +76,11 @@ async function setup($: Engine, on: On, endpoint = 'https://gateway.example', st
   on('classic.SessionStart', () => ({}));
   on('classic.Stop', () => ({}));
   on('http.fetch', ($, e) => {
-    world.fetches.push({ url: e.url, headers: e.init?.headers });
+    world.fetches.push({ url: e.url, headers: e.init?.headers, method: e.init?.method, body: e.init?.body as string | undefined });
+    if (e.init?.method === 'POST') {
+      if (world.reportFail) throw new Error('reports offline');
+      return { value: { status: world.reportStatus, ok: world.reportStatus === 200, headers: {}, text: '' } };
+    }
     if (!world.policy) throw new Error('policy offline');
     return { value: { status: world.policyStatus, ok: world.policyStatus === 200, headers: {}, text: JSON.stringify({ rows: world.policy, server_now: 1 }) } };
   });
@@ -1984,14 +1988,131 @@ const policyRow = (extra: Record<string, unknown> = {}) => ({ alias: 'vendor/mai
   prefix_bucket: 8, upstream_provider: 'phala', upstream_model: 'moonshotai/kimi-k3', ...extra });
 const GATEWAY = { env: { ANTHROPIC_AUTH_TOKEN: 'secret-token' } };
 
-test('the keepalive prompt names the plugin version and asks for one letter', async ($, on) => {
+test('the keepalive prompt is always the neutral text', async ($, on) => {
   response(on);
   const { world, clock } = await setup($, on);
   world.reported = { fiveMinute: 100, oneHour: 0 };
   await cycleTo($, 'warm');
   await step($);
   await clock.advance(275000);
-  expect(world.forks).toEqual(['<keepalive v="0.4.1" src="native"/> Reply with only: K']);
+  expect(world.forks).toEqual(['Reply with only: K']);
+});
+
+const posts = (world: { fetches: { url: string; method?: string; body?: string }[] }) => world.fetches.filter(f => f.method === 'POST');
+
+async function gatewayWarm($: Engine, on: On, base = 'https://gateway.example', mode = 'warm') {
+  response(on);
+  const made = await setup($, on, base, undefined, GATEWAY);
+  made.world.reported = undefined;
+  made.world.prices['gateway-code-task'] = { read: 0.1, fiveMinute: 1.25, output: 5 };
+  made.world.policy = [policyRow({ alias: 'gateway-code-task', source: 'documented', safe_refresh_s: 600, refresh_on_read: true, max_idle_s: null })];
+  await cycleTo($, mode);
+  await step($, { model: 'gateway-code-task' });
+  return made;
+}
+
+test('a confirmed keepalive behind a protocol gateway is reported to its reports endpoint', async ($, on) => {
+  const { world, clock } = await gatewayWarm($, on);
+  await clock.advance(597000);
+  const sent = posts(world);
+  expect(sent.length).toBeGreaterThan(0);
+  expect(sent[0].url).toBe('https://gateway.example/v1/cache/reports');
+  const body = JSON.parse(sent[0].body!);
+  expect(body.client).toBe('keepalive/0.4.2');
+  expect(body.harness).toBe('claude_cli');
+  expect(body.reports[0]).toMatchObject({ kind: 'keepalive', session: 'cache-session', alias: 'gateway-code-task', src: 'documented' });
+  expect(typeof body.reports[0].started_at_ms).toBe('number');
+  expect(JSON.stringify(body)).not.toContain('<keepalive');
+});
+
+test('a gateway that answers 404 to reports is left alone, and a failing one is retried later', async ($, on) => {
+  const missing = await gatewayWarm($, on);
+  missing.world.reportStatus = 404;
+  await missing.clock.advance(597000);
+  await missing.clock.advance(600000);
+  expect(posts(missing.world).length).toBe(1);
+});
+
+test('a failing reports endpoint backs off and then delivers the queue', async ($, on) => {
+  const { world, clock } = await gatewayWarm($, on);
+  world.reportFail = true;
+  await clock.advance(597000);
+  const failed = posts(world).length;
+  expect(failed).toBeGreaterThan(0);
+  world.reportFail = false;
+  await clock.advance(600000);
+  expect(posts(world).length).toBeGreaterThan(failed);
+});
+
+test('a native Claude keepalive behind a protocol gateway is reported with src native', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on, 'https://gateway.example', undefined, GATEWAY);
+  world.reported = { fiveMinute: 100, oneHour: 0 };
+  world.policy = [];
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(275000);
+  const reports = posts(world).flatMap(post => JSON.parse(post.body!).reports);
+  expect(reports.length).toBeGreaterThan(0);
+  expect(reports[0]).toMatchObject({ kind: 'keepalive', src: 'native' });
+  expect(Object.keys(reports[0]).sort()).toEqual(['alias', 'completed_at_ms', 'fresh', 'kind', 'output', 'read', 'session', 'src', 'started_at_ms', 'write']);
+});
+
+test('a Claude-only session behind a gateway sends the heartbeat at most once per ten minutes', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on, 'https://gateway.example', undefined, GATEWAY);
+  world.reported = { fiveMinute: 100, oneHour: 0 };
+  world.policy = [];
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(30000);
+  const gets = () => world.fetches.filter(f => f.method !== 'POST');
+  expect(gets().length).toBe(1);
+  expect(gets()[0].url).toContain('client=keepalive%2F0.4.2&harness=claude_cli');
+  expect(gets()[0].headers?.authorization).toBe('Bearer secret-token');
+  await clock.advance(500000);
+  expect(gets().length).toBe(1);
+  await clock.advance(200000);
+  expect(gets().length).toBe(2);
+});
+
+test('a gateway default lifetime is reported as override', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on, 'https://gateway.example', undefined, GATEWAY);
+  world.reported = undefined;
+  world.prices['gateway-code-task'] = { read: 0.1, fiveMinute: 1.25, output: 5 };
+  world.policy = [policyRow({ alias: 'gateway-code-task', source: 'default', safe_refresh_s: 270, refresh_on_read: true, max_idle_s: null })];
+  await cycleTo($, 'warm');
+  await step($, { model: 'gateway-code-task' });
+  await clock.advance(270000);
+  expect(posts(world).flatMap(post => JSON.parse(post.body!).reports)[0].src).toBe('override');
+});
+
+test('a compaction behind a protocol gateway is reported', { options: { compact_threshold: '1000' } }, async ($, on) => {
+  const { world, clock } = await gatewayWarm($, on, 'https://gateway.example', 'compact');
+  await clock.advance(597000);
+  const kinds = posts(world).flatMap(post => JSON.parse(post.body!).reports.map((r: { kind: string }) => r.kind));
+  expect(kinds).toContain('compaction');
+});
+
+for (const base of ['https://api.anthropic.com', '']) {
+  test(`nothing is reported with base URL "${base}"`, async ($, on) => {
+    const { world, clock } = await gatewayWarm($, on, base);
+    await clock.advance(597000);
+    expect(posts(world).length).toBe(0);
+  });
+}
+
+test('a gateway that answered 404 to the policy endpoint gets no reports', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on, 'https://gateway.example', undefined, GATEWAY);
+  world.policyStatus = 404;
+  world.reported = undefined;
+  world.policy = [];
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(300000);
+  expect(posts(world).length).toBe(0);
 });
 
 test('a gateway policy keeps a row without reported cache lifetimes warm by its safe time, renewing on confirmed reads', async ($, on) => {
@@ -2002,7 +2123,7 @@ test('a gateway policy keeps a row without reported cache lifetimes warm by its 
   await step($);
   await clock.advance(2000);
   expect(world.fetches.length).toBe(1);
-  expect(world.fetches[0].url).toBe('https://gateway.example/v1/cache/policy?alias=vendor%2Fmain&session=cache-session');
+  expect(world.fetches[0].url).toBe('https://gateway.example/v1/cache/policy?alias=vendor%2Fmain&session=cache-session&client=keepalive%2F0.4.2&harness=claude_cli');
   expect(world.fetches[0].headers?.authorization).toBe('Bearer secret-token');
   await clock.advance(30000);
   expect(text(await $.ui.render(band()))).toMatch(/✦ 7m \d+s/);
@@ -2044,7 +2165,7 @@ test('a client TTL warms a model nobody else gives a lifetime for, once per idle
   await clock.advance(225000);
   expect(world.forks.length).toBe(0);
   await clock.advance(12000);
-  expect(world.forks).toEqual(['<keepalive v="0.4.1" src="client"/> Reply with only: K']);
+  expect(world.forks).toEqual(['Reply with only: K']);
   await clock.advance(1200000);
   expect(world.forks.length).toBe(1);
   expect((await dashboard($)).includes('✎ 5m · your TTL setting')).toBe(true);
@@ -2199,7 +2320,7 @@ test('a served enabled lifetime overrides the client TTL, and its source rides t
   await clock.advance(32000);
   expect(text(await $.ui.render(band()))).toMatch(/▣ 3m \d+s/);
   await clock.advance(212000);
-  expect(world.forks).toEqual(['<keepalive v="0.4.1" src="documented"/> Reply with only: K']);
+  expect(world.forks).toEqual(['Reply with only: K']);
   expect((await dashboard($)).includes('server controlled')).toBe(true);
 });
 
@@ -2371,7 +2492,7 @@ test('Claude behind a gateway keeps the native 5m path even when the policy says
   expect(world.forks.length).toBe(0);
   await clock.advance(15000);
   expect(world.forks.length).toBe(1);
-  expect(world.fetches.length).toBe(0);
+  expect(world.fetches.filter(f => f.method !== 'POST').length).toBe(1);
   expect(text(await $.ui.render(band())).includes('ETA ~4:55')).toBe(true);
 });
 
@@ -2496,7 +2617,7 @@ test('a gateway OpenAI model with a documented lifetime shows a countdown from i
   }
   expect(text(await $.ui.render(band()))).toMatch(/▣ 2\dm \d+s/);
   await clock.advance(3500000);
-  expect(world.forks.every(prompt => prompt.includes('src="documented"'))).toBe(true);
+  expect(world.forks.every(prompt => prompt === 'Reply with only: K')).toBe(true);
   expect(world.forks.length).toBeGreaterThan(0);
 });
 
@@ -2561,7 +2682,7 @@ for (const source of SOURCES) for (const mode of ['off', 'warm', 'compact', 'war
     await clock.advance(source.advance);
     expect(world.forks.length > 0).toBe(outcome === 'forks');
     expect(world.compactions.length > 0).toBe(outcome === 'compactions');
-    if (outcome === 'forks') expect(world.forks[0]).toBe(`<keepalive v="0.4.1" src="${source.src}"/> Reply with only: K`);
+    if (outcome === 'forks') expect(world.forks[0]).toBe('Reply with only: K');
     const shown = text(await $.ui.render(band()));
     if (!source.native) {
       expect(shown).not.toContain('TTL 1h');

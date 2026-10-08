@@ -13,11 +13,11 @@ type Obj = Record<string, any>;
  * Clone `payload` (the exact body of the last real request) and append the keepalive user message,
  * capping output. Everything before the appended message stays byte-identical so the cached prefix is reused.
  */
-export function buildKeepalivePayload(api: ReplayApi | null, payload: unknown, version: string, source?: string): { ok: true; payload: Obj } | { ok: false; reason: string } {
+export function buildKeepalivePayload(api: ReplayApi | null, payload: unknown): { ok: true; payload: Obj } | { ok: false; reason: string } {
   if (!payload || typeof payload !== "object") return { ok: false, reason: "no payload" };
   if (!api) return { ok: false, reason: "unsupported API" };
   const p = structuredClone(payload) as Obj;
-  const text = keepalivePrompt(version, source);
+  const text = keepalivePrompt();
   if (api === "anthropic-messages") {
     if (!Array.isArray(p.messages)) return { ok: false, reason: "no messages" };
     // Budget thinking derives budget_tokens from max_tokens, which is part of the cache key.

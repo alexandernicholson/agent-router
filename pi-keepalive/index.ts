@@ -55,6 +55,7 @@ export default function keepaliveExtension(pi: any): void {
       return { status: res.status, text: await res.text() };
     },
     credentials,
+    harness: () => (typeof ctxRef?.modelRegistry?.streamSimple === "function" ? "pi" : "omp"),
     async fork(payload, source): Promise<ForkResult> {
       abort = new AbortController();
       const result = await sendKeepalive(ctxRef, source, payload, abort.signal, sessionId(), env.PI_KEEPALIVE_TRANSPORT === "fetch", realHeaders);

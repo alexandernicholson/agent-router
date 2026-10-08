@@ -21,7 +21,7 @@ test("enabled policy: the countdown starts at the last cache-touching request an
   const { panel, state } = await gateway(t);
   await tick(panel, state, 100);
   assert.equal(state.fetches.length, 1);
-  assert.match(state.fetches[0].url, /^https:\/\/gateway\.example\.com\/ai\/openai\/v1\/v1\/cache\/policy\?alias=kimi-k3&session=p$/);
+  assert.match(state.fetches[0].url, /^https:\/\/gateway\.example\.com\/ai\/openai\/v1\/v1\/cache\/policy\?alias=kimi-k3&session=p&client=pi-keepalive%2F0\.3\.2&harness=pi$/);
   assert.equal(state.fetches[0].init.headers["x-api-key"], "k");
   assert.equal(panel.policyOf(panel.get(), panel.mainRow(panel.get())).status, "enabled");
   await tick(panel, state, 470_000);
@@ -106,7 +106,7 @@ test("the client TTL times keepalives for a model with no served lifetime, tagge
     await tick(panel, state, 100);
     await tick(panel, state, 266_000);
     assert.equal(state.forks.length, expected, JSON.stringify(set));
-    if (expected) assert.match(state.forks[0].payload.messages.at(-1).content, /^<keepalive v="0\.3\.1" src="client"\/>/);
+    if (expected) assert.match(state.forks[0].payload.messages.at(-1).content, /^Reply with only: K$/);
     assert.equal(panel.managed(), expected === 1);
     if (expected) assert.equal(panel.lifetime(panel.get(), panel.mainRow(panel.get())).source, "client");
   }
@@ -133,13 +133,13 @@ test("the endpoint missing (404) falls back to native: claude warms natively, ot
   assert.equal(panel.policyOf(panel.get(), panel.mainRow(panel.get())), undefined);
   await tick(panel, state, 478_000);
   assert.equal(state.forks.length, 0, "no TTL reported for kimi: nothing to count down");
-  // claude on a gateway base URL never consults the policy
+  // claude on a gateway base URL never takes its lifetime from the policy (it is only asked for speaks and the heartbeat)
   const { host, state: s2 } = await fakeHost(t);
   const claude = createPanel();
   await claude.initialize(host, "c", settings({ upkeep: "warm", keepalive_limit: "2" }));
   await realRequest(claude, s2, source({ baseUrl: "https://gateway.example.com/ai/claude" }), { write: 5000 });
   await tick(claude, s2, 271_000);
-  assert.equal(s2.fetches.length, 0);
+  assert.equal(claude.lifetime(claude.get(), claude.mainRow(claude.get())).source, "native");
   assert.equal(s2.forks.length, 1);
 });
 
@@ -245,7 +245,7 @@ test("probe and override sources: icons, markers, countdown, and no 5m/1h contro
     assert.match(text, /⟳ gateway probe/);
     assert.doesNotMatch(text, /chosen with \/keepalive ttl|the request's own cache_control/);
     await tick(panel, state, 478_000);
-    assert.match(state.forks[0].payload.messages.at(-1).content, new RegExp(`src="${source}"`));
+    assert.match(state.forks[0].payload.messages.at(-1).content, /^Reply with only: K$/);
   }
 });
 
@@ -296,4 +296,75 @@ test("price lookups pass the feed context for every row; patterns and write_1h a
   const price = panel.get().prices.get("kimi-k3")?.value;
   assert.equal(price?.oneHour, 2);
   assert.equal(price?.read, 0.1);
+});
+
+const speaking = () => ({ status: 200, text: JSON.stringify({ rows: [{ alias: "kimi-k3", status: "enabled", refresh_on_read: true, safe_refresh_s: 480, max_idle_s: 1500, prefix_bucket: 0 }] }) });
+const posts = (state) => state.fetches.filter((f) => f.init?.method === "POST");
+
+test("no replay body mentions <keepalive, the heartbeat names pi-keepalive, and a native row is polled every 10 minutes", async (t) => {
+  const { host, state } = await fakeHost(t);
+  state.policy = { status: 404, text: "" };
+  const panel = createPanel();
+  await panel.initialize(host, "c", settings({ upkeep: "warm", keepalive_limit: "5" }));
+  await realRequest(panel, state, source({ baseUrl: "https://gateway.example.com/ai/claude" }), { write: 5000 });
+  await tick(panel, state, 271_000);
+  assert.equal(state.forks.length, 1);
+  assert.doesNotMatch(JSON.stringify(state.forks[0].payload), /<keepalive/);
+  const gets = () => state.fetches.filter((f) => /cache\/policy/.test(f.url));
+  assert.match(gets()[0].url, /client=pi-keepalive%2F\d+\.\d+\.\d+&harness=pi$/);
+  const before = gets().length;
+  await tick(panel, state, 11 * 60_000);
+  assert.ok(gets().length > before, "asked again after 10 minutes");
+});
+
+test("reports go only to a gateway that speaks the protocol, after each keepalive and compaction", async (t) => {
+  const mute = await gateway(t, { policy: { status: 404, text: "" }, set: { unreported_ttl: "5m" } });
+  await tick(mute.panel, mute.state, 100);
+  await tick(mute.panel, mute.state, 266_000);
+  assert.equal(mute.state.forks.length, 1);
+  assert.equal(posts(mute.state).length, 0, "a 404 gateway gets no reports");
+
+  const { panel, state } = await gateway(t, { policy: speaking(), set: { upkeep: "warmcomp", compact_threshold: "10k" } });
+  await tick(panel, state, 100);
+  await tick(panel, state, 478_000);
+  assert.equal(state.forks.length, 1);
+  const sent = posts(state);
+  assert.equal(sent.length, 1);
+  assert.match(sent[0].url, /\/v1\/cache\/reports/);
+  const body = JSON.parse(sent[0].init.body);
+  assert.match(body.client, /^pi-keepalive\/\d+\.\d+\.\d+$/);
+  assert.equal(body.reports[0].kind, "keepalive");
+  assert.equal(body.reports[0].src, "learned");
+  assert.equal(body.reports[0].alias, "kimi-k3");
+  assert.equal(body.reports[0].read, 5000);
+  assert.equal(sent[0].init.headers["x-api-key"], "k");
+
+  const compact = await gateway(t, { policy: speaking(), set: { upkeep: "compact", compact_threshold: "10k" } });
+  await tick(compact.panel, compact.state, 100);
+  await tick(compact.panel, compact.state, 478_000);
+  assert.equal(compact.state.compactions, 1);
+  assert.equal(JSON.parse(posts(compact.state)[0].init.body).reports[0].kind, "compaction");
+});
+
+test("a policy source of default is reported as override", async (t) => {
+  const { panel, state } = await gateway(t, { policy: { status: 200, text: JSON.stringify({ rows: [{ alias: "kimi-k3", status: "enabled", refresh_on_read: true, safe_refresh_s: 480, source: "default", prefix_bucket: 0 }] }) } });
+  await tick(panel, state, 100);
+  await tick(panel, state, 478_000);
+  assert.equal(JSON.parse(posts(state)[0].init.body).reports[0].src, "override");
+});
+
+test("policy GETs and report bodies name the harness (pi by default, omp when the host says so)", async (t) => {
+  for (const [harness, over] of [["pi", {}], ["omp", { harness: () => "omp" }]]) {
+    const { host, state } = await fakeHost(t, over);
+    state.policy = speaking();
+    const panel = createPanel();
+    await panel.initialize(host, "sess-7", settings({ upkeep: "warm", keepalive_limit: "4" }));
+    await realRequest(panel, state, gw(), { write: 20_000 });
+    await tick(panel, state, 100);
+    await tick(panel, state, 478_000);
+    assert.match(state.fetches[0].url, new RegExp(`&client=pi-keepalive%2F[\\d.]+&harness=${harness}$`));
+    const body = JSON.parse(posts(state)[0].init.body);
+    assert.equal(body.harness, harness);
+    assert.equal(body.reports[0].session, "sess-7", "the same id the model requests carry");
+  }
 });

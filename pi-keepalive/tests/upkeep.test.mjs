@@ -23,14 +23,14 @@ test("off sends nothing; switching to warm sends in the last 30s and renews the 
   assert.ok(s.panel.state(s.panel.get(), s.panel.mainRow(s.panel.get())).leftMs > 250_000, "countdown renewed by the keepalive's cache read");
 });
 
-test("warm with a number limit: keepalive carries the marker, is counted, then stops at the limit", async (t) => {
+test("warm with a number limit: keepalive has no marker, is counted, then stops at the limit", async (t) => {
   const { panel, state } = await warmSession(t);
   await TICK(panel, state, 250_000);
   assert.equal(state.forks.length, 0);
   await TICK(panel, state, 21_000); // 271s: inside the last 30s
   assert.equal(state.forks.length, 1);
   const sent = state.forks[0].payload;
-  assert.equal(sent.messages.at(-1).content[0].text, `<keepalive v="${VERSION}" src="native"/> Reply with only: K`);
+  assert.equal(sent.messages.at(-1).content[0].text, "Reply with only: K");
   assert.equal(sent.max_tokens, 1);
   assert.equal(panel.mainRow(panel.get()).keepalives.length, 1);
   assert.equal(panel.get().warming, false);

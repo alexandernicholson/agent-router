@@ -12,18 +12,26 @@ const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]']);
 const seconds = v => Number.isSafeInteger(v) && v > 0 && v <= 604800;
 const text = v => typeof v === 'string' && v.length > 0 && v.length <= 200;
 
-/** The policy URL for a gateway base URL, or null for no base, api.anthropic.com or anything unsafe. */
-export function policyUrl(base, alias, session) {
+/** A gateway endpoint under {base}/v1/cache, or null for no base, api.anthropic.com or anything unsafe. */
+function gatewayUrl(base, path, query) {
   let url;
   try { url = new URL(base); } catch { return null; }
   const host = url.hostname.toLowerCase();
   if (url.username || url.password || host === 'api.anthropic.com' || host.endsWith('.anthropic.com')) return null;
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && LOOPBACK.has(host))) return null;
-  url.pathname = `${url.pathname.replace(/\/+$/, '')}/v1/cache/policy`;
-  url.search = new URLSearchParams({ alias, ...(session ? { session } : {}) }).toString();
+  url.pathname = `${url.pathname.replace(/\/+$/, '')}/v1/cache/${path}`;
+  url.search = new URLSearchParams(query).toString();
   url.hash = '';
   return url.href;
 }
+
+/** The policy URL for a gateway base URL; client ("keepalive/0.4.2") is the heartbeat naming the plugin and version. */
+export function policyUrl(base, alias, session, client, harness) {
+  return gatewayUrl(base, 'policy', { alias, ...(session ? { session } : {}), ...(client ? { client } : {}), ...(harness ? { harness } : {}) });
+}
+
+/** Where a gateway takes client reports, with the same safety rules as the policy URL. */
+export const reportsUrl = base => gatewayUrl(base, 'reports', {});
 
 /** Valid rows of a policy response body, or null when the body is not a policy. */
 export function parsePolicy(body) {
@@ -52,10 +60,10 @@ export function pickRow(rows, prefixTokens) {
 
 /**
  * @param {{fetch: (url: string, init: object) => Promise<{status: number, text: string}>,
- *   headers?: () => Promise<Record<string, string>>}} host
+ *   headers?: () => Promise<Record<string, string>>, client?: string, harness?: string}} host
  */
 export function createPolicyClient(host) {
-  /** @type {Map<string, {at: number, rows: object[] | null, failures: number, retryAt: number, lookup?: Promise<void>}>} */
+  /** @type {Map<string, {at: number, rows: object[] | null, failures: number, retryAt: number, speaks?: number, lookup?: Promise<void>}>} */
   const known = new Map();
   /** The last rows served for an alias, kept while refreshing or failing for up to an hour; [] is a real answer of no policy, null is unknown. */
   const peek = (alias, now) => {
@@ -69,7 +77,7 @@ export function createPolicyClient(host) {
         new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('timeout')), POLICY_TIMEOUT_MS); })]);
       const rows = response.status === 404 ? [] : response.status === 200 ? parsePolicy(response.text) : null;
       if (!rows) throw new Error('bad policy');
-      Object.assign(entry, { at: now, rows, failures: 0, retryAt: 0 });
+      Object.assign(entry, { at: now, rows, failures: 0, retryAt: 0, speaks: response.status === 200 ? now : entry.speaks });
     } catch {
       entry.failures++;
       entry.retryAt = now + BACKOFF_MS[Math.min(entry.failures, BACKOFF_MS.length) - 1];
@@ -77,9 +85,11 @@ export function createPolicyClient(host) {
   }
   return {
     peek,
+    /** True when the gateway answered a policy request with a valid 200 within the last hour: it speaks the protocol and strips the keepalive marker. */
+    speaks: now => [...known.values()].some(entry => entry.speaks !== undefined && now - entry.speaks < POLICY_STALE_MS),
     /** Fetches when the alias is unknown or older than 10 minutes and not backing off; always resolves. */
     async refresh(base, alias, session, now) {
-      const url = policyUrl(base, alias, session);
+      const url = policyUrl(base, alias, session, host.client, host.harness);
       if (!url) return;
       const entry = known.get(alias) ?? { at: 0, rows: null, failures: 0, retryAt: 0 };
       known.set(alias, entry);
@@ -87,6 +97,58 @@ export function createPolicyClient(host) {
       if (now < entry.retryAt || entry.rows && now - entry.at < POLICY_TTL_MS) return;
       entry.lookup = load(url, entry, now).finally(() => { entry.lookup = undefined; });
       return entry.lookup;
+    },
+  };
+}
+
+export const REPORT_BATCH = 50;
+export const REPORT_QUEUE = 200;
+export const REPORT_STOP_MS = 3600000;
+
+/**
+ * Out-of-band reports of keepalives and compactions the plugin made, for the gateway's telemetry only.
+ * Bounded queue, fire-and-forget batches, backoff after failures, silence for an hour after a 404.
+ * @param {{fetch: (url: string, init: object) => Promise<{status: number}>, headers?: () => Promise<Record<string, string>>, client: string, harness?: string}} host
+ */
+export function createReportClient(host) {
+  const queue = [];
+  let retryAt = 0;
+  let stopUntil = 0;
+  let failures = 0;
+  let flushing;
+  async function send(url, batch) {
+    let timer;
+    try {
+      const response = await Promise.race([host.fetch(url, { method: 'POST', body: JSON.stringify({ client: host.client, ...(host.harness ? { harness: host.harness } : {}), reports: batch }),
+        headers: { 'content-type': 'application/json', ...await host.headers?.() } }),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('timeout')), POLICY_TIMEOUT_MS); })]);
+      return response.status;
+    } catch { return 0; } finally { clearTimeout(timer); }
+  }
+  async function drain(url, now) {
+    while (queue.length) {
+      const batch = queue.slice(0, REPORT_BATCH);
+      const status = await send(url, batch);
+      if (status === 404) { stopUntil = now + REPORT_STOP_MS; queue.length = 0; return; }
+      if (status < 200 || status >= 300) { retryAt = now + BACKOFF_MS[Math.min(++failures, BACKOFF_MS.length) - 1]; return; }
+      failures = 0;
+      for (const sent of batch) queue.splice(queue.indexOf(sent), 1);
+    }
+  }
+  return {
+    get size() { return queue.length; },
+    /** Queues one report, dropping the oldest beyond the bound; nothing is queued while the gateway has said it does not want them. */
+    add(report, now) {
+      if (now < stopUntil) return;
+      queue.push(report);
+      if (queue.length > REPORT_QUEUE) queue.splice(0, queue.length - REPORT_QUEUE);
+    },
+    /** Sends queued reports in batches unless backing off; always resolves. */
+    flush(base, now) {
+      const url = reportsUrl(base);
+      if (!url || !queue.length || now < retryAt || now < stopUntil) return Promise.resolve();
+      flushing ??= drain(url, now).finally(() => { flushing = undefined; });
+      return flushing;
     },
   };
 }

@@ -90,7 +90,7 @@ test("slash commands: status, upkeep, ttl, set, settings, dashboard, requests, c
   await x.emit("session_start");
   await turn(x);
   await run("");
-  assert.match(x.ui.notes.at(-1), /^keepalive v0\.3\.1\n\[ ● \]/);
+  assert.match(x.ui.notes.at(-1), /^keepalive v0\.3\.2\n\[ ● \]/);
   await run("upkeep compact");
   assert.match(x.ui.notes.at(-1), /upkeep: compact/);
   await run("upkeep");
@@ -150,7 +150,7 @@ test("the keepalive timer sends a marked request through the fetch fallback with
   assert.equal(calls[0].init.headers["x-api-key"], "sk-test");
   assert.equal(calls[0].init.headers["x-extra"], "1");
   assert.equal(calls[0].init.headers["content-length"], undefined);
-  assert.match(calls[0].body.messages.at(-1).content[0].text, /^<keepalive v="0\.3\.1" src="native"\/> Reply with only: K$/);
+  assert.match(calls[0].body.messages.at(-1).content[0].text, /^Reply with only: K$/);
   assert.equal(calls[0].body.stream, false);
   await new Promise((r) => setTimeout(r, 150));
   assert.match(x.ui.status.at(-1), /↻1/);
@@ -196,7 +196,7 @@ test("transport: streamSimple path (Pi) swaps the body and reports usage; errors
   assert.equal(sent[0].options.maxTokens, 1);
   assert.equal(sent[0].options.apiKey, "k");
   assert.equal(sent[0].options.sessionId, "sess");
-  assert.match(sent[0].context.messages[0].content[0].text, /^<keepalive v=/);
+  assert.match(sent[0].context.messages[0].content[0].text, /^Reply with only: K$/);
   const bad = await sendKeepalive({ modelRegistry: reg({ stopReason: "error", errorMessage: "boom" }) }, source(), payload, new AbortController().signal, "", false);
   assert.deepEqual(bad, { answered: false, reason: "boom" });
   const aborted = await sendKeepalive({ modelRegistry: reg({ stopReason: "aborted" }) }, source(), payload, new AbortController().signal, "", false);
@@ -250,13 +250,31 @@ test("on a gateway the extension asks the policy with the session's credentials 
   assert.ok(policy, "policy fetched");
   assert.equal(policy.init.headers.authorization, "Bearer sk-test");
   assert.equal(policy.init.redirect, "error");
+  assert.match(policy.url, /&harness=omp$/, "no streamSimple means OMP");
   assert.deepEqual(await x.emit("cache_warming_decision"), { action: "stop" });
   await run(t, 18);
   await new Promise((r) => setTimeout(r, 100));
   const keepalive = calls.find((c) => String(c.url).endsWith("/chat/completions"));
   assert.ok(keepalive, "keepalive sent to the same base URL");
-  assert.match(JSON.parse(keepalive.init.body).messages.at(-1).content, /^<keepalive v="0\.3\.1" src="learned"\/>/);
+  assert.match(JSON.parse(keepalive.init.body).messages.at(-1).content, /^Reply with only: K$/);
   x.ctx.modelRegistry.getApiKeyAndHeaders = async () => { throw new Error("no auth"); };
+});
+
+test("the harness is pi when the model registry can stream", async (t) => {
+  const calls = [];
+  t.mock.method(globalThis, "fetch", async (url, init) => { calls.push({ url, init }); return { status: 404, text: async () => "" }; });
+  t.mock.timers.enable({ apis: ["setInterval", "Date"], now: 9_000_000 });
+  const x = await load(t, { PI_KEEPALIVE_UPKEEP: "warm" });
+  x.ctx.modelRegistry.streamSimple = () => ({ result: async () => ({ stopReason: "stop", usage: {} }) });
+  x.ctx.model = { id: "kimi-k3", api: "openai-completions", provider: "gw", baseUrl: "https://gateway.example.com/ai/openai/v1" };
+  await x.emit("session_start");
+  await x.emit("agent_start");
+  await x.emit("before_provider_request", { payload: { model: "kimi-k3", messages: [{ role: "user", content: "hi" }] } });
+  await x.emit("message_end", { message: { role: "assistant", stopReason: "stop", usage: { cacheRead: 0, cacheWrite: 5000, input: 10, output: 1 }, model: "kimi-k3" } });
+  await x.emit("agent_end");
+  await run(t, 2);
+  await new Promise((r) => setTimeout(r, 100));
+  assert.match(calls.find((c) => String(c.url).includes("/v1/cache/policy")).url, /&harness=pi$/);
 });
 
 test("odd hosts: failing UI, credential errors, our own compaction event, and the TTL toggle back to 5m", async (t) => {

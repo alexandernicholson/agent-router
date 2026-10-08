@@ -1,10 +1,9 @@
-// Must equal package.json "version" (asserted in tests). Sent in the keepalive marker.
-export const VERSION = "0.3.1";
+// Must equal package.json "version" (asserted in tests). Sent to gateways as the `client` heartbeat, never in a prompt.
+export const VERSION = "0.3.2";
 
-/** Exact prompt contract shared with cache-policy gateways and the Claude Code plugin. */
-export const KEEPALIVE_PROMPT_TEMPLATE = '<keepalive v="{version}"/> Reply with only: K';
+/** The exact keepalive prompt: no marker, so a keepalive is indistinguishable from a short user message to every provider. */
+export const KEEPALIVE_PROMPT = "Reply with only: K";
 
-/** `source` is the lifetime source that timed the keepalive: native, learned, documented, default or client. */
-export function keepalivePrompt(version: string = VERSION, source?: string): string {
-  return KEEPALIVE_PROMPT_TEMPLATE.replace("{version}", version).replace("/>", source ? ` src="${source}"/>` : "/>");
+export function keepalivePrompt(): string {
+  return KEEPALIVE_PROMPT;
 }

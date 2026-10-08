@@ -1,9 +1,9 @@
 import type { AgentInfo, Elements, EngineInterface, RenderElement, RenderSurface, SessionCompacted, TurnStepInput, TurnUsage } from 'claude-code';
-import { applyCacheCreation, reportedCacheCreation, cacheBar, cacheBarParts, cacheClock, cacheDial, cacheGrade, cachePercent, cachePolicy, cacheRows, cacheStatus, cacheTokens, isCompaction, isKeepalive, keepaliveWorthwhile, keepalivesLeft, lifeGrade, policyAction, policyRow, lifetimeOf, lifetimeLabel, lifetimeStatus, clientTtl, savingsWorthwhile, keepalivePrompt, SOURCE_ICONS, SOURCE_NAMES, loopKey, recentMisses, recentUsage, sampleKey, sampleTtl, unreportedModels, validSample, sessionMatrix, sessionUsage, cacheGap, MISS_WINDOW_MS, RATE_REQUESTS } from '../lib/cache.js';
+import { applyCacheCreation, reportedCacheCreation, cacheBar, cacheBarParts, cacheClock, cacheDial, cacheGrade, cachePercent, cachePolicy, cacheRows, cacheStatus, cacheTokens, isCompaction, isKeepalive, keepaliveWorthwhile, keepalivesLeft, lifeGrade, policyAction, policyRow, lifetimeOf, lifetimeLabel, lifetimeStatus, clientTtl, savingsWorthwhile, KEEPALIVE_PROMPT, SOURCE_ICONS, SOURCE_NAMES, loopKey, recentMisses, recentUsage, sampleKey, sampleTtl, unreportedModels, validSample, sessionMatrix, sessionUsage, cacheGap, MISS_WINDOW_MS, RATE_REQUESTS } from '../lib/cache.js';
 import { validPrices } from '../lib/cache.js';
 import type { CachePrices, CacheRow, CacheSample, CacheReset, CacheStatus } from '../lib/cache.js';
 import { CACHE_COLORS, themeFamily } from '../lib/cache-colors.js';
-import { createPolicyClient, pickRow, policyUrl } from '../lib/shared/policy.mjs';
+import { createPolicyClient, createReportClient, pickRow, policyUrl, POLICY_TTL_MS } from '../lib/shared/policy.mjs';
 import { VERSION } from '../lib/version.js';
 import { displayText } from '../lib/shared/text.js';
 import { isPaneTeammate, isTeammate, sameModel } from '../lib/shared/models.js';
@@ -101,6 +101,8 @@ type Context = {
   rechecks: Map<string, number>;
   rechecking?: Promise<void>;
   policy: ReturnType<typeof createPolicyClient>;
+  reports: ReturnType<typeof createReportClient>;
+  heartbeatAt?: number;
   fallback: Fallback;
   prices: Map<string, { at: number; value: CachePrices | null; settled: boolean; lookup?: Promise<void> }>;
   actedAt?: number;
@@ -444,7 +446,7 @@ export function createCachePanel() {
     const subagent = resolve('subagent');
     const current: Context = { host, bridge, sessionId, endpoint, selfLabel, env: configuration.env, upkeep: saved ?? configuration.upkeep ?? 'off',
       limit: configuration.limit, compactAt: configuration.compactAt ?? COMPACT_MIN_TOKENS, family: themeFamily(undefined, configuration.env.COLORFGBG),
-      samples: new Map(), resets: [], labels: new Map(), roster: [], routes: null, now: 0, pending: new Map(), requested: new Map(), rechecks: new Map(), fallback: configuration.fallback, policy: createPolicyClient({ fetch: (url, init) => host.http.fetch(url, init), headers: host.credentials }), prices: new Map(), available: true,
+      samples: new Map(), resets: [], labels: new Map(), roster: [], routes: null, now: 0, pending: new Map(), requested: new Map(), rechecks: new Map(), fallback: configuration.fallback, policy: createPolicyClient({ fetch: (url, init) => host.http.fetch(url, init), headers: host.credentials, client: `keepalive/${VERSION}`, harness: 'claude_cli' }), reports: createReportClient({ fetch: (url, init) => host.http.fetch(url, init), headers: host.credentials, client: `keepalive/${VERSION}`, harness: 'claude_cli' }), prices: new Map(), available: true,
       defaults: { main: resolve('main'), subagent }, ttlDefaults: configuration.ttl,
       ttls: new Map((await savedTtls(host)).filter(([id]) => id === sessionId).map(([, key, ttl]) => [key, ttl])), kinds: new Map(),
       gate: createTtlGate(value => setTtlEnv(host, TTL_ENV.subagent, value ?? configuration.env[TTL_ENV.subagent])),
@@ -550,19 +552,30 @@ export function createCachePanel() {
     for (const agentId of loops.values()) await enrich(current.sessionId, agentId);
   }
 
+  /** Tells a gateway that speaks the policy protocol about a keepalive or compaction; telemetry only, never awaited. */
+  function report(current: Context, kind: 'keepalive' | 'compaction', model: string, src: string, startedAt: number, completedAt: number, usage: { read: number; write: number; fresh: number; output: number }) {
+    // The server accepts only these sources; a gateway's default is an administrator-style fixed lifetime, and an unknown lifetime is not worth reporting.
+    const reported = src === 'default' ? 'override' : src;
+    if (!current.endpoint || !current.policy.speaks(completedAt) || !['native', 'learned', 'probe', 'documented', 'override', 'client'].includes(reported)) return;
+    current.reports.add({ kind, session: current.sessionId, alias: model, src: reported, started_at_ms: startedAt, completed_at_ms: completedAt, ...usage }, completedAt);
+    void current.reports.flush(current.endpoint, completedAt);
+  }
+
   async function warm(current: Context, model: string, source: string) {
     const startedAt = await current.host.clock.now();
     const release = await holdSubagentTtl(current, null);
     let result;
-    try { result = await current.host.model.fork({ prompt: keepalivePrompt(VERSION, source) }); }
+    try { result = await current.host.model.fork({ prompt: KEEPALIVE_PROMPT }); }
     finally { await release(); }
     if (context !== current) return;
     if (!result.isAnswered) current.host.ui.log(`Keepalive: cache keepalive did not answer (${result.reason}).`, { to: 'debug' });
     if (!('usage' in result)) return;
     const { usage } = result;
     if (usage.cache_read_input_tokens + usage.cache_creation_input_tokens + usage.input_tokens === 0) return;
+    const completedAt = await current.host.clock.now();
+    report(current, 'keepalive', model, source, startedAt, completedAt, { read: usage.cache_read_input_tokens, write: usage.cache_creation_input_tokens, fresh: usage.input_tokens, output: usage.output_tokens });
     await observe(current, { sessionId: current.sessionId, agentId: null, turnId: `keepalive:${startedAt}`, index: 0, model, startedAt,
-      completedAt: await current.host.clock.now(), read: usage.cache_read_input_tokens, write: usage.cache_creation_input_tokens,
+      completedAt, read: usage.cache_read_input_tokens, write: usage.cache_creation_input_tokens,
       fresh: usage.input_tokens, output: usage.output_tokens, ...cachePolicy(current.env, model), requested: ttlChoice(current, null).ttl });
     current.now = await current.host.clock.now();
     redraw(current);
@@ -574,7 +587,12 @@ export function createCachePanel() {
     const key = loopKey(current.sessionId, agentId);
     const model = rows(current).find(row => loopKey(row.sessionId, row.agentId) === key)?.last?.model ?? 'unknown';
     const usage = result.usage;
+    const compactedRow = rows(current).find(row => loopKey(row.sessionId, row.agentId) === key);
+    const lifetimeSource = compactedRow ? lifetime(current, compactedRow).source : 'unknown';
     await reset(current, agentId, startedAt);
+    const finished = Math.max(startedAt, await current.host.clock.now());
+    report(current, 'compaction', model, lifetimeSource, startedAt, finished,
+      { read: usage?.cache_read_input_tokens ?? 0, write: usage?.cache_creation_input_tokens ?? 0, fresh: usage?.input_tokens ?? 0, output: usage?.output_tokens ?? 0 });
     await observe(current, { sessionId: current.sessionId, agentId, turnId: `compaction:${startedAt}`, index: 0, model, startedAt,
       completedAt: Math.max(startedAt, await current.host.clock.now()), read: usage?.cache_read_input_tokens ?? 0,
       write: usage?.cache_creation_input_tokens ?? 0, fresh: usage?.input_tokens ?? 0, output: usage?.output_tokens ?? 0,
@@ -677,8 +695,16 @@ export function createCachePanel() {
     const current = context;
     if (!current) return;
     current.now = await current.host.clock.now();
+    if (current.endpoint && current.policy.speaks(current.now)) void current.reports.flush(current.endpoint, current.now);
     const governed = mainRow(current);
-    if (current.endpoint && policyRow(governed)) void current.policy.refresh(current.endpoint, governed!.last!.model, current.sessionId, current.now);
+    // A governed row keeps its own policy fresh. Any other row still asks once per cache period, so the gateway learns the client (heartbeat) and we learn it speaks the protocol.
+    if (current.endpoint && governed?.last) {
+      if (policyRow(governed)) void current.policy.refresh(current.endpoint, governed.last.model, current.sessionId, current.now);
+      else if (current.now - (current.heartbeatAt ?? -Infinity) >= POLICY_TTL_MS) {
+        current.heartbeatAt = current.now;
+        void current.policy.refresh(current.endpoint, governed.last.model, current.sessionId, current.now);
+      }
+    }
     if (!current.rechecking) current.rechecking = recheck(current).finally(() => { current.rechecking = undefined; });
     await current.rechecking;
     if (!current.upkeeping) current.upkeeping = upkeep(current).catch(() => undefined).finally(() => { current.upkeeping = undefined; });

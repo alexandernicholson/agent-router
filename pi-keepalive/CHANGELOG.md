@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.2
+
+- **The keepalive prompt is always `Reply with only: K`.** No marker, so providers and gateways see an ordinary short message.
+- **Gateways learn about you out of band.** Policy requests carry `client=pi-keepalive/<version>`, and a gateway that speaks the cache-policy protocol is told, after each keepalive and compaction, what it read, wrote and which lifetime timed it (`POST /v1/cache/reports`). Nothing is sent to a gateway that doesn't answer the policy.
+- **The harness is named.** Policy requests carry `harness=pi` (`omp` under OMP) and reports a top-level `"harness"` field; a report's `session` is the same id sent with model requests.
+- **Gateways are asked at least every 10 minutes**, even for Claude rows with their own native lifetime.
+
 ## 0.3.1
 
 - **A live countdown for gateway and client lifetimes.** The bar shows time left to the refresh (`✦ 7m 12s`), coloured as it runs down, from the same deadline the keepalive fires on. The 5m/1h TTL control is hidden for these rows, since it does nothing for them.

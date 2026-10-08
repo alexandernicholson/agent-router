@@ -2,6 +2,10 @@
 
 Each release explains what changed for you, in 120 words or less.
 
+## Keepalive 0.4.2
+
+- **Providers see nothing about the plugin.** The keepalive is plain `Reply with only: K`. A gateway that answers the policy endpoint is told about keepalives and compactions out of band instead, for its statistics only.
+
 ## Keepalive 0.4.1
 
 - **Countdowns for non-Claude models.** A gateway or TTL-setting lifetime now counts down to the refresh time (`◇ 2m 9s · once`) with a live dial and colours, then reads `sent · once`, `idle` or `missed`.
@@ -14,6 +18,10 @@ Each release explains what changed for you, in 120 words or less.
 - **See where a lifetime comes from.** Icons mark it: ◉ provider, ✦ learned, ▣ documented, ◇ default, ✎ yours, ⊘ no cache.
 - **One keepalive per idle period** unless reads are known to extend the cache, and only when it pays off.
 - **Prices from your gateway.** Reads `/v1/cache/prices` or your own feed URL.
+
+## Pi Keepalive 0.3.2
+
+- **Keepalives are plain `Reply with only: K` again**, with the heartbeat and reports sent to the gateway out of band. Same as Keepalive 0.4.2.
 
 ## Pi Keepalive 0.3.1
 

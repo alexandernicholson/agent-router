@@ -4,7 +4,7 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { cachePolicy, validSample, validPrices, cacheRows, cacheStatus, cacheBar, cacheClock, loopKey, applyCacheCreation, cacheGrade, cachePercent, lifeGrade, isKeepalive, keepaliveWorthwhile, keepalivesLeft, cacheDial, cacheBarParts, isCompaction,
-  recentUsage, recentMisses, sampleTtl, unreportedModels, sessionMatrix, sessionUsage, cacheGap, lifetimeOf, lifetimeLabel, lifetimeStatus, clientTtl, parseTtlOverrides, fallbackTtl, savingsWorthwhile, keepalivePrompt, SOURCE_ICONS, policyAction, policyRow, POLICY_TICK_MS, MISS_WINDOW_MS, TTL_REPORT_MS } from '../lib/cache.js';
+  recentUsage, recentMisses, sampleTtl, unreportedModels, sessionMatrix, sessionUsage, cacheGap, lifetimeOf, lifetimeLabel, lifetimeStatus, clientTtl, parseTtlOverrides, fallbackTtl, savingsWorthwhile, KEEPALIVE_PROMPT, SOURCE_ICONS, policyAction, policyRow, POLICY_TICK_MS, MISS_WINDOW_MS, TTL_REPORT_MS } from '../lib/cache.js';
 import { recordCacheSample, resetCache, cacheSnapshot, linkSession } from '../lib/cache-state.mjs';
 import { recordPath, writeRecord, routerData } from '../lib/state.mjs';
 import { handleRequest } from '../lib/bridge.mjs';
@@ -580,8 +580,8 @@ test('client TTL settings: a global choice, per-model overrides, never for Claud
   assert.equal(clientTtl('claude-opus-5', '1h'), null);
 });
 
-test('the keepalive prompt names the version and the lifetime source', () => {
-  assert.equal(keepalivePrompt('0.4.0', 'learned'), '<keepalive v="0.4.0" src="learned"/> Reply with only: K');
+test('the keepalive prompt is neutral and carries nothing plugin-specific', () => {
+  assert.equal(KEEPALIVE_PROMPT, 'Reply with only: K');
 });
 
 test('a keepalive is worth sending only when the chance of resuming times the saving beats its cost', () => {

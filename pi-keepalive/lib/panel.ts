@@ -5,7 +5,7 @@ import {
   policyAction, policyRow, lifetimeOf, clientTtl, savingsWorthwhile, recentUsage, sampleKey, unreportedModels, validPrices, validSample,
 } from "./core/cache.js";
 import { handleRequest } from "./core/bridge.mjs";
-import { createPolicyClient, pickRow, policyUrl } from "./core/shared/policy.mjs";
+import { createPolicyClient, createReportClient, pickRow, policyUrl } from "./core/shared/policy.mjs";
 import { sameModel } from "./core/shared/models.js";
 import { displayText } from "./core/shared/text.js";
 import { applyTtl, buildKeepalivePayload, requestedTtl, type ReplayApi, type Tokens } from "./replay.ts";
@@ -42,6 +42,8 @@ export interface PanelHost {
   log(text: string, level?: "debug" | "info"): void;
   redraw(): void;
   busy(): boolean;
+  /** Which harness runs this extension: "pi" or "omp". */
+  harness?(): string;
 }
 export interface Source {
   model: string;
@@ -66,6 +68,7 @@ export interface Ctx {
   actedAt?: number;
   upkeeping?: Promise<void>;
   policy: ReturnType<typeof createPolicyClient>;
+  reports: ReturnType<typeof createReportClient>;
   prices: Map<string, { at: number; value: any; settled: boolean; lookup?: Promise<void> }>;
   ttl?: Ttl;
   available: boolean;
@@ -147,6 +150,15 @@ export function createPanel() {
     } catch { c.host.log(`Keepalive: cache ${what} choice could not be saved.`); }
   }
 
+  /** Gateway-bound requests name the harness: a `harness` query param on policy GETs and a top-level field in report bodies. */
+  function named(host: PanelHost) {
+    return (url: string, init: any) => {
+      const harness = host.harness?.() ?? "pi";
+      // The policy URL always has a query; the report body is always the report client's own JSON.
+      return init?.method === "POST" ? host.fetch(url, { ...init, body: JSON.stringify({ ...JSON.parse(init.body), harness }) }) : host.fetch(`${url}&harness=${harness}`, init);
+    };
+  }
+
   async function initialize(host: PanelHost, sessionId: string, settings: Resolved, previous?: Ctx) {
     const scale = Number(host.env.PI_KEEPALIVE_E2E_TTL_MS) > 0 && host.env.PI_KEEPALIVE_E2E === "1" ? 300000 / Number(host.env.PI_KEEPALIVE_E2E_TTL_MS) : 1;
     const saved = (await savedUpkeep(host)).find(([id]) => id === sessionId)?.[1] as Upkeep | undefined;
@@ -154,7 +166,8 @@ export function createPanel() {
     const c: Ctx = {
       host, sessionId, settings, upkeep: saved ?? settings.upkeep, samples: new Map(), resets: [], now: host.now(), available: true, warming: false, seq: 0,
       prices: previous?.prices ?? new Map(), ttl, timeScale: scale,
-      policy: previous?.policy ?? createPolicyClient({ fetch: (url, init) => host.fetch(url, init), headers: host.credentials }),
+      policy: previous?.policy ?? createPolicyClient({ fetch: named(host), headers: host.credentials, client: `pi-keepalive/${VERSION}` }),
+      reports: previous?.reports ?? createReportClient({ fetch: named(host), headers: host.credentials, client: `pi-keepalive/${VERSION}` }),
     };
     ctx = c;
     if (!saved) await persist(c, UPKEEP_KEY, c.upkeep, savedUpkeep, "upkeep");
@@ -253,18 +266,30 @@ function sampleOf(c: Ctx, fields: object) {
     if (!c) return;
     const model = mainRow(c).last?.model ?? "unknown";
     const usage = result.usage;
+    const src = lifetime(c, mainRow(c)).source;
     await reset(c, startedAt);
     await observe(c, sampleOf(c, { turnId: `compaction:${startedAt}`, model, startedAt, completedAt: Math.max(startedAt, c.host.now()),
       read: usage?.read ?? 0, write: usage?.write ?? 0, fresh: usage?.fresh ?? 0, output: usage?.output ?? 0, ...requestedOf(c.last, model, c.last ? requestedTtl(c.last.payload) : "5m"),
       ...(result.tokensBefore !== undefined ? { tokensBefore: result.tokensBefore } : {}),
       ...(result.tokensAfter !== undefined ? { tokensAfter: result.tokensAfter } : {}) }));
+    if (usage) report(c, "compaction", model, src, startedAt, c.host.now(), usage);
     c.host.redraw();
+  }
+
+  /** Tells a gateway that speaks the protocol about a keepalive or compaction we made, for its telemetry only. */
+  function report(c: Ctx, kind: "keepalive" | "compaction", model: string, src: string, startedAt: number, completedAt: number, usage: Tokens) {
+    const base = gatewayBase(c);
+    // A gateway default is an administrator-style fixed lifetime to the server; an unknown lifetime is not worth reporting.
+    const reported = src === "default" ? "override" : src;
+    if (!base || !c.policy.speaks(completedAt) || !["native", "learned", "probe", "documented", "override", "client"].includes(reported)) return;
+    c.reports.add({ kind, session: c.sessionId, alias: model, src: reported, started_at_ms: startedAt, completed_at_ms: completedAt, read: usage.read, write: usage.write, fresh: usage.fresh, output: usage.output }, completedAt);
+    void c.reports.flush(base, completedAt);
   }
 
   async function warm(c: Ctx, model: string, lifetimeSource: string) {
     const startedAt = c.host.now();
     const source = c.last!;
-    const built = buildKeepalivePayload(source.api, source.payload, VERSION, lifetimeSource);
+    const built = buildKeepalivePayload(source.api, source.payload);
     if (!built.ok) { c.host.log(`Keepalive: cache keepalive skipped (${built.reason}).`); return; }
     c.warming = true;
     let result: ForkResult;
@@ -276,6 +301,7 @@ function sampleOf(c: Ctx, fields: object) {
     await observe(c, sampleOf(c, { turnId: `keepalive:${startedAt}`, model, startedAt, completedAt: c.host.now(), read: usage.read, write: usage.write, fresh: usage.fresh, output: usage.output,
       ...requestedOf(source, model, requestedTtl(source.payload)) }));
     c.now = c.host.now();
+    report(c, "keepalive", model, lifetimeSource, startedAt, c.now, usage);
     c.host.redraw();
   }
 
@@ -355,7 +381,10 @@ function sampleOf(c: Ctx, fields: object) {
     c.now = c.host.now();
     const base = gatewayBase(c);
     const governed = mainRow(c);
-    if (base && policyRow(governed)) void c.policy.refresh(base, governed.last.model, c.sessionId, c.now);
+    // Asked at least every 10 minutes for any row, native ones included, so `speaks` and the heartbeat work.
+    const alias = governed.last?.model ?? c.last?.model;
+    if (base && alias) void c.policy.refresh(base, alias, c.sessionId, c.now);
+    if (base && c.policy.speaks(c.now)) void c.reports.flush(base, c.now);
     if (!c.upkeeping) c.upkeeping = upkeep(c).catch(() => undefined).finally(() => { c.upkeeping = undefined; });
     await c.upkeeping;
     return true;
