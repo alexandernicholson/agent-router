@@ -10,6 +10,8 @@ Two Claude Code Mods, installed from one marketplace. Each works on its own; tog
 
 ## Install
 
+For step-by-step setup, settings and troubleshooting, see [keepalive/INSTALL.md](keepalive/INSTALL.md).
+
 Inside Claude Code:
 
 ```text

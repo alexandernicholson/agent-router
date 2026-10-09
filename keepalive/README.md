@@ -19,6 +19,8 @@ Any endpoint works: a Claude subscription, an API key or an Anthropic-compatible
 
 ## Install
 
+Step-by-step guide with settings and troubleshooting: [INSTALL.md](INSTALL.md).
+
 ```text
 /plugin marketplace add alexandernicholson/agent-router
 /plugin install keepalive@agent-router-tools
