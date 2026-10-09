@@ -98,13 +98,15 @@ export function register(on: On, options: PluginOptions) {
         config: { list: () => $.config.list(), set: input => $.config.set(input) },
         command: { register: input => $.command.register(input) },
         ttlDefaults,
+        store: { get: key => $.store.get(key), set: (key, value) => $.store.set(key, value), delete: key => $.store.delete(key) },
+        release: () => cachePanel.release(),
       };
       await settings.register(settingsHost);
       await cachePanel.initialize({
         session: { id: () => $.session.id(), compact: input => $.session.compact(input) },
         config: { list: () => $.config.list() },
         agent: { list: () => $.agent.list() },
-        clock: { now: () => $.clock.now() },
+        clock: { now: () => $.clock.now(), sleep: ms => $.clock.sleep(ms) },
         model: { fork: request => $.model.fork(request) },
         store: { get: key => $.store.get(key), set: (key, value) => $.store.set(key, value) },
         ui: { invalidate: event => $.ui.invalidate(event), open: input => $.ui.open(input),

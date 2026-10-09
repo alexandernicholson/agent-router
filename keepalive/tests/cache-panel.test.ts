@@ -3,6 +3,7 @@ import type { Engine } from 'claude-code/testing';
 import type { AgentInfo, On, RenderInput, RenderNode, TurnStepInput } from 'claude-code';
 import { applyCacheCreation, loopKey } from '../lib/cache.js';
 import { CACHE_COLORS } from '../lib/cache-colors.js';
+import { VERSION } from '../lib/version.js';
 
 tier('user');
 const DARK = CACHE_COLORS.dark;
@@ -255,7 +256,6 @@ test('reported third-party mixed TTLs produce separate lifetime bars in the nati
   const contents = await dashboard($);
   expect(contents.includes('TTL 5m · 40 written')).toBe(true);
   expect(contents.includes('TTL 1h · 60 written')).toBe(true);
-  expect(contents.includes('response cache_creation')).toBe(true);
   expect(contents.includes('provider TTL unknown')).toBe(false);
   await clock.advance(301000);
   const later = text(await $.ui.render(pane));
@@ -691,7 +691,7 @@ test('the bar shows the hit rate over the last 10 requests, not just the last on
   Object.assign(usage, { read: 10000, write: 0 });
   for (let i = 1; i <= 3; i++) await step($, { index: i });
   expect(text(await $.ui.render(band())).includes('75%')).toBe(true);
-  expect((await dashboard($)).includes('hit rate over the last 4 requests')).toBe(true);
+  expect((await dashboard($)).includes('· last 4 requests')).toBe(true);
   for (let i = 4; i <= 12; i++) await step($, { index: i });
   expect(text(await $.ui.render(band())).includes('100%')).toBe(true);
 });
@@ -959,7 +959,7 @@ test('warming stops at the keepalive limit, and a real request starts the count 
   await step($);
   await clock.advance(2000);
   expect(text(await $.ui.render(band())).includes('· ↻3 ·')).toBe(true);
-  expect((await dashboard($)).includes('up to 3 keepalives after each request, whatever they cost')).toBe(true);
+  expect((await dashboard($)).includes('warm · up to 3 keepalives')).toBe(true);
   await clock.advance(273000);
   expect(world.forks.length).toBe(1);
   expect(text(await $.ui.render(band())).includes('· ↻2 ·')).toBe(true);
@@ -993,7 +993,7 @@ test('the default keepalive limit leaves warming to the cost rule', { options: {
   await step($);
   for (let i = 0; i < 15; i++) await clock.advance(270000);
   expect(world.forks.length).toBe(9);
-  expect((await dashboard($)).includes('while keepalives cost less than rewriting the cache')).toBe(true);
+  expect((await dashboard($)).includes('keepalives while they pay')).toBe(true);
 });
 
 test('an infinite keepalive limit warms until the next request, and warmcomp never compacts', { options: { keepalive_limit: 'infinite' } }, async ($, on) => {
@@ -1012,7 +1012,7 @@ test('an infinite keepalive limit warms until the next request, and warmcomp nev
   expect(world.compactions.length).toBe(0);
   const contents = await dashboard($);
   expect(contents.includes('keepalives until your next request')).toBe(true);
-  expect(contents.includes('so it never compacts')).toBe(true);
+  expect(contents.includes('never compacts')).toBe(true);
 });
 
 const worker = { agentId: 'worker@team', agentName: 'worker', parentSessionId: 'lead-session' };
@@ -1050,7 +1050,7 @@ test('the compaction threshold sets the smallest conversation compact and warmco
   world.reported = { fiveMinute: 100, oneHour: 0 };
   await cycleTo($, 'compact');
   await step($);
-  expect((await dashboard($)).includes('compacts an idle main conversation of 40k+ tokens')).toBe(true);
+  expect((await dashboard($)).includes('compact at 40k+ tokens')).toBe(true);
   await clock.advance(275000);
   expect(world.compactions).toEqual(['default']);
 });
@@ -1061,7 +1061,7 @@ test('a compaction threshold that is not a number of tokens keeps 100k', { optio
   world.reported = { fiveMinute: 100, oneHour: 0 };
   await cycleTo($, 'compact');
   await step($);
-  expect((await dashboard($)).includes('compacts an idle main conversation of 100k+ tokens')).toBe(true);
+  expect((await dashboard($)).includes('compact at 100k+ tokens')).toBe(true);
   await clock.advance(275000);
   expect(world.compactions.length).toBe(0);
 });
@@ -1169,14 +1169,14 @@ test('the dashboard names what cannot be kept warm only when the tree shows such
   expect((await dashboard($)).includes('kept warm')).toBe(false);
   world.roster = [{ id: 'scout1', type: 'agent-router:scout', description: 'Search', status: 'running' }];
   await step($, { agentId: 'scout1' });
-  expect((await dashboard($)).includes('– can\'t be kept warm: Claude Code has no keepalive or compaction for subagents.')).toBe(true);
+  expect((await dashboard($)).includes('– can\'t be kept warm')).toBe(true);
   world.roster.push({ id: 'mate1', type: 'teammate', description: 'Probe', status: 'running', name: 'probe' });
   await step($, { agentId: 'mate1' });
-  expect((await dashboard($)).includes('for subagents and in-process teammates.')).toBe(true);
+  expect((await dashboard($)).includes('– can\'t be kept warm')).toBe(true);
   await $.ui.press({ plugin: 'keepalive', key: 'cache-agents:main', requestId: 'keepalive' });
   expect(text(await $.ui.render(pane)).includes('kept warm')).toBe(false);
   await $.ui.press({ plugin: 'keepalive', key: 'cache-agents:teammates', requestId: 'keepalive' });
-  expect(text(await $.ui.render(pane)).includes('– can\'t be kept warm: Claude Code has no keepalive or compaction for in-process teammates.')).toBe(true);
+  expect(text(await $.ui.render(pane)).includes('– can\'t be kept warm')).toBe(true);
 });
 
 function treeLines(node: RenderNode): string[] {
@@ -1232,7 +1232,7 @@ test('only the main conversation names the keepalive prices it is warmed at', as
     { fiveMinute: 100, oneHour: 0 })];
   await dashboard($);
   const lines = treeLines(await $.ui.render(pane));
-  expect(lines.filter(line => line.includes('vendor/main · response')).length).toBe(2);
+  expect(lines.filter(line => line.trim().startsWith('vendor/main')).length).toBe(2);
   expect(lines.filter(line => line.includes('priced by')).length).toBe(1);
 });
 
@@ -1277,14 +1277,14 @@ test('the TTL button shows what Claude Code would use before any request is sent
   response(on);
   await setup($, on);
   expect(await ttlButton($)).toBe('TTL 5m');
-  expect((await dashboard($)).includes('TTL 5m · Claude Code default for API keys and gateways')).toBe(true);
+  expect((await dashboard($)).includes('Claude Code default for API keys and gateways')).toBe(true);
 });
 
 test('Claude Code settings and a subscription change the default the button shows', async ($, on) => {
   response(on);
   await setup($, on, undefined, undefined, { settings: { promptCacheTtl: '1h' } });
   expect(await ttlButton($)).toBe('TTL 1h');
-  expect((await dashboard($)).includes('TTL 1h · promptCacheTtl in your Claude Code settings')).toBe(true);
+  expect((await dashboard($)).includes('promptCacheTtl in your Claude Code settings')).toBe(true);
 });
 
 test('a Claude subscription defaults the main conversation to 1h and its subagents to 5m', async ($, on) => {
@@ -1333,6 +1333,271 @@ test('a subagent keeps its own TTL, carried only by its own requests', async ($,
   expect(world.env.CLAUDE_CODE_PROMPT_CACHE_TTL).toBe(undefined);
 });
 
+type TtlValue = '5m' | '1h';
+type TtlSetting = 'default' | TtlValue;
+type MatrixLoop = { id: string | null; kind: 'main' | 'subagent' | 'teammate' };
+type MatrixVariant = { name: string; auth?: 'bearer'; env?: Record<string, string>; settings?: Record<string, unknown>;
+  fallback: { main: TtlValue; subagent: TtlValue }; base: { main: TtlValue; subagent: TtlValue }; locked?: boolean };
+
+const TTL_SETTINGS: TtlSetting[] = ['default', '5m', '1h'];
+const MATRIX_VARIANTS: MatrixVariant[] = [
+  { name: 'an API key or gateway', fallback: { main: '5m', subagent: '5m' }, base: { main: '5m', subagent: '5m' } },
+  { name: 'a Claude subscription', auth: 'bearer', fallback: { main: '1h', subagent: '5m' }, base: { main: '1h', subagent: '5m' } },
+  { name: 'your own TTL variables', env: { CLAUDE_CODE_PROMPT_CACHE_TTL: '1h', CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: '1h' },
+    fallback: { main: '5m', subagent: '5m' }, base: { main: '1h', subagent: '1h' } },
+  { name: 'Claude Code settings and ENABLE_PROMPT_CACHING_1H', env: { ENABLE_PROMPT_CACHING_1H: '1' }, settings: { promptCacheTtl: '5m' },
+    fallback: { main: '5m', subagent: '1h' }, base: { main: '5m', subagent: '1h' } },
+];
+const FORCED: MatrixVariant = { name: 'FORCE_PROMPT_CACHING_5M', env: { FORCE_PROMPT_CACHING_5M: '1' }, fallback: { main: '5m', subagent: '5m' },
+  base: { main: '5m', subagent: '5m' }, locked: true };
+const LEAD_ROSTER: AgentInfo[] = [
+  { id: 'sub', type: 'agent-router:scout', description: 'Search', status: 'running' },
+  { id: 'nested', type: 'agent-router:task', description: 'Nested', status: 'running', parentId: 'sub' },
+  { id: 'amate-1', type: 'agent-router:task', teammateId: 'mate@session-lead', description: 'Mate', status: 'running', name: 'mate' },
+  { id: 'mate-child', type: 'agent-router:scout', description: 'Mate child', status: 'running', parentId: 'amate-1' },
+];
+const LEAD_LOOPS: MatrixLoop[] = [{ id: null, kind: 'main' }, { id: 'sub', kind: 'subagent' }, { id: 'nested', kind: 'subagent' },
+  { id: 'amate-1', kind: 'teammate' }, { id: 'mate-child', kind: 'subagent' }, { id: 'workflow-1', kind: 'subagent' }];
+const PANE_ROSTER = LEAD_ROSTER.slice(0, 2);
+const PANE_LOOPS: MatrixLoop[] = [{ id: null, kind: 'main' }, { id: 'sub', kind: 'subagent' }, { id: 'nested', kind: 'subagent' },
+  { id: 'workflow-1', kind: 'subagent' }];
+const flip = (ttl: TtlValue): TtlValue => ttl === '5m' ? '1h' : '5m';
+const configured = (setting: TtlSetting, base: TtlValue): TtlValue => setting === 'default' ? base : setting;
+
+function expectedTtl(variant: MatrixVariant, pane: boolean, loop: MatrixLoop, settings: { main: TtlSetting; subagent: TtlSetting; teammate: TtlSetting }): TtlValue {
+  if (variant.locked) return '5m';
+  if (loop.kind === 'main') return configured(pane ? settings.teammate : settings.main, variant.base.main);
+  return configured(loop.kind === 'teammate' ? settings.teammate : settings.subagent, variant.base.subagent);
+}
+
+function effective(variant: MatrixVariant, scope: 'main' | 'subagent', value: string | undefined): string {
+  return variant.locked ? '5m' : value ?? variant.fallback[scope];
+}
+
+let matrixIndex = 0;
+async function sentTtl($: Engine, variant: MatrixVariant, loop: MatrixLoop) {
+  const before = ttlSeen.length;
+  await step($, { agentId: loop.id ?? undefined, model: 'claude-opus-5-5', turnId: `matrix-${loop.id}`, index: matrixIndex++ });
+  const entry = ttlSeen.slice(before).find(item => item.at === 'step');
+  return effective(variant, loop.id === null ? 'main' : 'subagent', entry?.value);
+}
+
+async function compactedTtl($: Engine, variant: MatrixVariant, loop: MatrixLoop) {
+  const before = ttlSeen.length;
+  await $.session.compact({ trigger: 'manual', messages: [{ role: 'assistant', text: 'Summary', toolUses: [] }], ...(loop.id ? { agentId: loop.id } : {}) });
+  return effective(variant, 'subagent', ttlSeen.slice(before).find(item => item.at === 'compaction')?.value);
+}
+
+const label = (loop: MatrixLoop) => loop.id ?? 'main';
+
+for (const pane of [false, true]) {
+  const loops = pane ? PANE_LOOPS : LEAD_LOOPS;
+  const role = pane ? 'a split-pane teammate session' : 'a lead session';
+  const combos = MATRIX_VARIANTS.flatMap(variant => TTL_SETTINGS.flatMap(main => TTL_SETTINGS.flatMap(subagent => TTL_SETTINGS.map(teammate =>
+    ({ variant, settings: { main, subagent, teammate } }))))).concat([{ variant: FORCED, settings: { main: '1h', subagent: '1h', teammate: '1h' } }]);
+  for (const { variant, settings } of combos) {
+    const name = `in ${role} with ${variant.name}, cache_ttl ${settings.main}, subagent ${settings.subagent} and teammate ${settings.teammate}: `
+      + 'every loop, its compaction and its TTL button carry its own TTL and no other';
+    test(name, { options: { cache_ttl: settings.main, subagent_cache_ttl: settings.subagent, teammate_cache_ttl: settings.teammate } }, async ($, on) => {
+      response(on);
+      const { world } = await setup($, on, 'https://gateway.example', undefined,
+        { auth: variant.auth, env: variant.env, settings: variant.settings, ...(pane ? { teammate: worker } : {}) });
+      world.roster = pane ? PANE_ROSTER : LEAD_ROSTER;
+      const wanted = new Map(loops.map(loop => [loop, expectedTtl(variant, pane, loop, settings)]));
+      const check = async (changed?: MatrixLoop) => {
+        for (const loop of loops) {
+          const ttl = changed === loop ? flip(wanted.get(loop)!) : wanted.get(loop)!;
+          expect([label(loop), await sentTtl($, variant, loop)]).toEqual([label(loop), ttl]);
+          expect([label(loop), world.samples.at(-1)?.requested]).toEqual([label(loop), ttl]);
+        }
+      };
+      await check();
+      for (const loop of loops) {
+        expect([label(loop), await ttlButton($, loop.id ?? undefined)]).toEqual([label(loop), variant.locked ? undefined : `TTL ${wanted.get(loop)}`]);
+        expect([label(loop), await compactedTtl($, variant, loop)]).toEqual([label(loop), wanted.get(loop)]);
+      }
+      if (!variant.locked) {
+        for (const loop of loops) {
+          await pressTtl($, loop.id ?? undefined);
+          expect([label(loop), await ttlButton($, loop.id ?? undefined)]).toEqual([label(loop), `TTL ${flip(wanted.get(loop)!)}`]);
+          await check(loop);
+          expect([label(loop), await compactedTtl($, variant, loop)]).toEqual([label(loop), flip(wanted.get(loop)!)]);
+          await pressTtl($, loop.id ?? undefined);
+          expect([label(loop), await ttlButton($, loop.id ?? undefined)]).toEqual([label(loop), `TTL ${wanted.get(loop)}`]);
+        }
+      }
+      await check();
+      const resting = !variant.locked && variant.base.subagent === '1h' && [...wanted.values()].includes('5m') ? '5m' : variant.env?.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL;
+      expect(world.env.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL).toBe(resting);
+    });
+  }
+}
+
+for (const pane of [false, true]) {
+  for (const variant of [...MATRIX_VARIANTS, FORCED]) {
+    for (const setting of variant.locked ? ['1h' as const] : TTL_SETTINGS) {
+      for (const switched of variant.locked ? [false] : [false, true]) {
+        const name = `in ${pane ? 'a split-pane teammate session' : 'a lead session'} with ${variant.name}, its TTL setting ${setting}`
+          + `${switched ? ' and its TTL button pressed' : ''}: a keepalive carries the main conversation's TTL, then the subagent variable goes back to rest`;
+        const options: Record<string, string> = pane ? { teammate_cache_ttl: setting, keepalive_limit: '3' } : { cache_ttl: setting, keepalive_limit: '3', cache_upkeep: 'warm' };
+        test(name, { options }, async ($, on) => {
+          response(on);
+          const { world, clock } = await setup($, on, 'https://gateway.example', undefined,
+            { auth: variant.auth, env: variant.env, settings: variant.settings, ...(pane ? { teammate: worker } : {}) });
+          let ttl = expectedTtl(variant, pane, { id: null, kind: 'main' }, { main: setting, subagent: 'default', teammate: setting });
+          if (switched) {
+            await pressTtl($);
+            ttl = flip(ttl);
+          }
+          world.reported = ttl === '1h' ? { fiveMinute: 0, oneHour: 100 } : { fiveMinute: 100, oneHour: 0 };
+          await step($, { model: 'claude-opus-5-5' });
+          await clock.advance((ttl === '1h' ? 3600000 : 300000) - 25000);
+          expect(world.forks.length).toBe(1);
+          expect(effective(variant, 'subagent', seen('keepalive', null).at(-1))).toBe(ttl);
+          expect(world.samples.find(sample => sample.turnId.startsWith('keepalive:'))?.requested).toBe(ttl);
+          await clock.advance(2000);
+          expect(world.env.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL).toBe(!variant.locked && variant.base.subagent === '1h' && ttl === '5m' ? '5m' : variant.env?.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL);
+        });
+      }
+    }
+  }
+}
+
+type Contender = { name: string; loop: string | null; kind: 'step' | 'keepalive' | 'compaction' };
+const CONTENDERS: Contender[] = [
+  { name: 'a subagent', loop: 'sub', kind: 'step' },
+  { name: 'a nested subagent', loop: 'nested', kind: 'step' },
+  { name: 'an in-process teammate', loop: 'amate-1', kind: 'step' },
+  { name: 'a teammate\'s subagent', loop: 'mate-child', kind: 'step' },
+  { name: 'an agent no roster lists', loop: 'workflow-1', kind: 'step' },
+  { name: 'a keepalive', loop: null, kind: 'keepalive' },
+  { name: 'a compaction of the main conversation', loop: null, kind: 'compaction' },
+  { name: 'a compaction of a nested subagent', loop: 'nested', kind: 'compaction' },
+];
+const TTL_BUILD_MS = 1000;
+const WARM_DUE_MS = 270000;
+
+for (const holder of CONTENDERS) {
+  for (const waiter of CONTENDERS) {
+    for (const built of [false, true]) {
+      if (holder === waiter || holder.loop === waiter.loop || (!built && waiter.kind === 'keepalive')) continue;
+      const warm = holder.kind === 'keepalive' || waiter.kind === 'keepalive';
+      const name = built
+        ? `${waiter.name} wanting another TTL than ${holder.name} still answering starts at once with its own, then the variable rests on the default, and both are recorded`
+        : `${waiter.name} wanting another TTL than ${holder.name} being sent waits at most ${TTL_BUILD_MS / 1000}s, starts with its own, and both are recorded`;
+      test(name, { options: { cache_ttl: '5m', subagent_cache_ttl: '1h', teammate_cache_ttl: '5m', keepalive_limit: '3', cache_upkeep: warm ? 'warm' : 'off' } }, async ($, on) => {
+        const started: Record<string, string> = {};
+        const mainSent: (string | undefined)[] = [];
+        let finishHolder!: () => void;
+        const holderDone = new Promise<void>(resolve => { finishHolder = resolve; });
+        let finishWaiter!: () => void;
+        const waiterDone = new Promise<void>(resolve => { finishWaiter = resolve; });
+        const variant = MATRIX_VARIANTS[0];
+        const live = () => effective(variant, 'subagent', liveEnv.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL);
+        const startOf = async (contender: Contender | undefined) => {
+          if (!contender) return;
+          started[contender.name] = live();
+          await (contender === holder ? holderDone : waiterDone);
+        };
+        on('turn.step', async function* ($, e) {
+          if (!e.agentId) mainSent.push(liveEnv.CLAUDE_CODE_PROMPT_CACHE_TTL);
+          yield { kind: 'text' as const, index: 0, text: 'streaming' };
+          if (e.turnId === 'race') await startOf(CONTENDERS.find(item => item.kind === 'step' && item.loop === e.agentId));
+          return { turnId: e.turnId, index: e.index, answer: 'streaming', toolUses: [], stopReason: 'end_turn' as const,
+            usage: { model: e.model, cache_read_input_tokens: 800, cache_creation_input_tokens: 100, input_tokens: 100, output_tokens: 20 } };
+        });
+        const { world, clock } = await setup($, on);
+        world.roster = LEAD_ROSTER;
+        world.reported = { fiveMinute: 100, oneHour: 0 };
+        world.before['model.fork'] = () => startOf(CONTENDERS.find(item => item.kind === 'keepalive'));
+        world.before['session.compact'] = (e: { agentId?: string }) =>
+          startOf(CONTENDERS.find(item => item.kind === 'compaction' && item.loop === (e.agentId ?? null)));
+        const wanted = new Map([holder, waiter].map(contender => [contender, contender.loop === null || contender.loop === 'amate-1' ? '5m' : '1h'] as [Contender, TtlValue]));
+        if (wanted.get(holder) === wanted.get(waiter)) {
+          const own = holder.loop !== null ? holder : waiter;
+          await pressTtl($, own.loop!);
+          wanted.set(own, flip(wanted.get(own)!));
+        }
+        await step($, { model: 'claude-opus-5-5' });
+        const begin = (contender: Contender) => {
+          if (contender.kind === 'step') return step($, { agentId: contender.loop!, model: 'claude-opus-5-5', turnId: 'race' });
+          return $.session.compact({ trigger: 'manual', messages: [{ role: 'assistant', text: 'Summary', toolUses: [] }], ...(contender.loop ? { agentId: contender.loop } : {}) });
+        };
+        let holding: Promise<unknown> = Promise.resolve();
+        let sinceHolder = 0;
+        if (holder.kind === 'keepalive') {
+          await clock.advance(WARM_DUE_MS - 2000);
+          while (!started[holder.name]) { await clock.advance(100); sinceHolder = 100; }
+        } else {
+          holding = begin(holder);
+          await clock.advance(10);
+          sinceHolder = 10;
+        }
+        expect(started).toEqual({ [holder.name]: wanted.get(holder) });
+        if (built) {
+          await clock.advance(TTL_BUILD_MS);
+          expect(live()).toBe(variant.base.subagent);
+        }
+        let waiting: Promise<unknown> = Promise.resolve();
+        if (waiter.kind === 'keepalive') {
+          for (let tries = 0; tries < 300 && !started[waiter.name]; tries++) await clock.advance(1000);
+        } else {
+          waiting = begin(waiter);
+          await clock.advance(10);
+          if (!built) {
+            expect(started[waiter.name]).toBe(undefined);
+            await clock.advance(TTL_BUILD_MS - sinceHolder - 20);
+            expect(started[waiter.name]).toBe(undefined);
+            await clock.advance(sinceHolder + 10);
+          }
+        }
+        expect(started[waiter.name]).toBe(wanted.get(waiter));
+        await step($, { model: 'claude-opus-5-5', index: 1 });
+        expect(effective(variant, 'main', mainSent.at(-1))).toBe('5m');
+        await clock.advance(TTL_BUILD_MS);
+        expect(live()).toBe(variant.base.subagent);
+        finishWaiter();
+        await waiting;
+        await clock.advance(10);
+        expect(live()).toBe(variant.base.subagent);
+        finishHolder();
+        await holding;
+        await clock.advance(TTL_BUILD_MS);
+        for (const contender of [holder, waiter]) {
+          const sample = world.samples.find(item => contender.kind === 'step' ? item.turnId === 'race' && item.agentId === contender.loop
+            : item.turnId.startsWith(`${contender.kind}:`) && item.agentId === contender.loop);
+          expect([contender.name, sample?.requested]).toEqual([contender.name, wanted.get(contender)]);
+        }
+        expect(world.env.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL).toBe(undefined);
+      });
+    }
+  }
+}
+
+test('with a 1h default, the subagent variable rests on 5m only while a conversation still running wants 5m', { options: { cache_ttl: '1h', subagent_cache_ttl: 'default', teammate_cache_ttl: 'default' } }, async ($, on) => {
+  response(on);
+  const variant = MATRIX_VARIANTS[3];
+  const { world, clock } = await setup($, on, 'https://gateway.example', undefined, { env: variant.env, settings: variant.settings });
+  world.roster = LEAD_ROSTER;
+  await step($, { model: 'claude-opus-5-5' });
+  await step($, { agentId: 'sub', model: 'claude-opus-5-5' });
+  await clock.advance(1000);
+  expect(world.env.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL).toBe(undefined);
+  await pressTtl($, 'nested');
+  expect(world.env.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL).toBe('5m');
+  await step($, { agentId: 'sub', model: 'claude-opus-5-5', index: 1 });
+  expect(seen('step', 'sub').at(-1)).toBe(undefined);
+  await clock.advance(1000);
+  expect(world.env.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL).toBe('5m');
+  world.roster = LEAD_ROSTER.map(agent => agent.id === 'nested' ? { ...agent, status: 'completed' as const } : agent);
+  await clock.advance(5000);
+  expect(world.env.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL).toBe(undefined);
+  await pressTtl($);
+  expect(world.env.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL).toBe('5m');
+  await pressTtl($);
+  expect(world.env.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL).toBe(undefined);
+});
+
 test('in-process teammates start in the teammate TTL setting, subagents in the subagent one', async ($, on) => {
   response(on);
   const { world } = await setup($, on);
@@ -1344,7 +1609,7 @@ test('in-process teammates start in the teammate TTL setting, subagents in the s
   await step($, { agentId: 'child' });
   expect(seen('step', 'mate')).toEqual(['1h']);
   expect(seen('step', 'child')).toEqual([undefined]);
-  expect((await dashboard($)).includes('TTL 1h · teammate TTL in /keepalive-settings')).toBe(true);
+  expect((await dashboard($)).includes('teammate TTL in /keepalive-settings')).toBe(true);
 });
 
 test('an in-process teammate launched with a role is still a teammate, by its team address', async ($, on) => {
@@ -1356,8 +1621,8 @@ test('an in-process teammate launched with a role is still a teammate, by its te
   expect(seen('step', 'amate-1')).toEqual(['1h']);
   const contents = await dashboard($);
   expect(contents.includes('probe (amate-1) · in-process teammate')).toBe(true);
-  expect(contents.includes('TTL 1h · teammate TTL in /keepalive-settings')).toBe(true);
-  expect(contents.includes('for in-process teammates.')).toBe(true);
+  expect(contents.includes('teammate TTL in /keepalive-settings')).toBe(true);
+  expect(contents.includes('– can\'t be kept warm')).toBe(true);
 });
 
 test('a split-pane teammate in the lead roster is drawn once, from its own session', async ($, on) => {
@@ -1429,7 +1694,7 @@ test('FORCE_PROMPT_CACHING_5M locks every TTL at 5m', async ($, on) => {
   expect(text(rendered).includes('TTL 5m')).toBe(true);
   await step($, { agentId: 'mate' });
   expect(seen('step', 'mate')).toEqual([undefined]);
-  expect((await dashboard($)).includes('TTL 5m · FORCE_PROMPT_CACHING_5M')).toBe(true);
+  expect((await dashboard($)).includes('FORCE_PROMPT_CACHING_5M')).toBe(true);
 });
 
 test('a session that cannot set environment variables still routes and draws the bar', async ($, on) => {
@@ -1478,9 +1743,9 @@ test('the dashboard opens with the rate now, the session rate and one dot per re
   await step($, { agentId: 'child' });
   const contents = await dashboard($);
   expect(contents.indexOf('Now') < contents.indexOf('Main')).toBe(true);
-  expect(/Now\s+[█▓▒░\s]+\d+%\s+over the last 3 requests/.test(contents)).toBe(true);
-  expect(/Session\s+[█▓▒░\s]+\d+%\s+over 3 requests · read 348.6k/.test(contents)).toBe(true);
-  expect(contents.includes('One dot per request, oldest first: ● good ◐ fair ○ poor ✕ miss · keepalive ◆ compaction')).toBe(true);
+  expect(/Now\s+[█▓▒░\s]+\d+%\s+· last 3 requests/.test(contents)).toBe(true);
+  expect(/Session\s+[█▓▒░\s]+\d+%\s+· 3 requests · read 348.6k/.test(contents)).toBe(true);
+  expect(contents.includes('● good ◐ fair ○ poor ✕ miss · keepalive ◆ compaction')).toBe(true);
   const drawn = await $.ui.render(pane);
   expect(treeLines(drawn).includes('●✕◐')).toBe(true);
   expect(colorOf(drawn, /^●$/)).toBe(DARK.good);
@@ -1490,7 +1755,7 @@ test('the dashboard opens with the rate now, the session rate and one dot per re
 
 test('an empty session says what the dots will show', async ($, on) => {
   await setup($, on);
-  expect((await dashboard($)).includes('No requests yet. Each request this session gets a dot here.')).toBe(true);
+  expect((await dashboard($)).includes('No requests yet.')).toBe(true);
 });
 
 test('filters sit under one heading, the chosen option stands out and the rest are dim', async ($, on) => {
@@ -1855,12 +2120,10 @@ test('after a reload, a request for a different model is still marked as a model
   expect((await inFlight($, 'vendor/other')).includes('model changed · awaiting usage')).toBe(true);
 });
 
-test('a dashboard the terminal cannot place says why, and an unopened pane draws nothing', async ($, on) => {
-  on('ui.render', { component: 'Pane' }, ($, e) => $.ui.resolve(e).Text({ children: ['No pane'] }));
+test('a dashboard the terminal cannot place says why', async ($, on) => {
   const { world } = await setup($, on, undefined, undefined, { broken: ['ui.open'] });
   expect((await run($)).includes('Keepalive dashboard is unavailable')).toBe(true);
   expect(world.logs.includes('Agent cache pane: terminal too narrow')).toBe(true);
-  expect(text(await $.ui.render(pane))).toBe('No pane');
 });
 
 test('a teammate TTL button switches away from the teammate default, and a locked TTL ignores a stale press', async ($, on) => {
@@ -2018,7 +2281,7 @@ test('a confirmed keepalive behind a protocol gateway is reported to its reports
   expect(sent.length).toBeGreaterThan(0);
   expect(sent[0].url).toBe('https://gateway.example/v1/cache/reports');
   const body = JSON.parse(sent[0].body!);
-  expect(body.client).toBe('keepalive/0.4.4');
+  expect(body.client).toBe('keepalive/0.4.5');
   expect(body.harness).toBe('claude_cli');
   expect(body.reports[0]).toMatchObject({ kind: 'keepalive', session: 'cache-session', alias: 'gateway-code-task', src: 'documented' });
   expect(typeof body.reports[0].started_at_ms).toBe('number');
@@ -2083,7 +2346,7 @@ test('a Claude-only session behind a gateway sends the heartbeat at most once pe
   await clock.advance(30000);
   const gets = () => world.fetches.filter(f => f.method !== 'POST');
   expect(gets().length).toBe(1);
-  expect(gets()[0].url).toContain('client=keepalive%2F0.4.4&harness=claude_cli');
+  expect(gets()[0].url).toContain('client=keepalive%2F0.4.5&harness=claude_cli');
   expect(gets()[0].headers?.authorization).toBe('Bearer secret-token');
   await clock.advance(500000);
   expect(gets().length).toBe(1);
@@ -2138,7 +2401,7 @@ test('a gateway policy keeps a row without reported cache lifetimes warm by its 
   await step($);
   await clock.advance(2000);
   expect(world.fetches.length).toBe(1);
-  expect(world.fetches[0].url).toBe('https://gateway.example/v1/cache/policy?alias=vendor%2Fmain&session=cache-session&client=keepalive%2F0.4.4&harness=claude_cli');
+  expect(world.fetches[0].url).toBe('https://gateway.example/v1/cache/policy?alias=vendor%2Fmain&session=cache-session&client=keepalive%2F0.4.5&harness=claude_cli');
   expect(world.fetches[0].headers?.authorization).toBe('Bearer secret-token');
   await clock.advance(30000);
   expect(text(await $.ui.render(band()))).toMatch(/✦ 7m \d+s/);
@@ -2416,10 +2679,15 @@ test('price lookups pass the gateway, the price URL and credentials to the bridg
   expect(lookup?.feed).toEqual({ base: 'https://gateway.example', url: 'https://prices.example/p.json', headers: { authorization: 'Bearer secret-token' } });
 });
 
-test('the dashboard explains the lifetime icons', async ($, on) => {
+test('the dashboard explains only the lifetime icons it draws', async ($, on) => {
   response(on);
-  await setup($, on);
-  expect((await dashboard($)).includes('◉ provider-reported')).toBe(true);
+  const { world } = await setup($, on);
+  expect((await dashboard($)).includes('◉')).toBe(false);
+  world.reported = { fiveMinute: 100, oneHour: 0 };
+  await step($);
+  const contents = await dashboard($);
+  expect(contents.includes('◉ provider-reported')).toBe(true);
+  expect(contents.includes('✦')).toBe(false);
 });
 
 test('a keepalive that read nothing does not renew a gateway countdown, and the missed window is not retried', async ($, on) => {
@@ -2848,4 +3116,56 @@ test('a probe lifetime shows ⟳ and overrides the client TTL', { options: { unr
   await clock.advance(40000);
   expect(text(await $.ui.render(band()))).toMatch(/⟳ 2\dm \d+s · once/);
   expect((await dashboard($)).includes('gateway probe')).toBe(true);
+});
+
+test('the dashboard names its version in the top right, and a newer one adds an icon there and on the bar that says how to update', { timeoutMs: 30000 }, async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  let latest: string | null = null;
+  world.before['process.run'] = (request: { action: string }) => request.action === 'version'
+    ? bridgeReply({ current: VERSION, latest, plugin: 'keepalive@tools', marketplace: 'tools' }) : undefined;
+  await step($);
+  await dashboard($);
+  const heading = (await $.ui.render(pane)) as RenderNode;
+  const top = treeLines(heading).find(line => line.includes('Prompt cache · all agents'))!;
+  expect(top.trimEnd().endsWith(`Keepalive ${VERSION}`)).toBe(true);
+  expect(button(heading, 'keepalive-update')).toBe(undefined);
+  expect(button(await $.ui.render(band()), 'keepalive-update')).toBe(undefined);
+  latest = '9.9.9';
+  for (let hour = 0; hour < 6; hour++) await clock.advance(3600000);
+  expect(button(await $.ui.render(pane), 'keepalive-update')?.label).toBe('⬆ 9.9.9 available');
+  expect(button(await $.ui.render(band()), 'keepalive-update')?.label).toBe('⬆');
+  await $.ui.press({ plugin: 'keepalive', key: 'keepalive-update', requestId: 'cache-band' });
+  const hint = 'Keepalive 9.9.9 is available. Run /plugin marketplace update tools, then /plugin install keepalive@tools and /reload-plugins.';
+  expect(world.logs.filter(log => log === hint).length).toBe(1);
+  await $.ui.render(pane);
+  await $.ui.press({ plugin: 'keepalive', key: 'keepalive-update', requestId: 'keepalive' });
+  expect(world.logs.filter(log => log === hint).length).toBe(2);
+  const checks = world.calls.filter(call => call.action === 'version').length;
+  await clock.advance(3600000);
+  expect(world.calls.filter(call => call.action === 'version').length).toBe(checks);
+  latest = null;
+  for (let hour = 0; hour < 5; hour++) await clock.advance(3600000);
+  expect(button(await $.ui.render(band()), 'keepalive-update')).toBe(undefined);
+});
+
+test('a version check that fails leaves the dashboard as it was', { timeoutMs: 30000 }, async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.before['process.run'] = (request: { action: string }) => request.action === 'version' ? bridgeReply(null, 1) : undefined;
+  for (let hour = 0; hour < 6; hour++) await clock.advance(3600000);
+  expect(button(await $.ui.render(band()), 'keepalive-update')).toBe(undefined);
+  expect((await dashboard($)).includes(`Keepalive ${VERSION}`)).toBe(true);
+});
+
+test('the dashboard draws itself whenever Claude Code renders it, as after Keepalive reloads with the dashboard open', async ($, on) => {
+  response(on);
+  await setup($, on);
+  await step($);
+  expect(text(await $.ui.render(pane)).includes('Prompt cache · all agents')).toBe(true);
+});
+
+test('a dashboard Claude Code asks to draw before the session is set up leaves the pane to the next hook', async ($, on) => {
+  on('ui.render', { component: 'Pane' }, ($, e) => $.ui.resolve(e).Text({ children: ['Not ready'] }));
+  expect(text(await $.ui.render(pane))).toBe('Not ready');
 });

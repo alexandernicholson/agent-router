@@ -26,7 +26,7 @@ Step-by-step guide with settings and troubleshooting: [INSTALL.md](INSTALL.md).
 /plugin install keepalive@agent-router-tools
 ```
 
-Run `/keepalive-settings` to choose the TTL each kind of conversation starts in, the upkeep the main conversation and split-pane teammates start in, the keepalive limits, and the compaction threshold.
+Run `/keepalive-settings` to choose the TTL each kind of conversation starts in, the upkeep the main conversation and split-pane teammates start in, the keepalive limits, and the compaction threshold. Each setting has its own row; a setting that also takes a typed value, such as an exact keepalive limit, has a boxed field at the end of its row, and Enter saves what you type.
 
 ## With Agent Router
 
@@ -50,7 +50,7 @@ The cache bar above the prompt follows the conversation in view: the main conver
 [ ◕ ] ⬦ off TTL 5m ██████████ 96% ✕ 2 prefix · ETA ~3:44 · read 148.1k · write 5.7k · new 2
 ```
 
-It shows the conversation's cache TTL, its cache hit rate over its last 10 requests, any recent cache misses, the time left before the entry expires, and the last request's tokens read, written, and sent uncached. When a response reports a different TTL than the conversation asked for, the bar adds it, as `· 5m reported`.
+It shows the conversation's cache TTL, its cache hit rate over its last 10 requests, any recent cache misses, the time left before the entry expires, and the last request's tokens read, written, and sent uncached. When a response reports a different TTL than the conversation asked for, the bar adds it, as `· 5m reported`. A `⬆` after the dial means a newer Keepalive is available; press it for the update commands (see **Updates**).
 
 The hit rate adds up the read, written and uncached tokens of the conversation's last 10 real requests, so one miss shows without one request hiding the rest. Keepalives and compactions are left out. Right after a compaction the bar shows the compaction's own hit rate.
 
@@ -69,16 +69,21 @@ The dial button shows the time left in quarters of the TTL: `●` for a cache ju
 The dashboard opens with the whole session at a glance:
 
 ```text
-Prompt cache · all agents
-Now      ██████████ 96% over the last 10 requests
-Session  ▓▓▓▓▓▓▓▓▓░ 91% over 42 requests · read 3.1m · write 214k · new 1.2k
+Prompt cache · all agents                         ⬆ 0.4.6 available  Keepalive 0.4.5
+Now      ██████████ 96% · last 10 requests
+Session  ▓▓▓▓▓▓▓▓▓░ 91% · 42 requests · read 3.1m · write 214k · new 1.2k
 ●●●●●●●●✕●●●◐●●··●●●●●●●●○●●●●●●●●●●●●●●●◆●●
-One dot per request, oldest first: ● good ◐ fair ○ poor ✕ miss · keepalive ◆ compaction
+● good ◐ fair ○ poor ✕ miss · keepalive ◆ compaction
+
+Upkeep   warm · keepalives while they pay
+Icons    ◉ provider-reported · – can't be kept warm
 ```
 
-**Now** is the hit rate over the last 10 real requests across every agent; **Session** is every request recorded this session. The dot matrix has one cell per request across the whole tree, oldest first, in the colour of its grade, so a run of misses or a slipping cache stands out at once. Up to four rows show; older dots are counted above them.
+The top right names the Keepalive version you run, and `⬆` with a newer version when one is available (see **Updates**). **Now** is the hit rate over the last 10 real requests across every agent; **Session** is every request recorded this session. The dot matrix has one cell per request across the whole tree, oldest first, in the colour of its grade, so a run of misses or a slipping cache stands out at once. Up to four rows show; older dots are counted above them, and the line under them is their key.
 
-Below that, the miss line and the upkeep mode, then the filters, under a **Show** heading. The option in use is drawn as a highlighted button and the others are dim, so it is clear what the lists below are showing:
+**Upkeep** is the main conversation's upkeep mode in a few words, and **Icons** explains only the lifetime icons the tree below draws. A miss line appears above them while there are recent misses.
+
+The filters come next, under a **Show** heading. The option in use is drawn as a highlighted button and the others are dim, so it is clear what the lists below are showing:
 
 ```text
 Show
@@ -91,16 +96,21 @@ From     [ this agent ] all agents
 - **Requests** filters the history to real requests, keepalives, compactions, or misses.
 - **From** shows the selected agent's last 30 requests, or the last 30 across every agent in the tree, each named with its agent.
 
-The dashboard then draws every conversation Keepalive has seen as a tree: the main conversation, its subagents and their own subagents, in-process teammates, and linked split-pane teammates with their subagents. Each row shows its dial, upkeep mode, bar, TTL and time left, with its kind beside teammates:
+The dashboard then draws every conversation Keepalive has seen as a tree: the main conversation, its subagents and their own subagents, in-process teammates, and linked split-pane teammates with their subagents. Each one shows its dial, upkeep mode, TTL, bar and time left, then its model and where its TTL comes from, then its totals:
 
 ```text
-Main                                            ◕ ⬥ warm  ██████████ 96% · TTL 5m · ETA ~3:44
-├─ agent-router:scout (a7f3)                    ● –       ██████████ 95% · TTL 5m · ETA ~4:08
-│  └─ agent-router:task (b912)                  ◑ –       ▓▓▓▓▓▓▓▓░░ 84% · TTL 5m · ETA ~2:10
-├─ probe (c044) · in-process teammate           ◕ –       ██████████ 99% · TTL 5m · ETA ~3:51
-└─ Worker (worker@team) · split-pane teammate   ◑ ⬥ warm  ██████████ 97% · TTL 5m · ETA ~2:30
-   └─ agent-router:reviewer (d1e2)              ○ –       ▒▒▒░░░░░░░ 31% · prefix changed · expired
+Main
+◕ ⬥ warm TTL 5m ██████████ 96% · ◉ ETA ~3:44
+claude-opus-5-5 · priced by anthropic · Claude Code default for API keys and gateways
+42 requests · read 3.1m · write 214k · new 1.2k · out 18k
+
+└─ agent-router:scout (a7f3)
+   ● – TTL 5m ██████████ 95% · ◉ ETA ~4:08
+   claude-haiku-5-5 · Claude Code default outside the main conversation
+   6 requests · read 288k · write 12k · new 40 · out 2.1k
 ```
+
+A conversation whose cache holds both 5m and 1h writes, or whose TTL report is still on its way, adds a line for each lifetime. Teammates carry their kind beside their name, a gateway's lifetime adds the line that names its source, and the main conversation adds its keepalive count under `warm` and `warmcomp`.
 
 Select an agent's name to see its recent requests. Each takes one line, in columns, with the time since the request before it in the gap between them:
 
@@ -157,7 +167,12 @@ Each setting is **Default** unless you change it. The picker and the bar show wh
 
 A choice made with the button lasts for that conversation in its session, including after a reload; a new session starts from the defaults. Keepalives and Keepalive's compactions use the main conversation's TTL, so they refresh the cache the main conversation reads.
 
-1-hour cache writes cost 2× the input price instead of 1.25×, so switching a conversation to 1h writes its whole context once at the higher price; switching back to 5m keeps the cache. Keepalive cost estimates use the model's own 1-hour write price when its price source lists one (see **Model prices**). Keepalive sets the TTL through Claude Code's `CLAUDE_CODE_PROMPT_CACHE_TTL` and `CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL` variables for the requests it applies to, so a value you set in your own environment remains the default and returns when you switch back to it. Parallel subagents with different TTLs take turns starting their requests, one TTL at a time.
+1-hour cache writes cost 2× the input price instead of 1.25×, so switching a conversation to 1h writes its whole context once at the higher price; switching back to 5m keeps the cache. Keepalive cost estimates use the model's own 1-hour write price when its price source lists one (see **Model prices**). Keepalive sets the TTL through Claude Code's `CLAUDE_CODE_PROMPT_CACHE_TTL` and `CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL` variables for the requests it applies to, so a value you set in your own environment remains the default and returns when you switch back to it. Subagents (at any depth), teammates, keepalives and compactions share the subagent variable, so Keepalive sets it for each request in turn:
+
+- Claude Code fixes a request's TTL when it builds the request, and its retries keep it. A request that needs another TTL than one being sent waits for that one to be built, at most a second for each other TTL waiting, never for an answer to finish. Claude Code sends a request without its hooks once they have held it for 10 seconds, which would give it the wrong TTL and leave it out of the cache bar.
+- Once a request has been sent, the variable goes back to your own default, or to 5m when your default is 1h and a conversation still running wants 5m. That is the TTL Claude Code's own helper requests carry, such as the progress summaries it sends about every 30 seconds for a background agent in an interactive session.
+
+Measured against the Anthropic API, a request asking for 5m reads a 1h cache without changing its lifetime, while one asking for 1h finds no 5m cache to extend and writes the prefix again at 1h. So helper requests read the cache of whichever agent they serve, while each agent's own requests keep their TTL.
 
 ### Colours and accessibility
 
@@ -266,9 +281,15 @@ Checked against the current catalog (8,389 listings across 226 providers): 128 s
 
 The [prompt-cache-control reference mod](https://github.com/davila7/claude-code-templates/tree/main/cli-tool/components/mods/observability/prompt-cache-control), installed with `npx claude-code-templates@latest --mod observability/prompt-cache-control`, monitors the main conversation. Keepalive implements its own per-agent dashboard; that mod is not required. The `/keepalive` command remains distinct from its `/cache` command.
 
+## Updates
+
+Once a day Keepalive checks whether the marketplace it was installed from offers a newer version. It reads Claude Code's own copy of that marketplace, and, unless `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is set, the marketplace's `marketplace.json` and Keepalive's `plugin.json` from its GitHub source, at the branch or tag the marketplace names. Nothing is sent but those two requests. A failed check is tried again an hour later, and a plugin loaded with `--plugin-dir` is never checked.
+
+A newer version shows as `⬆` on the cache bar, and as `⬆ 0.4.6 available` in the top right of the dashboard and of `/keepalive-settings`, beside the version you run. Press it for the commands that update Keepalive: `/plugin marketplace update agent-router-tools`, then `/plugin install keepalive@agent-router-tools` and `/reload-plugins`.
+
 ## Storage
 
-Keepalive keeps cache records in its own data directory, normally `~/.claude/plugins/data/keepalive-agent-router-tools/`: session and agent identities, request timestamps, token counts, response TTL metadata and the price file. Prompts, answers and credentials are never stored. It only reads Agent Router's published routes, in `~/.claude/plugins/data/agent-router-agent-router-tools/published/`.
+Keepalive keeps cache records in its own data directory, normally `~/.claude/plugins/data/keepalive-agent-router-tools/`: session and agent identities, request timestamps, token counts, response TTL metadata, the price file and the last update check. Prompts, answers and credentials are never stored. It only reads Agent Router's published routes, in `~/.claude/plugins/data/agent-router-agent-router-tools/published/`.
 
 ## License
 

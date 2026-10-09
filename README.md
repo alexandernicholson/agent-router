@@ -52,7 +52,7 @@ npm run coverage     # every suite with coverage; fails below 100%
 npm --prefix keepalive run test:cache-live   # Keepalive and Agent Router against the real claude binary
 ```
 
-Set `CLAUDE_BINARY` to test a particular Claude executable.
+Set `CLAUDE_BINARY` to test a particular Claude executable. The live suite runs both plugins against a local mock of the API and checks the cache TTL every request carries, for the main conversation, foreground, background and nested subagents, in-process and split-pane teammates, keepalives, compactions and retries, alone and while agents with other TTLs are answering. Its in-process teammate and upkeep cases drive an interactive session and need `tmux`; without it they are skipped.
 
 `npm run coverage` measures the Node tests with c8 and the function-hook tests by instrumenting each hooks module before `claude plugin test` runs it, then writes one report to `coverage/`. Name `node`, `agent-router` or `keepalive` to run only those, add `--gaps` (with `--file=<part of a path>`) to list what is not covered, or `--html` for a browsable report.
 

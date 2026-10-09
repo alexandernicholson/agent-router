@@ -1,6 +1,8 @@
-import type { Args, ConfigRow, EngineInterface } from 'claude-code';
+import type { Args, ConfigRow, EngineInterface, RenderChildren } from 'claude-code';
 import type { TtlDefault } from '../lib/cache-ttl.js';
 import { parseTtlOverrides } from '../lib/cache.js';
+import { VERSION } from '../lib/version.js';
+import { displayText } from '../lib/shared/text.js';
 
 export type SettingsHost = {
   plugin: Pick<EngineInterface['plugin'], 'name'>;
@@ -8,9 +10,12 @@ export type SettingsHost = {
   config: Pick<EngineInterface['config'], 'list' | 'set'>;
   command: Pick<EngineInterface['command'], 'register'>;
   ttlDefaults: () => Promise<{ main: TtlDefault; subagent: TtlDefault }>;
+  store: Pick<EngineInterface['store'], 'get' | 'set' | 'delete'>;
+  release: () => { latest: string; hint: string } | null;
 };
 
 export const SETTINGS_PANE = 'keepalive-settings';
+const NOTICE_KEY = 'settings-notice';
 const LIMITS = ['default', 'infinite', '1', '2', '3', '4', '6', '8', '12', '16', '24'];
 const THRESHOLDS = ['25k', '50k', '100k', '150k', '200k', '300k', '500k'];
 const UNITS: Record<string, number> = { '': 1, k: 1000, m: 1000000 };
@@ -27,41 +32,44 @@ export const thresholdValue = (value: string) => {
   if (!Number.isSafeInteger(tokens)) return undefined;
   return tokens % 1000 ? String(tokens) : `${tokens / 1000}k`;
 };
-const limitLabel = (value: string) => value === 'same' ? 'Same as keepalive limit' : value === 'default' ? 'Default (priced)' : value === 'infinite' ? 'Infinite' : value;
+const limitLabel = (value: string) => value === 'same' ? 'Same as above' : value === 'default' ? 'Default (priced)' : value === 'infinite' ? 'Infinite' : value;
 const FALLBACKS = ['off', '5m', '15m', '30m', '45m', '1h'];
 const fallbackLabel = (value: string) => value === 'off' ? 'Off (monitor only)' : value;
 const thresholdLabel = (value: string) => value === '100k' ? '100k (default)' : value;
+const LABEL_WIDTH = 19;
+const CONTROL_WIDTH = 21;
+const FIELD_WIDTH = 26;
 
-type Typed = { parse: (value: string) => string | undefined; hint: string; placeholder: string; label?: string };
-const ttlSaved = () => 'Saved the prompt cache TTL. Conversations that start from now on use it; each one\'s TTL button can change it.';
-const FIELDS: Record<string, { field: string; kind: ConfigRow['kind']; label: string; saved: (value: string) => string; typed?: Typed }> = {
-  'cache-ttl': { field: 'cache_ttl', kind: 'choice', label: 'Main conversation TTL', saved: ttlSaved },
-  'subagent-ttl': { field: 'subagent_cache_ttl', kind: 'choice', label: 'Subagent TTL', saved: ttlSaved },
-  'teammate-ttl': { field: 'teammate_cache_ttl', kind: 'choice', label: 'Teammate TTL', saved: ttlSaved },
-  'cache-upkeep': { field: 'cache_upkeep', kind: 'choice', label: 'Main conversation upkeep',
-    saved: value => `Saved main conversation upkeep. Sessions started from now on begin in ${value}; this one's mode button changes it here.` },
-  'teammate-upkeep': { field: 'teammate_cache_upkeep', kind: 'choice', label: 'Teammate upkeep',
-    saved: value => `Saved teammate upkeep. Split-pane teammates started from now on begin in ${value}.` },
-  'keepalive-limit': { field: 'keepalive_limit', kind: 'text', label: 'Keepalive limit',
-    saved: () => 'Saved the keepalive limit. It applies to warm and warmcomp after each request from now on.',
-    typed: { parse: limitValue, hint: 'Enter default, infinite, or a whole number of keepalives from 1.', placeholder: 'Any whole number, then Enter' } },
-  'teammate-limit': { field: 'teammate_keepalive_limit', kind: 'text', label: 'Teammate keepalive limit',
-    saved: () => 'Saved the teammate keepalive limit. Split-pane teammates started from now on use it.',
+type Typed = { parse: (value: string) => string | undefined; hint: string; placeholder: string };
+const ttlSaved = () => 'Saved. New conversations start with this TTL.';
+const FIELDS: Record<string, { field: string; kind: ConfigRow['kind']; label: string; name: string; saved: (value: string) => string; typed?: Typed }> = {
+  'cache-ttl': { field: 'cache_ttl', kind: 'choice', label: 'Main conversation', name: 'main conversation TTL', saved: ttlSaved },
+  'subagent-ttl': { field: 'subagent_cache_ttl', kind: 'choice', label: 'Subagents', name: 'subagent TTL', saved: ttlSaved },
+  'teammate-ttl': { field: 'teammate_cache_ttl', kind: 'choice', label: 'Teammates', name: 'teammate TTL', saved: ttlSaved },
+  'cache-upkeep': { field: 'cache_upkeep', kind: 'choice', label: 'Main conversation', name: 'main conversation upkeep',
+    saved: value => `Saved. New sessions start in ${value}; this one's mode button changes it here.` },
+  'teammate-upkeep': { field: 'teammate_cache_upkeep', kind: 'choice', label: 'Teammates', name: 'teammate upkeep',
+    saved: value => `Saved. New split-pane teammates start in ${value}.` },
+  'keepalive-limit': { field: 'keepalive_limit', kind: 'text', label: 'Keepalive limit', name: 'keepalive limit',
+    saved: () => 'Saved. warm and warmcomp use it after the next request.',
+    typed: { parse: limitValue, hint: 'Type default, infinite, or a whole number of keepalives from 1.', placeholder: 'or type a number' } },
+  'teammate-limit': { field: 'teammate_keepalive_limit', kind: 'text', label: 'Teammate limit', name: 'teammate keepalive limit',
+    saved: () => 'Saved. New split-pane teammates use it.',
     typed: { parse: value => value.trim().toLowerCase() === 'same' ? 'same' : limitValue(value),
-      hint: 'Enter same, default, infinite, or a whole number of keepalives from 1.', placeholder: 'Any whole number, then Enter' } },
-  'unreported-ttl': { field: 'unreported_ttl', kind: 'choice', label: 'TTL for models that don\'t report one',
-    saved: value => `Saved. Models without a reported or gateway-published lifetime ${value === 'off' ? 'are monitored only' : `are kept warm for ${value}`}, from the next request on.` },
-  'unreported-ttl-models': { field: 'unreported_ttl_models', kind: 'text', label: 'TTL for specific models',
-    saved: () => 'Saved the per-model TTLs. They apply from the next request on.',
+      hint: 'Type same, default, infinite, or a whole number of keepalives from 1.', placeholder: 'or type a number' } },
+  'compact-threshold': { field: 'compact_threshold', kind: 'text', label: 'Compact from', name: 'compaction threshold',
+    saved: value => `Saved. compact and warmcomp compact conversations of ${value} tokens or more.`,
+    typed: { parse: thresholdValue, hint: 'Type a number of tokens, such as 80k or 80000.', placeholder: 'or type e.g. 80k' } },
+  'unreported-ttl': { field: 'unreported_ttl', kind: 'choice', label: 'Assumed TTL', name: 'TTL for models that don\'t report one',
+    saved: value => `Saved. Models with no reported lifetime ${value === 'off' ? 'are monitored only' : `are kept warm for ${value}`} from the next request.` },
+  'unreported-ttl-models': { field: 'unreported_ttl_models', kind: 'text', label: 'Per model', name: 'TTL for specific models',
+    saved: () => 'Saved. The per-model TTLs apply from the next request.',
     typed: { parse: value => parseTtlOverrides(value).length ? value.trim() : undefined,
-      hint: 'Enter model=ttl pairs, such as kimi*=15m, glm-5.3=off (ttl: off, 5m, 15m, 30m, 45m, 1h).', placeholder: 'kimi*=15m, glm-5.3=off, then Enter', label: 'Model TTLs' } },
-  'price-url': { field: 'keepalive_price_url', kind: 'text', label: 'Price feed URL',
-    saved: () => 'Saved the price feed URL. It is used for models priced from now on.',
+      hint: 'Type model=ttl pairs, such as kimi*=15m, glm-5.3=off (ttl: off, 5m, 15m, 30m, 45m, 1h).', placeholder: 'or type kimi*=15m' } },
+  'price-url': { field: 'keepalive_price_url', kind: 'text', label: 'Price feed', name: 'price feed URL',
+    saved: () => 'Saved. The next price lookup uses it.',
     typed: { parse: value => /^(off|https?:\/\/\S+)?$/i.test(value.trim()) ? value.trim() : undefined,
-      hint: 'Enter an https:// URL, off, or leave empty to use your gateway.', placeholder: 'https://…/prices.json, then Enter', label: 'Price feed URL' } },
-  'compact-threshold': { field: 'compact_threshold', kind: 'text', label: 'Compaction threshold',
-    saved: value => `Saved the compaction threshold. compact and warmcomp compact conversations of ${value} tokens or more from now on.`,
-    typed: { parse: thresholdValue, hint: 'Enter a number of tokens, such as 80k or 80000.', placeholder: 'Tokens, such as 80k, then Enter' } },
+      hint: 'Type an https:// URL, off, or nothing to use your gateway.', placeholder: 'or type a URL' } },
 };
 
 function ownedRow(rows: ConfigRow[], plugin: string, key: string): ConfigRow {
@@ -84,10 +92,15 @@ export function createSettingsPane() {
   const redraw = (host: SettingsHost) => host.ui.invalidate('ui.render');
   const dismiss = (host: SettingsHost) => { open = false; return host.ui.close({ id: SETTINGS_PANE }); };
 
-  async function load(host: SettingsHost) {
+  async function load(host: SettingsHost, reloaded = false) {
     defaults = undefined;
     error = '';
     redraw(host);
+    if (reloaded) {
+      const stored = await host.store.get(NOTICE_KEY).catch(() => undefined);
+      notice = typeof stored === 'string' ? stored : '';
+    }
+    await host.store.delete(NOTICE_KEY).catch(() => undefined);
     try { [rows, defaults] = await Promise.all([host.config.list(), host.ttlDefaults()]); }
     catch (cause) { error = `Settings unavailable: ${message(cause)}`; }
     redraw(host);
@@ -112,7 +125,7 @@ export function createSettingsPane() {
       rows = await host.config.list();
       if (!open) return;
       const row = ownedRow(rows, host.plugin.name, key);
-      if (row.isLocked) throw new Error(`Your administrator manages this setting. Ask them to update the ${FIELDS[key].label.toLowerCase()}.`);
+      if (row.isLocked) throw new Error(`Your administrator manages this setting. Ask them to update the ${FIELDS[key].name}.`);
       const { typed } = FIELDS[key];
       if (typed ? typed.parse(value) !== value : !row.options!.includes(value)) return;
       const result = await host.config.set({ key: row.key, value });
@@ -120,6 +133,7 @@ export function createSettingsPane() {
       if (result.value !== value) throw new Error('The config writer returned a different value. Open /config to inspect the saved setting.');
       rows = rows.map(item => item.key === row.key ? { ...item, value } : item);
       notice = FIELDS[key].saved(value);
+      await host.store.set(NOTICE_KEY, notice).catch(() => undefined);
     } catch (cause) {
       error = message(cause);
     } finally {
@@ -135,21 +149,35 @@ export function createSettingsPane() {
   };
 
   const uiRender = (host: SettingsHost, e: Args<'ui.render'>) => {
-    if (e.requestId !== SETTINGS_PANE || !open) return undefined;
+    if (e.requestId !== SETTINGS_PANE) return undefined;
+    if (!open) {
+      open = true;
+      void load(host, true);
+    }
     if (e.surface !== 'terminal' && e.surface !== 'desktop') {
       const { Box, Text, Button } = host.ui.resolve(e);
       return <Box flexDirection="column"><Text>Open /keepalive-settings in the terminal or desktop to change these settings.</Text>
         <Button key="close" label="Close" onPress={() => { void dismiss(host); }} /></Box>;
     }
     const { Box, Text, Button, Select, Input } = host.ui.resolve(e);
+    const field = (key: string) => {
+      const typed = FIELDS[key].typed;
+      let row: ConfigRow | undefined;
+      try { row = ownedRow(rows, host.plugin.name, key); } catch {}
+      if (!typed || !row || row.isLocked || saving) return null;
+      return <Box borderStyle="round" borderDimColor paddingX={1} width={FIELD_WIDTH}>
+        <Input key={`${key}-custom`} placeholder={typed.placeholder} value="" submitLabel="save" onSubmit={custom(key, typed)} /></Box>;
+    };
+    const line = (key: string, control: RenderChildren) => <Box flexDirection="row" alignItems="center">
+      <Box width={LABEL_WIDTH} flexShrink={0}><Text>{FIELDS[key].label}</Text></Box><Box width={CONTROL_WIDTH} flexShrink={0}>{control}</Box>{field(key)}</Box>;
     const choose = (key: string, name: (value: string) => string, values?: string[]) => {
       let row: ConfigRow;
-      try { row = ownedRow(rows, host.plugin.name, key); } catch (cause) { return <Text>{message(cause)}</Text>; }
+      try { row = ownedRow(rows, host.plugin.name, key); } catch (cause) { return line(key, <Text>{message(cause)}</Text>); }
       const value = String(row.value);
-      if (row.isLocked || saving) return <Text>{`${FIELDS[key].label}: ${name(value)}${row.isLocked ? ' · managed by your administrator' : ''}`}</Text>;
+      if (row.isLocked || saving) return line(key, <Text>{`${name(value)}${row.isLocked ? ' · managed by your administrator' : ''}`}</Text>);
       const choices = values ? (values.includes(value) ? values : [...values, value]) : row.options!;
-      return <Select key={key} label={FIELDS[key].label} value={value} options={choices.map(option => ({ value: option, label: name(option) }))}
-        onSelect={(next: string) => { void save(host, key, next); }} />;
+      return line(key, <Select key={key} value={value} options={choices.map(option => ({ value: option, label: name(option) }))}
+        onSelect={(next: string) => { void save(host, key, next); }} />);
     };
     const ttl = (fallback: string) => (value: string) => value === 'default' ? `Default (${fallback})` : value;
     const custom = (key: string, typed: Typed) => (text: string) => {
@@ -157,45 +185,38 @@ export function createSettingsPane() {
       if (!value) { error = typed.hint; notice = ''; redraw(host); return; }
       void save(host, key, value);
     };
-    const other = (key: string) => {
-      const typed = FIELDS[key].typed!;
-      let row: ConfigRow | undefined;
-      try { row = ownedRow(rows, host.plugin.name, key); } catch {}
-      return row && !row.isLocked && !saving
-        ? <Input key={`${key}-custom`} label={typed.label ?? 'Other number'} placeholder={typed.placeholder} value="" onSubmit={custom(key, typed)} /> : null;
-    };
-    const body = ({ main, subagent }: { main: TtlDefault; subagent: TtlDefault }) => <Box flexDirection="column">
-      <Text bold>Prompt cache TTL</Text>
-      {choose('cache-ttl', ttl(main.ttl))}
-      {choose('subagent-ttl', ttl(subagent.ttl))}
-      {choose('teammate-ttl', ttl(main.ttl === subagent.ttl ? main.ttl : `${main.ttl} split-pane, ${subagent.ttl} in-process`))}
-      <Text dimColor>Default is what Claude Code uses with your current settings and sign-in. 1h survives longer breaks; each 1h cache write costs 2× instead of 1.25×.</Text>
-      <Text bold>Upkeep</Text>
-      {choose('cache-upkeep', value => value)}
-      {choose('teammate-upkeep', value => value)}
-      <Text dimColor>The mode each new session's main conversation and each split-pane teammate start in. In-process teammates and subagents can't be kept warm.</Text>
-      {choose('keepalive-limit', limitLabel, LIMITS)}
-      {other('keepalive-limit')}
-      {choose('teammate-limit', limitLabel, ['same', ...LIMITS])}
-      {other('teammate-limit')}
-      <Text dimColor>How many keepalives warm and warmcomp send after each request; warmcomp then compacts. Default (priced) sends them while each costs less than rewriting the cache. Infinite never stops. A number sends exactly that many, whatever they cost. Each keepalive keeps an idle cache about 4½ minutes longer on a 5m TTL, or 59½ minutes on 1h. Split-pane teammates use the keepalive limit unless given their own.</Text>
-      {choose('compact-threshold', thresholdLabel, THRESHOLDS)}
-      {other('compact-threshold')}
-      <Text bold>Models that don't report a cache lifetime</Text>
-      {choose('unreported-ttl', fallbackLabel, FALLBACKS)}
-      {choose('unreported-ttl-models', value => value || 'None', [''])}
-      {other('unreported-ttl-models')}
-      <Text dimColor>The lifetime Keepalive assumes when neither the provider nor your gateway gives one, so warm, compact and warmcomp can work. A gateway's own lifetime always wins; Claude is never affected. Overrides look like kimi*=15m, glm-5.3=off. Icons: ◉ provider-reported, ✦ gateway-learned, ▣ documented, ◇ gateway default, ⟳ gateway probe, ✎ your setting, ⊘ no cache, ◌ unknown.</Text>
-      {other('price-url')}
-      <Text dimColor>{`Price feed: ${(() => { try { return String(ownedRow(rows, host.plugin.name, 'price-url').value) || 'your gateway'; } catch { return 'unavailable'; } })()}. Prices decide whether a keepalive is worth its cost.`}</Text>
-      <Text dimColor>The smallest conversation compact and warmcomp compact. A smaller one is left to expire, since rewriting its cache costs little.</Text>
+    const section = (title: string, children: RenderChildren[], note: string) => <Box flexDirection="column">
+      <Text bold>{title}</Text>{children}<Text dimColor>{note}</Text></Box>;
+    const feed = (() => { try { return displayText(String(ownedRow(rows, host.plugin.name, 'price-url').value), 200) || 'your gateway'; } catch { return 'unavailable'; } })();
+    const body = ({ main, subagent }: { main: TtlDefault; subagent: TtlDefault }) => <Box flexDirection="column" gap={1}>
+      {section('Prompt cache TTL', [choose('cache-ttl', ttl(main.ttl)), choose('subagent-ttl', ttl(subagent.ttl)),
+        choose('teammate-ttl', ttl(main.ttl === subagent.ttl ? main.ttl : `${main.ttl} split-pane, ${subagent.ttl} in-process`))],
+        'Default is Claude Code\'s choice. 1h writes cost 2×, 5m 1.25×.')}
+      {section('Upkeep', [choose('cache-upkeep', value => value), choose('teammate-upkeep', value => value),
+        choose('keepalive-limit', limitLabel, LIMITS), choose('teammate-limit', limitLabel, ['same', ...LIMITS]),
+        choose('compact-threshold', thresholdLabel, THRESHOLDS)],
+        'Default (priced): keepalives while cheaper than a rewrite.')}
+      {section('Models that report no cache lifetime', [choose('unreported-ttl', fallbackLabel, FALLBACKS),
+        choose('unreported-ttl-models', value => value ? displayText(value, 20) : 'None', ['']), line('price-url', <Text wrap="truncate-end">{feed}</Text>)],
+        'Used when the provider and gateway report none; never for Claude.')}
+      <Text dimColor>Type into a boxed field and press Enter to save it.</Text>
     </Box>;
-    return <Box flexDirection="column">
-      <Text>Defaults each new conversation starts in. Each conversation's own TTL and mode buttons change it for that conversation only.</Text>
-      {notice ? <Text>{notice}</Text> : null}
-      {error ? <Text>{error}</Text> : null}
-      <Box flexDirection="row" gap={1}><Button key="close" label="Close" onPress={() => { void dismiss(host); }} /></Box>
+    const update = host.release();
+    return <Box flexDirection="column" gap={1}>
+      <Box flexDirection="row" justifyContent="space-between">
+        <Text bold>Keepalive settings</Text>
+        <Box flexDirection="row" gap={2}>
+          {update ? <Button key="keepalive-update" label={`⬆ ${update.latest} available`} plain onPress={() => host.ui.log(update.hint)} /> : null}
+          <Text dimColor>{`Keepalive ${VERSION}`}</Text>
+        </Box>
+      </Box>
+      <Box flexDirection="column">
+        <Text dimColor>Defaults for new conversations; each bar changes only its own.</Text>
+        {notice ? <Text>{notice}</Text> : null}
+        {error ? <Text>{error}</Text> : null}
+      </Box>
       {defaults ? body(defaults) : <Text>Loading settings…</Text>}
+      <Box flexDirection="row"><Button key="close" label="Close" onPress={() => { void dismiss(host); }} /></Box>
     </Box>;
   };
 

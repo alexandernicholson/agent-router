@@ -32,13 +32,15 @@ export function resolveDefaultTtl({ scope, env, settings, auth }) {
 
 /**
  * @param {(value: Ttl | null) => Promise<void>} write
+ * @param {{base: Ttl, buildMs: number, sleep: (ms: number) => Promise<void>, live: () => Ttl[]}} timing
  */
-export function createTtlGate(write) {
+export function createTtlGate(write, { base, buildMs, sleep, live }) {
   /** @type {Ttl | null} */
   let applied = null;
-  /** @type {Ttl | null | undefined} */
-  let current;
-  let holders = 0;
+  /** @type {Map<object, Ttl | null>} */
+  const answering = new Map();
+  /** @type {{value: Ttl | null, holders: Set<object>} | undefined} */
+  let building;
   /** @type {{value: Ttl | null, start: () => void}[]} */
   const queue = [];
   let writing = Promise.resolve();
@@ -48,22 +50,32 @@ export function createTtlGate(write) {
     writing = writing.then(() => write(value)).catch(() => undefined);
     return writing;
   };
-  const releaser = () => {
-    let done = false;
-    return async () => {
-      if (done) return;
-      done = true;
-      holders--;
-      if (holders > 0) return;
-      current = undefined;
-      if (!queue.length) return apply(null);
+  const settle = () => {
+    if (queue.length) {
       const value = queue[0].value;
-      const batch = [];
-      while (queue.length && queue[0].value === value) batch.push(/** @type {{value: Ttl | null, start: () => void}} */ (queue.shift()));
-      current = value;
-      holders += batch.length;
-      await apply(value);
-      for (const waiter of batch) waiter.start();
+      const waiters = queue.filter(waiter => waiter.value === value);
+      queue.splice(0, queue.length, ...queue.filter(waiter => waiter.value !== value));
+      building = { value, holders: new Set() };
+      for (const waiter of waiters) waiter.start();
+      return apply(value);
+    }
+    building = undefined;
+    const wanted = [...answering.values()].map(value => value ?? base).concat(live());
+    return apply(base === '1h' && wanted.includes('5m') ? '5m' : null);
+  };
+  const hold = () => {
+    const token = {};
+    const own = /** @type {{value: Ttl | null, holders: Set<object>}} */ (building);
+    own.holders.add(token);
+    answering.set(token, own.value);
+    const built = () => {
+      if (own.holders.delete(token) && !own.holders.size && building === own) void settle();
+    };
+    sleep(buildMs).then(built, built);
+    return async () => {
+      if (!answering.delete(token)) return;
+      const wasBuilding = own.holders.delete(token);
+      if (wasBuilding ? !own.holders.size && building === own : !building) await settle();
     };
   };
   return {
@@ -72,14 +84,19 @@ export function createTtlGate(write) {
      * @returns {Promise<() => Promise<void>>}
      */
     async acquire(value) {
-      if (!queue.length && (holders === 0 || current === value)) {
-        current = value;
-        holders++;
+      if (!queue.length && (!building || building.value === value)) {
+        building ??= { value, holders: new Set() };
+        const release = hold();
         await apply(value);
-        return releaser();
+        return release;
       }
-      await new Promise(start => queue.push({ value, start: () => start(undefined) }));
-      return releaser();
+      /** @type {() => Promise<void>} */
+      const release = await new Promise(granted => queue.push({ value, start: () => granted(hold()) }));
+      await writing;
+      return release;
+    },
+    async refresh() {
+      if (!building && !queue.length) await settle();
     },
   };
 }

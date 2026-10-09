@@ -119,7 +119,7 @@ claude plugin marketplace update agent-router-tools
 claude plugin update keepalive@agent-router-tools
 ```
 
-or `/plugin` → **keepalive** → **Update** inside Claude Code, then `/reload-plugins`. Check the version with `claude plugin list`.
+or `/plugin` → **keepalive** → **Update** inside Claude Code, then `/reload-plugins`. Check the version with `claude plugin list`, or in the top right of `/keepalive`. When a newer version is out, the cache bar shows `⬆`; press it for the commands.
 
 ## 8. Troubleshooting
 

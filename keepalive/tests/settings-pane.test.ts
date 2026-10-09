@@ -1,6 +1,7 @@
 import { test, expect, mock, tier } from 'claude-code/testing';
 import type { Engine } from 'claude-code/testing';
 import type { ConfigRow, On, RenderInput, RenderNode } from 'claude-code';
+import { VERSION } from '../lib/version.js';
 
 tier('user');
 
@@ -14,7 +15,7 @@ function row(field: string, kind: ConfigRow['kind'], value: string, options?: st
   return { key: `owner.${field}`, label: field, kind, value, ...(options ? { options } : {}), provider: { plugin: 'keepalive@tools', tier: 'user' }, isLocked: false };
 }
 
-function world(on: On, extra: { auth?: 'bearer'; env?: Record<string, string> } = {}) {
+function world(on: On, extra: { auth?: 'bearer'; env?: Record<string, string>; latest?: string; stored?: Record<string, unknown>; storeFails?: boolean } = {}) {
   const state = {
     rows: [
       { key: 'theme', label: 'Theme', kind: 'enum', value: 'dark', provider: { plugin: 'engine', tier: 'core' }, isLocked: false },
@@ -24,9 +25,12 @@ function world(on: On, extra: { auth?: 'bearer'; env?: Record<string, string> } 
       row('unreported_ttl', 'choice', 'off', ['off', '5m', '15m', '30m', '45m', '1h']), row('unreported_ttl_models', 'text', ''), row('keepalive_price_url', 'text', ''),
     ] as ConfigRow[],
     writes: [] as [string, unknown][], deny: '', echo: undefined as string | undefined, listFailure: undefined as unknown, openFailure: '',
-    placed: true, logs: [] as string[], closed: 0, onList: undefined as undefined | (() => Promise<void>), onSet: undefined as undefined | (() => Promise<void>),
+    placed: true, logs: [] as string[], closed: 0, store: new Map<string, unknown>(Object.entries(extra.stored ?? {})), onList: undefined as undefined | (() => Promise<void>), onSet: undefined as undefined | (() => Promise<void>),
   };
-  mock.store(on);
+  const offline = () => { if (extra.storeFails) throw new Error('store offline'); };
+  on('store.get', ($, e) => { offline(); return { value: state.store.get(e.key) }; });
+  on('store.set', ($, e) => { offline(); state.store.set(e.key, e.value); return { value: undefined }; });
+  on('store.delete', ($, e) => { offline(); state.store.delete(e.key); return { value: undefined }; });
   mock.env(on, extra.env ?? {});
   mock.clock(on);
   on('env.set', () => ({ value: undefined }));
@@ -59,7 +63,8 @@ function world(on: On, extra: { auth?: 'bearer'; env?: Record<string, string> } 
   });
   on('process.run', ($, e) => {
     const request = JSON.parse(e.init?.stdin || '{}');
-    const output = request.action === 'cache-snapshot' ? { samples: [], resets: [], labels: [], routes: null } : {};
+    const output = request.action === 'cache-snapshot' ? { samples: [], resets: [], labels: [], routes: null }
+      : request.action === 'version' ? { current: VERSION, latest: extra.latest ?? null, plugin: 'keepalive@tools', marketplace: 'tools' } : {};
     return { value: { isStdoutTruncated: false, isStderrTruncated: false, exitCode: 0, stderr: '', stdout: JSON.stringify(output) } };
   });
   return state;
@@ -78,7 +83,9 @@ const type = ($: Engine, text: string, key = 'keepalive-limit') => $.ui.input({ 
 function text(node: RenderNode | undefined): string {
   if (!node) return '';
   if (typeof node === 'string') return node;
-  const label = node.type === 'Button' || node.type === 'Select' ? String(node.props.label) : '';
+  const props = 'props' in node ? node.props as { label?: string; value?: string; placeholder?: string; options?: { value: string; label?: string }[] } : {};
+  const chosen = props.options?.find(option => option.value === props.value);
+  const label = node.type === 'Button' ? String(props.label) : node.type === 'Select' ? chosen?.label ?? chosen?.value ?? '' : node.type === 'Input' ? props.placeholder ?? '' : '';
   return [label, ...('children' in node && Array.isArray(node.children) ? node.children.map(text) : [])].filter(Boolean).join(' ');
 }
 function find(node: RenderNode | undefined, type: string, key: string): Record<string, unknown> | undefined {
@@ -102,29 +109,29 @@ test('the settings pane saves the TTLs, upkeep modes and keepalive limit new con
   expect(labels(drawn, 'cache-upkeep')).toEqual(UPKEEP);
   expect(labels(drawn, 'teammate-upkeep')).toEqual(UPKEEP);
   expect(labels(drawn, 'keepalive-limit')).toEqual(['Default (priced)', 'Infinite', '1', '2', '3', '4', '6', '8', '12', '16', '24']);
-  expect(labels(drawn, 'teammate-limit')).toEqual(['Same as keepalive limit', 'Default (priced)', 'Infinite', '1', '2', '3', '4', '6', '8', '12', '16', '24']);
+  expect(labels(drawn, 'teammate-limit')).toEqual(['Same as above', 'Default (priced)', 'Infinite', '1', '2', '3', '4', '6', '8', '12', '16', '24']);
   expect(labels(drawn, 'compact-threshold')).toEqual(['25k', '50k', '100k (default)', '150k', '200k', '300k', '500k']);
-  expect(text(drawn)).toContain('Each keepalive keeps an idle cache about 4½ minutes longer on a 5m TTL');
+  expect(text(drawn)).toContain('Default (priced): keepalives while cheaper than a rewrite.');
   await select($, 'cache-ttl', '1h');
   expect(owned(state, 'cache_ttl').value).toBe('1h');
-  expect(text(await $.ui.render(pane))).toContain('Saved the prompt cache TTL. Conversations that start from now on use it');
+  expect(text(await $.ui.render(pane))).toContain('Saved. New conversations start with this TTL.');
   await select($, 'cache-upkeep', 'warmcomp');
   expect(owned(state, 'cache_upkeep').value).toBe('warmcomp');
-  expect(text(await $.ui.render(pane))).toContain('Saved main conversation upkeep. Sessions started from now on begin in warmcomp; this one\'s mode button changes it here.');
+  expect(text(await $.ui.render(pane))).toContain('Saved. New sessions start in warmcomp; this one\'s mode button changes it here.');
   await select($, 'teammate-upkeep', 'warm');
   expect(owned(state, 'teammate_cache_upkeep').value).toBe('warm');
-  expect(text(await $.ui.render(pane))).toContain('Saved teammate upkeep. Split-pane teammates started from now on begin in warm.');
+  expect(text(await $.ui.render(pane))).toContain('Saved. New split-pane teammates start in warm.');
   await select($, 'keepalive-limit', '3');
   expect(owned(state, 'keepalive_limit').value).toBe('3');
-  expect(text(await $.ui.render(pane))).toContain('Saved the keepalive limit. It applies to warm and warmcomp after each request from now on.');
+  expect(text(await $.ui.render(pane))).toContain('Saved. warm and warmcomp use it after the next request.');
   await select($, 'keepalive-limit', 'infinite');
   expect(owned(state, 'keepalive_limit').value).toBe('infinite');
   await select($, 'teammate-limit', '6');
   expect(owned(state, 'teammate_keepalive_limit').value).toBe('6');
-  expect(text(await $.ui.render(pane))).toContain('Saved the teammate keepalive limit. Split-pane teammates started from now on use it.');
+  expect(text(await $.ui.render(pane))).toContain('Saved. New split-pane teammates use it.');
   await select($, 'compact-threshold', '50k');
   expect(owned(state, 'compact_threshold').value).toBe('50k');
-  expect(text(await $.ui.render(pane))).toContain('Saved the compaction threshold. compact and warmcomp compact conversations of 50k tokens or more from now on.');
+  expect(text(await $.ui.render(pane))).toContain('Saved. compact and warmcomp compact conversations of 50k tokens or more.');
   expect(state.writes.map(([key]) => key)).toEqual(['owner.cache_ttl', 'owner.cache_upkeep', 'owner.teammate_cache_upkeep', 'owner.keepalive_limit',
     'owner.keepalive_limit', 'owner.teammate_keepalive_limit', 'owner.compact_threshold']);
 });
@@ -146,7 +153,7 @@ test('any whole number can be typed as the keepalive limit, and anything else is
   expect(labels(drawn, 'keepalive-limit')?.at(-1)).toBe('37');
   for (const bad of ['0', '-2', '1.5', 'lots', '99999999999999999999']) {
     await type($, bad);
-    expect(text(await $.ui.render(pane))).toContain('Enter default, infinite, or a whole number of keepalives from 1.');
+    expect(text(await $.ui.render(pane))).toContain('Type default, infinite, or a whole number of keepalives from 1.');
   }
   expect(state.writes).toHaveLength(1);
   await type($, ' Infinite ');
@@ -159,7 +166,7 @@ test('a teammate limit can be typed, including same, and anything else is refuse
   await type($, '9', 'teammate-limit');
   expect(owned(state, 'teammate_keepalive_limit').value).toBe('9');
   await type($, 'later', 'teammate-limit');
-  expect(text(await $.ui.render(pane))).toContain('Enter same, default, infinite, or a whole number of keepalives from 1.');
+  expect(text(await $.ui.render(pane))).toContain('Type same, default, infinite, or a whole number of keepalives from 1.');
   await type($, ' SAME ', 'teammate-limit');
   expect(owned(state, 'teammate_keepalive_limit').value).toBe('same');
   expect(state.writes).toHaveLength(2);
@@ -175,7 +182,7 @@ test('any number of tokens can be typed as the compaction threshold, in thousand
   expect(labels(await $.ui.render(pane), 'compact-threshold')?.at(-1)).toBe('12345');
   for (const bad of ['0', '-5k', '1.5k', '80 k', 'big', '99999999999999m']) {
     await type($, bad, 'compact-threshold');
-    expect(text(await $.ui.render(pane))).toContain('Enter a number of tokens, such as 80k or 80000.');
+    expect(text(await $.ui.render(pane))).toContain('Type a number of tokens, such as 80k or 80000.');
   }
   expect(state.writes).toHaveLength(4);
 });
@@ -197,8 +204,8 @@ test('settings your administrator manages are shown without controls and never w
   expect(find(drawn, 'Select', 'cache-ttl')).toBeUndefined();
   expect(find(drawn, 'Input', 'keepalive-limit-custom')).toBeUndefined();
   expect(find(drawn, 'Input', 'compact-threshold-custom')).toBeDefined();
-  expect(text(drawn)).toContain('Main conversation TTL: Default (5m) · managed by your administrator');
-  expect(text(drawn)).toContain('Keepalive limit: 3 · managed by your administrator');
+  expect(text(drawn)).toContain('Main conversation Default (5m) · managed by your administrator');
+  expect(text(drawn)).toContain('Keepalive limit 3 · managed by your administrator');
   owned(state, 'teammate_cache_upkeep').isLocked = true;
   await select($, 'teammate-upkeep', 'warm');
   expect(state.writes).toHaveLength(0);
@@ -273,7 +280,6 @@ test('the settings pane opens only where it fits, and says why when it cannot', 
   state.placed = false;
   expect((await run($)).text).toBeUndefined();
   expect(state.logs).toContain('Keepalive settings: the terminal is too narrow');
-  expect(text(await $.ui.render(pane))).toBe('Someone else');
   state.openFailure = 'pane refused';
   expect((await run($)).text).toStartWith('Keepalive settings: ');
 });
@@ -307,7 +313,7 @@ test('while a choice is saving the pane shows values without controls, and a sec
   const during = await $.ui.render(pane);
   release();
   await first;
-  expect(text(during)).toContain('Main conversation TTL: Default (5m)');
+  expect(text(during)).toContain('Main conversation Default (5m)');
   expect(find(during, 'Select', 'cache-ttl')).toBeUndefined();
   expect(find(during, 'Input', 'keepalive-limit-custom')).toBeUndefined();
   expect(state.writes.map(([key]) => key)).toEqual(['owner.cache_ttl']);
@@ -345,8 +351,8 @@ test('the settings pane sets the TTL for models that report none, per-model over
   const state = world(on);
   const drawn = await open($);
   expect(labels(drawn, 'unreported-ttl')).toEqual(['Off (monitor only)', '5m', '15m', '30m', '45m', '1h']);
-  expect(text(drawn)).toContain('◉ provider-reported');
-  expect(text(drawn)).toContain('Price feed: your gateway.');
+  expect(text(drawn)).toContain('never for Claude');
+  expect(text(drawn)).toContain('Price feed your gateway');
   await select($, 'unreported-ttl', '15m');
   expect(owned(state, 'unreported_ttl').value).toBe('15m');
   expect(text(await $.ui.render(pane))).toContain('are kept warm for 15m');
@@ -354,19 +360,91 @@ test('the settings pane sets the TTL for models that report none, per-model over
   expect(text(await $.ui.render(pane))).toContain('are monitored only');
   await type($, 'kimi*=15m, glm-5.3=off', 'unreported-ttl-models');
   expect(owned(state, 'unreported_ttl_models').value).toBe('kimi*=15m, glm-5.3=off');
-  expect(text(await $.ui.render(pane))).toContain('Saved the per-model TTLs');
+  expect(text(await $.ui.render(pane))).toContain('Saved. The per-model TTLs apply');
   await type($, 'nonsense', 'unreported-ttl-models');
-  expect(text(await $.ui.render(pane))).toContain('Enter model=ttl pairs');
+  expect(text(await $.ui.render(pane))).toContain('Type model=ttl pairs');
   await type($, 'https://prices.example/p.json', 'price-url');
   expect(owned(state, 'keepalive_price_url').value).toBe('https://prices.example/p.json');
-  expect(text(await $.ui.render(pane))).toContain('Saved the price feed URL');
-  expect(text(await $.ui.render(pane))).toContain('Price feed: https://prices.example/p.json.');
+  expect(text(await $.ui.render(pane))).toContain('Saved. The next price lookup uses it.');
+  expect(text(await $.ui.render(pane))).toContain('Price feed https://prices.example/p.json');
   await type($, 'ftp://x', 'price-url');
-  expect(text(await $.ui.render(pane))).toContain('Enter an https:// URL, off, or leave empty');
+  expect(text(await $.ui.render(pane))).toContain('Type an https:// URL, off, or nothing');
 });
 
 test('a missing price feed setting is reported in the pane instead of breaking it', async ($, on) => {
   const state = world(on);
   state.rows = state.rows.filter(item => !item.key.endsWith('.keepalive_price_url'));
-  expect(text(await open($))).toContain('Price feed: unavailable.');
+  expect(text(await open($))).toContain('Price feed unavailable');
+});
+
+test('the settings pane names its version in the top right, and a newer one adds a button that says how to update', async ($, on) => {
+  const current = world(on);
+  const drawn = await open($);
+  expect(text(drawn).startsWith(`Keepalive settings Keepalive ${VERSION}`)).toBe(true);
+  expect(find(drawn, 'Button', 'keepalive-update')).toBe(undefined);
+  expect(current.logs).toEqual([]);
+});
+
+test('a newer version shows in the settings pane header, and pressing it says how to update', async ($, on) => {
+  const state = world(on, { latest: '9.9.9' });
+  const drawn = await open($);
+  expect(find(drawn, 'Button', 'keepalive-update')?.label).toBe('⬆ 9.9.9 available');
+  await $.ui.press({ plugin: 'keepalive', key: 'keepalive-update', requestId: ID });
+  expect(state.logs).toContain('Keepalive 9.9.9 is available. Run /plugin marketplace update tools, then /plugin install keepalive@tools and /reload-plugins.');
+});
+
+function trail(node: RenderNode | undefined, type: string, key: string, path: RenderNode[] = []): RenderNode[] | undefined {
+  if (!node || typeof node !== 'object') return undefined;
+  if (node.type === type && 'props' in node && (node.props as { key?: string }).key === key) return [...path, node];
+  if (!('children' in node) || !Array.isArray(node.children)) return undefined;
+  for (const child of node.children) {
+    const found = trail(child, type, key, [...path, node]);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+test('every text field is drawn as a box on its own setting\'s row, after the label and the current value', async ($, on) => {
+  world(on);
+  const drawn = await open($);
+  const rows = { 'keepalive-limit': 'Keepalive limit Default (priced)', 'teammate-limit': 'Teammate limit Same as above',
+    'compact-threshold': 'Compact from 100k (default)', 'unreported-ttl-models': 'Per model None', 'price-url': 'Price feed your gateway' };
+  for (const [key, row] of Object.entries(rows)) {
+    const path = trail(drawn, 'Input', `${key}-custom`)!;
+    const box = path.at(-2) as { props: { borderStyle?: string } };
+    expect([key, box.props.borderStyle]).toEqual([key, 'round']);
+    expect([key, text(path.at(-3)).startsWith(row)]).toEqual([key, true]);
+  }
+  expect(text(drawn)).toContain('Type into a boxed field and press Enter to save it.');
+});
+
+test('after Claude Code reloads Keepalive for a saved setting, the open settings pane draws itself again with what was saved', async ($, on) => {
+  const state = world(on, { stored: { 'settings-notice': 'Saved. New conversations start with this TTL.' } });
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: false });
+  let drawn = await $.ui.render(pane);
+  expect(text(drawn)).toContain('Loading settings…');
+  for (let tries = 0; tries < 20 && text(drawn).includes('Loading settings…'); tries++) drawn = await $.ui.render(pane);
+  expect(text(drawn)).toContain('Saved. New conversations start with this TTL.');
+  expect(labels(drawn, 'cache-ttl')).toEqual(['Default (5m)', '5m', '1h']);
+  expect(state.store.has('settings-notice')).toBe(false);
+});
+
+test('opening the settings pane yourself never shows a notice left from an earlier save', async ($, on) => {
+  const state = world(on, { stored: { 'settings-notice': 'Saved. New conversations start with this TTL.' } });
+  const drawn = await open($);
+  expect(text(drawn)).not.toContain('Saved.');
+  expect(state.store.has('settings-notice')).toBe(false);
+  await select($, 'cache-ttl', '1h');
+  expect(state.store.get('settings-notice')).toBe('Saved. New conversations start with this TTL.');
+});
+
+test('a store that cannot be read or written never stops the settings pane from drawing or saving', async ($, on) => {
+  const state = world(on, { storeFails: true });
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: false });
+  let drawn = await $.ui.render(pane);
+  for (let tries = 0; tries < 20 && text(drawn).includes('Loading settings…'); tries++) drawn = await $.ui.render(pane);
+  expect(labels(drawn, 'cache-ttl')).toEqual(['Default (5m)', '5m', '1h']);
+  await select($, 'cache-ttl', '1h');
+  expect(text(await $.ui.render(pane))).toContain('Saved. New conversations start with this TTL.');
+  expect(owned(state, 'cache_ttl').value).toBe('1h');
 });

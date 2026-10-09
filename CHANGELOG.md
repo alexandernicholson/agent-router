@@ -2,6 +2,12 @@
 
 Each release explains what changed for you, in 120 words or less.
 
+## Keepalive 0.4.5
+
+- **Every agent gets its own TTL, even beside long answers.** A request needing a different TTL no longer waits for other agents to finish answering, which made Claude Code send it with the wrong TTL, left it off the cache bar, and let keepalives arrive after the cache expired.
+- **See when an update is out.** `⬆` on the cache bar, and the version you run in the top right of `/keepalive` and `/keepalive-settings`.
+- **Calmer panes.** Less text, aligned columns, boxed fields wherever you type a value, and the settings pane no longer goes blank after you save a change.
+
 ## Keepalive 0.4.4
 
 - **No more backend names.** The panel no longer shows which provider a gateway routed to, and the plugin ignores any such details the gateway sends.

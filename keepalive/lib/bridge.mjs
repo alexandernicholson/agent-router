@@ -3,10 +3,11 @@ import { lookUpPrices } from './price-sources.mjs';
 import { stateDirectory } from './state.mjs';
 import { migrateFromRouter } from './migrate.mjs';
 import { readHandover } from './shared/routes.mjs';
+import { checkVersion } from './updates.mjs';
 
-const ACTIONS = ['cache-sample', 'cache-snapshot', 'cache-reset', 'cache-enrich', 'cache-prices', 'identity', 'link', 'migrate'];
+const ACTIONS = ['cache-sample', 'cache-snapshot', 'cache-reset', 'cache-enrich', 'cache-prices', 'identity', 'link', 'migrate', 'version'];
 
-export async function handleRequest(input, env = process.env, context = {}, pricesFetch = fetch) {
+export async function handleRequest(input, env = process.env, context = {}, fetcher = fetch) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Expected a bridge JSON object.');
   if (!ACTIONS.includes(input.action)) throw new Error('Unknown Keepalive bridge action.');
   if (input.action === 'identity') return { teammate: input.teammate ?? null };
@@ -18,8 +19,9 @@ export async function handleRequest(input, env = process.env, context = {}, pric
     }
     const { feed } = input;
     const headers = Object.fromEntries(Object.entries(feed?.headers ?? {}).filter(([key, value]) => ['authorization', 'x-api-key'].includes(key) && typeof value === 'string'));
-    return lookUpPrices(models, { root, env, fetcher: pricesFetch, feed: feed && { base: String(feed.base ?? ''), url: String(feed.url ?? ''), headers } });
+    return lookUpPrices(models, { root, env, fetcher, feed: feed && { base: String(feed.base ?? ''), url: String(feed.url ?? ''), headers } });
   }
+  if (input.action === 'version') return checkVersion({ root, pluginRoot: context.root, configDir: context.configDir, env, fetcher });
   if (input.action === 'migrate') {
     if (!context.routerData) return { migrated: false, handover: null };
     return { ...await migrateFromRouter(root, context.routerData), handover: await readHandover(context.routerData) };
