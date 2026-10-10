@@ -11,6 +11,7 @@ import { displayText } from "./core/shared/text.js";
 import { applyTtl, buildKeepalivePayload, requestedTtl, type ReplayApi, type Tokens } from "./replay.ts";
 import { type Resolved, type Ttl, type Upkeep, UPKEEP } from "./settings.ts";
 import { VERSION, keepalivePrompt } from "./version.ts";
+import type { CacheRow, CacheStatus } from "./core/cache.js";
 
 export const UPKEEP_MS = 30000;
 export const PRICES_MS = 3600000;
@@ -98,7 +99,7 @@ export function createPanel() {
   /** Test-only time dilation (PI_KEEPALIVE_E2E_TTL_MS): counts the 5m TTL down faster so an e2e run need not wait 5 minutes. */
   const eff = (c: Ctx, row: any) => (c.timeScale === 1 || row?.touchedAt === undefined ? c.now : row.touchedAt + (c.now - row.touchedAt) * c.timeScale);
 
-  function state(c: Ctx, row: any) {
+  function state(c: Ctx, row: CacheRow): CacheStatus & { phase?: string } {
     const pending = c.pending;
     const value = cacheStatus(row, eff(c, row), pending?.startedAt, unreportedModels(rows(c), c.now));
     if (pending?.changed && row.last) return { ...value, state: "model changed · awaiting usage", leftMs: null, lifetimes: [], ttl: undefined };

@@ -23,6 +23,7 @@ The ledger, grading, miss reasons, TTL handling, pricing, upkeep rules and gatew
 | Gateway policy: enabled / shadow / insufficient / demoted / fixed window / native; safe time, max idle, 5 s tick, no catch-up, renew on read, 10 min cache, backoff; claude keeps native 5m/1h; 404 → native | `policyAction`, `createPolicyClient` | same shared client; any non-Anthropic base | policy.test |
 | Built-in warmer | n/a | answers `cache_warming_decision` with stop while managed | extension |
 | Never act mid-request | `pending` | `pending` + `ctx.isIdle()` | upkeep |
+| Reduced motion: countdowns in whole minutes, changing once a minute, `soon` in the last; dial, colour and lifetime bars change with them | `reduced_motion` setting, `steadyStatus`, `timeLeft` | same modules; `/keepalive set reduced_motion on`, `PI_KEEPALIVE_REDUCED_MOTION` | render.test |
 
 ## Not reachable in Pi/OMP (evidence)
 

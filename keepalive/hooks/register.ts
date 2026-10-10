@@ -132,6 +132,7 @@ export function register(on: On, options: PluginOptions) {
         compactAt: compactThreshold(option('compact_threshold')),
         fallback: { ttl: fallbackTtl(String(option('unreported_ttl')).trim().toLowerCase()), models: parseTtlOverrides(option('unreported_ttl_models')),
           priceUrl: String(option('keepalive_price_url')).trim() },
+        reducedMotion: String(option('reduced_motion')).trim().toLowerCase() === 'on',
       });
       if (e.isInteractive && e.surface === 'terminal') {
         await cachePanel.introduce();

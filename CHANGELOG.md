@@ -2,6 +2,10 @@
 
 Each release explains what changed for you, in 120 words or less.
 
+## Keepalive 0.4.6
+
+- **Reduced motion.** Turn it on in `/keepalive-settings` and countdowns show whole minutes, change once a minute, and read `soon` in the last one; the dial and colours change with them. Off by default.
+
 ## Keepalive 0.4.5
 
 - **Every agent gets its own TTL, even beside long answers.** A request needing a different TTL no longer waits for other agents to finish answering, which made Claude Code send it with the wrong TTL, left it off the cache bar, and let keepalives arrive after the cache expired.

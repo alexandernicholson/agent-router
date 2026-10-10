@@ -70,6 +70,8 @@ const FIELDS: Record<string, { field: string; kind: ConfigRow['kind']; label: st
     saved: () => 'Saved. The next price lookup uses it.',
     typed: { parse: value => /^(off|https?:\/\/\S+)?$/i.test(value.trim()) ? value.trim() : undefined,
       hint: 'Type an https:// URL, off, or nothing to use your gateway.', placeholder: 'or type a URL' } },
+  'reduced-motion': { field: 'reduced_motion', kind: 'choice', label: 'Reduced motion', name: 'reduced motion',
+    saved: value => `Saved. Countdowns now change ${value === 'on' ? 'once a minute' : 'every second'}.` },
 };
 
 function ownedRow(rows: ConfigRow[], plugin: string, key: string): ConfigRow {
@@ -199,6 +201,7 @@ export function createSettingsPane() {
       {section('Models that report no cache lifetime', [choose('unreported-ttl', fallbackLabel, FALLBACKS),
         choose('unreported-ttl-models', value => value ? displayText(value, 20) : 'None', ['']), line('price-url', <Text wrap="truncate-end">{feed}</Text>)],
         'Used when the provider and gateway report none; never for Claude.')}
+      {section('Display', [choose('reduced-motion', value => value)], 'on: countdowns change once a minute and read soon in the last one.')}
       <Text dimColor>Type into a boxed field and press Enter to save it.</Text>
     </Box>;
     const update = host.release();

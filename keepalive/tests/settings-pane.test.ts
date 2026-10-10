@@ -23,6 +23,7 @@ function world(on: On, extra: { auth?: 'bearer'; env?: Record<string, string>; l
       row('cache_upkeep', 'choice', 'off', UPKEEP), row('teammate_cache_upkeep', 'choice', 'off', UPKEEP), row('keepalive_limit', 'text', 'default'),
       row('teammate_keepalive_limit', 'text', 'same'), row('compact_threshold', 'text', '100k'),
       row('unreported_ttl', 'choice', 'off', ['off', '5m', '15m', '30m', '45m', '1h']), row('unreported_ttl_models', 'text', ''), row('keepalive_price_url', 'text', ''),
+      row('reduced_motion', 'choice', 'off', ['off', 'on']),
     ] as ConfigRow[],
     writes: [] as [string, unknown][], deny: '', echo: undefined as string | undefined, listFailure: undefined as unknown, openFailure: '',
     placed: true, logs: [] as string[], closed: 0, store: new Map<string, unknown>(Object.entries(extra.stored ?? {})), onList: undefined as undefined | (() => Promise<void>), onSet: undefined as undefined | (() => Promise<void>),
@@ -369,6 +370,17 @@ test('the settings pane sets the TTL for models that report none, per-model over
   expect(text(await $.ui.render(pane))).toContain('Price feed https://prices.example/p.json');
   await type($, 'ftp://x', 'price-url');
   expect(text(await $.ui.render(pane))).toContain('Type an https:// URL, off, or nothing');
+});
+
+test('reduced motion is chosen in the settings pane and saved to its setting', async ($, on) => {
+  const state = world(on);
+  expect(labels(await open($), 'reduced-motion')).toEqual(['off', 'on']);
+  await select($, 'reduced-motion', 'on');
+  expect(owned(state, 'reduced_motion').value).toBe('on');
+  expect(text(await $.ui.render(pane))).toContain('once a minute');
+  await select($, 'reduced-motion', 'off');
+  expect(owned(state, 'reduced_motion').value).toBe('off');
+  expect(text(await $.ui.render(pane))).toContain('every second');
 });
 
 test('a missing price feed setting is reported in the pane instead of breaking it', async ($, on) => {

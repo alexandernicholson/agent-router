@@ -56,6 +56,23 @@ test("TTL 1h, reported TTL differing from the request, expired, uncached and awa
   assert.match(statusLine(awaiting.panel, awaiting.panel.get(), plain), /no observation/);
 });
 
+test("reduced motion changes the footer countdown and dial on the minute, never between, says soon in the last minute, and the dashboard follows", async (t) => {
+  const { panel, state } = await started(t, { set: { reduced_motion: "on" } });
+  await realRequest(panel, state, source(), { write: 5000, fresh: 10 });
+  const changes = [];
+  let soon;
+  for (let second = 0; second <= 300; second++) {
+    const line = statusLine(panel, panel.get(), plain);
+    const shown = `${/^\[ (.) \]/.exec(line)[1]} ${/ETA [^·]+|expired/.exec(line)[0].trim()}`;
+    if (changes.at(-1)?.[1] !== shown) changes.push([second, shown]);
+    if (second === 250) soon = dashboard(panel, panel.get(), plain, "all").join("\n");
+    state.now += 1000;
+    await panel.tick();
+  }
+  assert.deepEqual(changes, [[0, "● ETA ~4m"], [59, "◕ ETA ~3m"], [119, "◑ ETA ~2m"], [179, "◑ ETA ~1m"], [239, "◔ ETA soon"], [299, "○ expired"]]);
+  assert.match(soon, /TTL 5m · 5k written · █░░░░░░░░░ expires soon/);
+});
+
 test("model switch shows awaiting usage and a miss chip with causes, dimmed when stale", async (t) => {
   const { panel, state } = await started(t);
   await realRequest(panel, state, source(), { write: 5000 });

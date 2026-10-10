@@ -263,6 +263,35 @@ test('reported third-party mixed TTLs produce separate lifetime bars in the nati
   expect(later.includes('~54:59 left')).toBe(true);
 });
 
+test('reduced motion changes the countdown and dial on the minute, never between, and says soon in the last minute', { options: { reduced_motion: 'on' } }, async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 100, oneHour: 0 };
+  await step($);
+  const changes: [number, string, string][] = [];
+  for (let second = 0; second <= 300; second++) {
+    const eta = /ETA [^·]+|expired/.exec(text(await $.ui.render(band())))![0].trim();
+    const shown = (await dial($))!;
+    if (changes.at(-1)?.[1] !== eta || changes.at(-1)?.[2] !== shown) changes.push([second, eta, shown]);
+    await clock.advance(1000);
+  }
+  expect(changes).toEqual([[0, 'ETA ~4m', '●'], [60, 'ETA ~3m', '◕'], [120, 'ETA ~2m', '◑'], [180, 'ETA ~1m', '◑'], [240, 'ETA soon', '◔'], [300, 'expired', '○']]);
+});
+
+test('reduced motion holds mixed TTLs in the dashboard to whole minutes, and the soonest to soon', { options: { reduced_motion: 'on' } }, async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 40, oneHour: 60 };
+  await step($);
+  await clock.advance(250000);
+  const contents = await dashboard($);
+  expect(contents).toContain('TTL 5m · 40 written · █░░░░░░░░░ expires soon');
+  expect(contents).toContain('TTL 1h · 60 written · █████████░ ~55m left');
+  expect(contents).toContain('ETA soon');
+  await clock.advance(51000);
+  expect(text(await $.ui.render(pane))).toContain('~0:00 left');
+});
+
 test('absent metadata is unknown for main and child on an Anthropic endpoint', async ($, on) => {
   response(on);
   const { clock, world } = await setup($, on, 'https://api.anthropic.com');
@@ -2281,7 +2310,7 @@ test('a confirmed keepalive behind a protocol gateway is reported to its reports
   expect(sent.length).toBeGreaterThan(0);
   expect(sent[0].url).toBe('https://gateway.example/v1/cache/reports');
   const body = JSON.parse(sent[0].body!);
-  expect(body.client).toBe('keepalive/0.4.5');
+  expect(body.client).toBe(`keepalive/${VERSION}`);
   expect(body.harness).toBe('claude_cli');
   expect(body.reports[0]).toMatchObject({ kind: 'keepalive', session: 'cache-session', alias: 'gateway-code-task', src: 'documented' });
   expect(typeof body.reports[0].started_at_ms).toBe('number');
@@ -2346,7 +2375,7 @@ test('a Claude-only session behind a gateway sends the heartbeat at most once pe
   await clock.advance(30000);
   const gets = () => world.fetches.filter(f => f.method !== 'POST');
   expect(gets().length).toBe(1);
-  expect(gets()[0].url).toContain('client=keepalive%2F0.4.5&harness=claude_cli');
+  expect(gets()[0].url).toContain(`client=keepalive%2F${VERSION}&harness=claude_cli`);
   expect(gets()[0].headers?.authorization).toBe('Bearer secret-token');
   await clock.advance(500000);
   expect(gets().length).toBe(1);
@@ -2401,7 +2430,7 @@ test('a gateway policy keeps a row without reported cache lifetimes warm by its 
   await step($);
   await clock.advance(2000);
   expect(world.fetches.length).toBe(1);
-  expect(world.fetches[0].url).toBe('https://gateway.example/v1/cache/policy?alias=vendor%2Fmain&session=cache-session&client=keepalive%2F0.4.5&harness=claude_cli');
+  expect(world.fetches[0].url).toBe(`https://gateway.example/v1/cache/policy?alias=vendor%2Fmain&session=cache-session&client=keepalive%2F${VERSION}&harness=claude_cli`);
   expect(world.fetches[0].headers?.authorization).toBe('Bearer secret-token');
   await clock.advance(30000);
   expect(text(await $.ui.render(band()))).toMatch(/✦ 7m \d+s/);
@@ -2414,6 +2443,19 @@ test('a gateway policy keeps a row without reported cache lifetimes warm by its 
   await clock.advance(10000);
   expect(world.forks.length).toBe(2);
   expect(world.fetches.length).toBeLessThan(5);
+});
+
+test('reduced motion counts a gateway lifetime down in whole minutes, then soon', { options: { reduced_motion: 'on' } }, async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on, 'https://gateway.example', undefined, GATEWAY);
+  world.policy = [policyRow({ refresh_on_read: null })];
+  await step($);
+  await clock.advance(32000);
+  expect(text(await $.ui.render(band()))).toMatch(/✦ 7m · once/);
+  await clock.advance(27000);
+  expect(text(await $.ui.render(band()))).toMatch(/✦ 7m · once/);
+  await clock.advance(390000);
+  expect(text(await $.ui.render(band()))).toMatch(/✦ soon · once/);
 });
 
 test('a gateway row without refresh_on_read fires one keepalive per idle period and says once', async ($, on) => {

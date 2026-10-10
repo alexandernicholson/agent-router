@@ -90,7 +90,7 @@ test("slash commands: status, upkeep, ttl, set, settings, dashboard, requests, c
   await x.emit("session_start");
   await turn(x);
   await run("");
-  assert.match(x.ui.notes.at(-1), /^keepalive v0\.3\.4\n\[ ● \]/);
+  assert.match(x.ui.notes.at(-1), /^keepalive v\d+\.\d+\.\d+\n\[ ● \]/);
   await run("upkeep compact");
   assert.match(x.ui.notes.at(-1), /upkeep: compact/);
   await run("upkeep");

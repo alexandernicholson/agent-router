@@ -21,7 +21,7 @@ test("enabled policy: the countdown starts at the last cache-touching request an
   const { panel, state } = await gateway(t);
   await tick(panel, state, 100);
   assert.equal(state.fetches.length, 1);
-  assert.match(state.fetches[0].url, /^https:\/\/gateway\.example\.com\/ai\/openai\/v1\/v1\/cache\/policy\?alias=kimi-k3&session=p&client=pi-keepalive%2F0\.3\.4&harness=pi$/);
+  assert.match(state.fetches[0].url, /^https:\/\/gateway\.example\.com\/ai\/openai\/v1\/v1\/cache\/policy\?alias=kimi-k3&session=p&client=pi-keepalive%2F\d+\.\d+\.\d+&harness=pi$/);
   assert.equal(state.fetches[0].init.headers["x-api-key"], "k");
   assert.equal(panel.policyOf(panel.get(), panel.mainRow(panel.get())).status, "enabled");
   await tick(panel, state, 470_000);

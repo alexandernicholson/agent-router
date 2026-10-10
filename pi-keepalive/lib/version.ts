@@ -1,5 +1,5 @@
 // Must equal package.json "version" (asserted in tests). Sent to gateways as the `client` heartbeat, never in a prompt.
-export const VERSION = "0.3.4";
+export const VERSION = "0.3.5";
 
 /** The exact keepalive prompt: no marker, so a keepalive is indistinguishable from a short user message to every provider. */
 export const KEEPALIVE_PROMPT = "Reply with only: K";

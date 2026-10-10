@@ -190,7 +190,8 @@ export const SOURCE_ICONS = { native: '◉', learned: '✦', documented: '▣', 
 export const SOURCE_NAMES = { native: 'reported by the provider', learned: 'learned by the gateway', documented: 'documented by the provider',
   default: 'gateway default', override: 'set by your gateway administrator', probe: 'gateway probe', client: 'your TTL setting', none: 'no cache', unknown: 'unknown' };
 export const FALLBACK_TTLS = { '5m': 300000, '15m': 900000, '30m': 1800000, '45m': 2700000, '1h': 3600000 };
-/** @param {unknown} value @returns {'off' | keyof typeof FALLBACK_TTLS | undefined} */
+/** @typedef {'off' | keyof typeof FALLBACK_TTLS} FallbackTtl */
+/** @param {unknown} value @returns {FallbackTtl | undefined} */
 export const fallbackTtl = value => value === 'off' || typeof value === 'string' && Object.hasOwn(FALLBACK_TTLS, value) ? value : undefined;
 
 const globRegex = pattern => new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`, 'i');
@@ -235,6 +236,18 @@ const span = seconds => {
   const [minutes, rest] = [Math.floor(seconds / 60), Math.round(seconds % 60)];
   return minutes ? `${minutes}m${rest ? ` ${rest}s` : ''}` : `${rest}s`;
 };
+/**
+ * Time left as reduced motion draws it: held at the middle of its minute, so its text, colour, dial and bar change together,
+ * once a minute; the last minute is held at 30 seconds and reads "soon". A minute ends on its boundary, so 5:00 left is
+ * already 4m and a fresh countdown never shows a minute it leaves a second later. 0 (expired) stays 0.
+ * @param {number} ms
+ */
+export const steadyLeft = ms => ms > 0 ? (Math.ceil(ms / 60000) - 1) * 60000 + 30000 : ms;
+/** @param {number} ms */
+const steadySpan = ms => {
+  const minutes = Math.floor(steadyLeft(ms) / 60000);
+  return minutes ? span(minutes * 60) : 'soon';
+};
 /** The bar text for a lifetime, such as "◇ 5m · once" or "⊘ no cache"; undefined for native rows. */
 export function lifetimeLabel(life, state = '') {
   if (life.source === 'native') return state || undefined;
@@ -242,7 +255,7 @@ export function lifetimeLabel(life, state = '') {
   if (life.source === 'none') return `${icon} no cache`;
   if (life.phase === 'sent') return `${icon} sent · once`;
   if (life.phase === 'idle' || life.phase === 'missed') return `${icon} ${life.phase}`;
-  if (life.left !== undefined) return life.left ? `${icon} ${span(life.left)}${life.once ? ' · once' : ''}` : `${icon} expired`;
+  if (life.left !== undefined) return life.left ? `${icon} ${life.steady ? steadySpan(life.left * 1000) : span(life.left)}${life.once ? ' · once' : ''}` : `${icon} expired`;
   if (life.shownS) return `${icon} ${span(life.shownS)}${life.once ? ' · once' : ''}`;
   const why = life.status === 'demoted' ? `demoted${life.reason ? ` · ${life.reason}` : ''}`
     : life.status === 'monitor' ? `monitor${life.reason ? ` (${life.reason})` : ''}` : life.status?.replace('_', ' ');
@@ -432,6 +445,24 @@ export function cacheBar(ratio, width = 10, grade = null) {
 export function cacheClock(ms) {
   const seconds = Math.max(0, Math.ceil(ms / 1000));
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+}
+/** Time left on a countdown: `~4:51`, or with reduced motion whole minutes (`~4m`) and `soon` in the last one; expired is `~0:00`. */
+export function timeLeft(ms, steady = false) {
+  if (!steady || ms <= 0) return `~${cacheClock(ms)}`;
+  const text = steadySpan(ms);
+  return text === 'soon' ? text : `~${text}`;
+}
+/**
+ * A status as the bar and dashboard draw it: with reduced motion its countdowns held still within each minute (steadyLeft).
+ * @template {CacheStatus} T
+ * @param {T} status
+ * @param {boolean} steady
+ * @returns {T}
+ */
+export function steadyStatus(status, steady) {
+  if (!steady) return status;
+  return { ...status, leftMs: status.leftMs === null ? null : steadyLeft(status.leftMs),
+    lifetimes: status.lifetimes.map(part => ({ ...part, leftMs: steadyLeft(part.leftMs) })) };
 }
 export function cacheTokens(value) {
   return value < 1000 ? String(value) : `${Number((value / (value >= 1e6 ? 1e6 : 1000)).toFixed(1))}${value >= 1e6 ? 'm' : 'k'}`;

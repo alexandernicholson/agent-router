@@ -1,6 +1,6 @@
 import type { AgentInfo, Elements, EngineInterface, RenderElement, RenderSurface, SessionCompacted, TurnStepInput, TurnUsage } from 'claude-code';
 import { applyCacheCreation, reportedCacheCreation, cacheBar, cacheBarParts, cacheClock, cacheDial, cacheGrade, cachePercent, cachePolicy, cacheRows, cacheStatus, cacheTokens, isCompaction, isKeepalive, keepaliveWorthwhile, keepalivesLeft, lifeGrade, policyAction, policyRow, lifetimeOf, lifetimeLabel, lifetimeStatus, clientTtl, savingsWorthwhile, KEEPALIVE_PROMPT, SOURCE_ICONS, SOURCE_NAMES, loopKey, recentMisses, recentUsage, sampleKey, sampleTtl, unreportedModels, validSample, sessionMatrix, sessionUsage, cacheGap, MISS_WINDOW_MS, RATE_REQUESTS } from '../lib/cache.js';
-import { validPrices } from '../lib/cache.js';
+import { steadyStatus, timeLeft, validPrices } from '../lib/cache.js';
 import type { CachePrices, CacheRow, CacheSample, CacheReset, CacheStatus } from '../lib/cache.js';
 import { CACHE_COLORS, themeFamily } from '../lib/cache-colors.js';
 import { createPolicyClient, createReportClient, pickRow, policyUrl, POLICY_TTL_MS } from '../lib/shared/policy.mjs';
@@ -92,6 +92,8 @@ type Context = {
   upkeep: Upkeep;
   limit?: number;
   compactAt: number;
+  /** Reduced motion: countdowns change once a minute and read soon in the last one. */
+  reducedMotion: boolean;
   family: Family;
   samples: Map<string, CacheSample>;
   resets: CacheReset[];
@@ -236,7 +238,7 @@ export function createCachePanel() {
     paneModes = new Map(saved.filter(([id]) => id !== current.sessionId));
   }
 
-  function state(current: Context, row: CacheRow): CacheStatus {
+  function state(current: Context, row: CacheRow): CacheStatus & { phase?: string } {
     const pending = current.pending.get(loopKey(row.sessionId, row.agentId));
     const value = cacheStatus(row, current.now, pending?.startedAt, unreportedModels(rows(current), current.now));
     if (pending?.changed && row.last) {
@@ -244,6 +246,9 @@ export function createCachePanel() {
     }
     return lifetimeStatus(row, lifetime(current, row), current.now, value);
   }
+
+  /** The row's state as the bar and dashboard draw it: with reduced motion, its countdowns change once a minute. */
+  const drawnState = (current: Context, row: CacheRow) => steadyStatus(state(current, row), current.reducedMotion);
 
   const palette = (current: Context) => CACHE_COLORS[current.family];
 
@@ -258,7 +263,7 @@ export function createCachePanel() {
   }
 
   function segments(current: Context, row: CacheRow): Segment[] {
-    const status = state(current, row);
+    const status = drawnState(current, row);
     const result = rate(current, status.state === 'compacted' ? status.sample : recentUsage(row) ?? status.sample);
     if (status.state === 'compacted') {
       const { before, after } = status.compacted!;
@@ -267,14 +272,14 @@ export function createCachePanel() {
     const governing = lifetime(current, row);
     if (governing.policy && status.ttl) {
       const grade = lifeGrade(status.leftMs);
-      return [...result, { text: ` · ${lifetimeLabel({ ...governing, left: Math.ceil(status.leftMs! / 1000), phase: (status as { phase?: string }).phase })}`,
+      return [...result, { text: ` · ${lifetimeLabel({ ...governing, left: Math.ceil(status.leftMs! / 1000), phase: status.phase, steady: current.reducedMotion })}`,
         color: palette(current)[status.leftMs && grade ? grade : 'poor'] }];
     }
     if (!status.ttl) return [...result, { text: ` · ${segmentLabel(current, row, status.state)}` }];
     const wanted = row.sessionId === current.sessionId ? ttlChoice(current, row.agentId).ttl : undefined;
     if (wanted && status.ttl !== wanted) result.push({ text: ` · ${status.ttl} reported` });
     const life = lifeGrade(status.leftMs);
-    result.push(status.leftMs && life ? { text: ` · ${SOURCE_ICONS.native} ETA ~${cacheClock(status.leftMs)}`, color: palette(current)[life] }
+    result.push(status.leftMs && life ? { text: ` · ${SOURCE_ICONS.native} ETA ${timeLeft(status.leftMs, current.reducedMotion)}`, color: palette(current)[life] }
       : { text: ' · expired', color: palette(current).poor });
     return result;
   }
@@ -455,13 +460,13 @@ export function createCachePanel() {
   }
 
   async function initialize(host: CachePanelHost, bridge: Bridge, sessionId: string, endpoint: string | undefined, selfLabel: string | undefined,
-    configuration: { env: Record<string, string | undefined>; upkeep?: Upkeep; ttl: TtlDefaults; limit?: number; compactAt?: number; fallback: Fallback }) {
+    configuration: { env: Record<string, string | undefined>; upkeep?: Upkeep; ttl: TtlDefaults; limit?: number; compactAt?: number; fallback: Fallback; reducedMotion: boolean }) {
     const saved = (await savedUpkeep(host)).find(([id]) => id === sessionId)?.[1];
     const [settings, auth] = await Promise.all([host.settings.read().catch(() => ({})), host.auth()]);
     const resolve = (scope: TtlScope) => resolveDefaultTtl({ scope, env: configuration.env, settings: settings as Record<string, unknown>, auth });
     const subagent = resolve('subagent');
     const current: Context = { host, bridge, sessionId, endpoint, selfLabel, env: configuration.env, upkeep: saved ?? configuration.upkeep ?? 'off',
-      limit: configuration.limit, compactAt: configuration.compactAt ?? COMPACT_MIN_TOKENS, family: themeFamily(undefined, configuration.env.COLORFGBG),
+      limit: configuration.limit, compactAt: configuration.compactAt ?? COMPACT_MIN_TOKENS, reducedMotion: configuration.reducedMotion, family: themeFamily(undefined, configuration.env.COLORFGBG),
       samples: new Map(), resets: [], labels: new Map(), roster: [], routes: null, now: 0, pending: new Map(), requested: new Map(), rechecks: new Map(), fallback: configuration.fallback, policy: createPolicyClient({ fetch: (url, init) => host.http.fetch(url, init), headers: host.credentials, client: `keepalive/${VERSION}`, harness: 'claude_cli' }), reports: createReportClient({ fetch: (url, init) => host.http.fetch(url, init), headers: host.credentials, client: `keepalive/${VERSION}`, harness: 'claude_cli' }), prices: new Map(), available: true,
       defaults: { main: resolve('main'), subagent }, ttlDefaults: configuration.ttl,
       ttls: new Map((await savedTtls(host)).filter(([id]) => id === sessionId).map(([, key, ttl]) => [key, ttl])), kinds: new Map(),
@@ -487,7 +492,7 @@ export function createCachePanel() {
     const prior = context ?? previous;
     if (prior) {
       const id = await prior.host.session.id();
-      if (!context || id !== prior.sessionId) await initialize(prior.host, prior.bridge, id, prior.endpoint, undefined, { env: prior.env, upkeep: prior.upkeep, ttl: prior.ttlDefaults, limit: prior.limit, compactAt: prior.compactAt, fallback: prior.fallback });
+      if (!context || id !== prior.sessionId) await initialize(prior.host, prior.bridge, id, prior.endpoint, undefined, { env: prior.env, upkeep: prior.upkeep, ttl: prior.ttlDefaults, limit: prior.limit, compactAt: prior.compactAt, fallback: prior.fallback, reducedMotion: prior.reducedMotion });
     }
     return context;
   }
@@ -755,7 +760,7 @@ export function createCachePanel() {
     if (!current) return content;
     const row = rows(current).find(row => row.sessionId === current.sessionId && row.agentId === (agentId ?? null));
     const { Box, Button, Text } = elements;
-    const status = row && state(current, row);
+    const status = row && drawnState(current, row);
     const latest = status?.sample;
     const note = row && keepaliveNote(current, row, true);
     const counts = `${note ? ` · ${note}` : ''}${latest ? ` · read ${cacheTokens(latest.read)} · write ${cacheTokens(latest.write)} · new ${cacheTokens(latest.fresh)}` : ''}`;
@@ -986,11 +991,14 @@ export function createCachePanel() {
       const key = loopKey(row.sessionId, row.agentId);
       const counts = row.totals;
       const indent = node.body;
-      const status = state(current, row);
-      const life: RenderElement[] = status.lifetimes.length > 1 || status.awaiting ? status.lifetimes.map(part => Text({
-        color: palette(current)[lifeGrade(part.leftMs)!],
-        children: [`${indent}TTL ${part.ttl} · ${cacheTokens(part.tokens)} written · ${cacheBar(part.leftMs / part.ttlMs)} ~${cacheClock(part.leftMs)} left${status.awaiting ? ' · awaiting report' : ''}`],
-      })) : [];
+      const status = drawnState(current, row);
+      const life: RenderElement[] = status.lifetimes.length > 1 || status.awaiting ? status.lifetimes.map(part => {
+        const left = timeLeft(part.leftMs, current.reducedMotion);
+        return Text({
+          color: palette(current)[lifeGrade(part.leftMs)!],
+          children: [`${indent}TTL ${part.ttl} · ${cacheTokens(part.tokens)} written · ${cacheBar(part.leftMs / part.ttlMs)} ${left === 'soon' ? 'expires soon' : `${left} left`}${status.awaiting ? ' · awaiting report' : ''}`],
+        });
+      }) : [];
       const upkeepLine = [row.keepalives.length ? `${plural(row.keepalives.length, 'keepalive')} since the last request` : '', keepaliveNote(current, row) ?? '']
         .filter(Boolean).join(' · ');
       const kind = node.kind === 'main' || node.kind === 'subagent' ? '' : ` · ${node.kind}`;
@@ -1001,7 +1009,7 @@ export function createCachePanel() {
       return Box({ flexDirection: 'column', children: [
         Box({ flexDirection: 'row', children: [Text({ dimColor: true, children: [node.prefix] }),
           Button({ key: `cache-agent:${key}`, label: `${displayText(row.label, 120)}${kind}`, plain: true, onPress: () => { selected = key; historyScope = 'agent'; redraw(current); } })] }),
-        Box({ flexDirection: 'row', children: [Text({ children: [`${indent}${cacheDial(state(current, row))} `] }), ...marker(elements, current, node.upkeep),
+        Box({ flexDirection: 'row', children: [Text({ children: [`${indent}${cacheDial(status)} `] }), ...marker(elements, current, node.upkeep),
           Text({ children: [node.upkeep ? ` ${node.upkeep} ` : ' '] }), Text({ children: [ownLifetime(current, row) ? '' : `TTL ${ttlLabel(current, row)} `] }), ...paint(elements, segments(current, row))] }),
         ...life,
         ...detail.map(text => Text({ dimColor: true, children: [`${indent}${text}`] })),

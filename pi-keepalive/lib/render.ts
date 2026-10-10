@@ -2,7 +2,9 @@
 import {
   cacheBar, cacheBarParts, cacheClock, cacheDial, cacheGap, cacheGrade, cachePercent, cacheTokens, isCompaction, isKeepalive, keepalivesLeft,
   lifeGrade, lifetimeLabel, MISS_WINDOW_MS, RATE_REQUESTS, recentMisses, recentUsage, sampleTtl, SOURCE_ICONS, SOURCE_NAMES, sessionMatrix, sessionUsage,
+  steadyStatus, timeLeft,
 } from "./core/cache.js";
+import type { CacheRow } from "./core/cache.js";
 import { CACHE_COLORS, themeFamily } from "./core/cache-colors.js";
 import { displayText } from "./core/shared/text.js";
 import type { Ctx, Panel } from "./panel.ts";
@@ -12,6 +14,9 @@ export type RequestFilter = (typeof REQUEST_FILTERS)[number];
 export const MISS_FRESH_MS = 300000;
 const MISS_WORDS: Record<string, string> = { "prefix changed": "prefix", "model changed": "model", "TTL changed": "TTL", expired: "expired", "cache miss": "unknown" };
 const MARKERS: Record<string, string[]> = { off: [], warm: ["warm"], compact: ["compact"], warmcomp: ["warm", "compact"] };
+
+/** The row's state as drawn: with reduced motion, its countdowns change once a minute. */
+const drawnState = (panel: Panel, c: Ctx, row: CacheRow) => steadyStatus(panel.state(c, row), c.settings.reducedMotion);
 
 const rgb = (hex: string): string => `\x1b[38;2;${parseInt(hex.slice(1, 3), 16)};${parseInt(hex.slice(3, 5), 16)};${parseInt(hex.slice(5, 7), 16)}m`;
 const RESET = "\x1b[0m";
@@ -46,7 +51,7 @@ export function lifetimeLine(panel: Panel, c: Ctx, row: any): string | undefined
 }
 
 export function segments(panel: Panel, c: Ctx, p: Paint, row: any): string {
-  const status = panel.state(c, row);
+  const status = drawnState(panel, c, row);
   const result = rate(p, status.state === "compacted" ? status.sample : (recentUsage(row) ?? status.sample));
   if (status.state === "compacted") {
     const { before, after } = status.compacted!;
@@ -56,12 +61,12 @@ export function segments(panel: Panel, c: Ctx, p: Paint, row: any): string {
   const governing = panel.lifetime(c, row);
   if (governing.policy) {
     const grade = lifeGrade(status.leftMs);
-    return `${result} · ${p.color(grade!, lifetimeLabel({ ...governing, left: Math.ceil(status.leftMs! / 1000), phase: (status as { phase?: string }).phase })!)}`;
+    return `${result} · ${p.color(grade!, lifetimeLabel({ ...governing, left: Math.ceil(status.leftMs! / 1000), phase: status.phase, steady: c.settings.reducedMotion })!)}`;
   }
   const wanted = panel.wantedTtl(c);
   const reported = wanted && status.ttl !== wanted ? ` · ${status.ttl} reported` : "";
   const life = lifeGrade(status.leftMs);
-  return `${result}${reported}${status.leftMs && life ? p.color(life, ` · ${SOURCE_ICONS.native} ETA ~${cacheClock(status.leftMs)}`) : p.color("poor", " · expired")}`;
+  return `${result}${reported}${status.leftMs && life ? p.color(life, ` · ${SOURCE_ICONS.native} ETA ${timeLeft(status.leftMs, c.settings.reducedMotion)}`) : p.color("poor", " · expired")}`;
 }
 
 export function misses(c: Ctx, rows: any[]) {
@@ -106,7 +111,7 @@ function marker(p: Paint, upkeep: string): string {
 /** The footer line: dial, upkeep mode, TTL, hit-rate bar, ETA or policy text, miss chip, counts. */
 export function statusLine(panel: Panel, c: Ctx, p: Paint): string {
   const row = panel.mainRow(c);
-  const status = panel.state(c, row);
+  const status = drawnState(panel, c, row);
   const latest = status.sample;
   const note = keepaliveNote(panel, c, row, true);
   const counts = `${note ? ` · ${note}` : ""}${latest ? ` · read ${cacheTokens(latest.read)} · write ${cacheTokens(latest.write)} · new ${cacheTokens(latest.fresh)}` : ""}`;
@@ -186,7 +191,7 @@ function priceNote(c: Ctx, row: any): string {
 
 export function dashboard(panel: Panel, c: Ctx, p: Paint, filter: RequestFilter, columns = 100): string[] {
   const row = panel.mainRow(c);
-  const status = panel.state(c, row);
+  const status = drawnState(panel, c, row);
   const out = overview(p, [row], columns);
   const line = missLine(c, [row]);
   if (line) out.push(p.color("fair", line));
@@ -200,7 +205,8 @@ export function dashboard(panel: Panel, c: Ctx, p: Paint, filter: RequestFilter,
   const lifetime = lifetimeLine(panel, c, row);
   if (lifetime) out.push(p.dim(lifetime));
   for (const part of status.lifetimes) {
-    out.push(p.color(lifeGrade(part.leftMs)!, `TTL ${part.ttl} · ${cacheTokens(part.tokens)} written · ${cacheBar(part.leftMs / part.ttlMs)} ~${cacheClock(part.leftMs)} left${status.awaiting ? " · awaiting report" : ""}`));
+    const left = timeLeft(part.leftMs, c.settings.reducedMotion);
+    out.push(p.color(lifeGrade(part.leftMs)!, `TTL ${part.ttl} · ${cacheTokens(part.tokens)} written · ${cacheBar(part.leftMs / part.ttlMs)} ${left === "soon" ? "expires soon" : `${left} left`}${status.awaiting ? " · awaiting report" : ""}`));
   }
   const upkeepLine = [row.keepalives.length ? `${plural(row.keepalives.length, "keepalive")} since the last request` : "", keepaliveNote(panel, c, row) ?? ""].filter(Boolean).join(" · ");
   if (upkeepLine) out.push(p.dim(upkeepLine));

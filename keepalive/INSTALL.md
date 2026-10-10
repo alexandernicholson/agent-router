@@ -111,6 +111,7 @@ Run `/keepalive-settings`, or pass `--config KEY=VALUE` to `claude plugin instal
 | `unreported_ttl` | `off` | Your TTL for models whose lifetime nobody reports (`5m`, `15m`, `30m`, `45m`, `1h`). The gateway's lifetime always takes precedence |
 | `unreported_ttl_models` | — | Per-model TTLs, e.g. `kimi*=15m, glm-5.3=off` (first match wins; never applies to Claude) |
 | `keepalive_price_url` | — | Your own price feed; leave empty to use the gateway's |
+| `reduced_motion` | `off` | `on` shows countdowns in whole minutes, changing once a minute, and `soon` in the last minute |
 
 ## 7. Update
 

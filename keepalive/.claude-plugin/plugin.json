@@ -1,6 +1,6 @@
 {
   "name": "keepalive",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "license": "MIT",
   "description": "A prompt cache bar for every conversation, subagent and teammate, a dashboard with /keepalive, per-conversation cache TTLs, and upkeep that keeps an idle cache warm or compacts it before it expires. Requires Claude Code Mod function hooks enabled.",
   "author": {
@@ -117,6 +117,17 @@
       "title": "Price feed URL",
       "description": "A JSON price list for models Anthropic and models.dev don't price: {\"version\":1,\"models\":{\"alias\":{\"input\":1,\"read\":0.1,\"write\":1.25,\"output\":5}}}. Relative units are fine. Empty uses your gateway's /v1/cache/prices when it has one; off disables the feed.",
       "default": "",
+      "required": false
+    },
+    "reduced_motion": {
+      "type": "string",
+      "title": "Reduced motion",
+      "description": "on changes the cache bar's and dashboard's countdowns once a minute, in whole minutes, and shows soon in the last minute. off counts down every second.",
+      "options": [
+        "off",
+        "on"
+      ],
+      "default": "off",
       "required": false
     }
   }

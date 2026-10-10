@@ -26,7 +26,7 @@ Step-by-step guide with settings and troubleshooting: [INSTALL.md](INSTALL.md).
 /plugin install keepalive@agent-router-tools
 ```
 
-Run `/keepalive-settings` to choose the TTL each kind of conversation starts in, the upkeep the main conversation and split-pane teammates start in, the keepalive limits, and the compaction threshold. Each setting has its own row; a setting that also takes a typed value, such as an exact keepalive limit, has a boxed field at the end of its row, and Enter saves what you type.
+Run `/keepalive-settings` to choose the TTL each kind of conversation starts in, the upkeep the main conversation and split-pane teammates start in, the keepalive limits, the compaction threshold, and reduced motion. Each setting has its own row; a setting that also takes a typed value, such as an exact keepalive limit, has a boxed field at the end of its row, and Enter saves what you type.
 
 ## With Agent Router
 
@@ -69,7 +69,7 @@ The dial button shows the time left in quarters of the TTL: `●` for a cache ju
 The dashboard opens with the whole session at a glance:
 
 ```text
-Prompt cache · all agents                         ⬆ 0.4.6 available  Keepalive 0.4.5
+Prompt cache · all agents                         ⬆ 0.4.7 available  Keepalive 0.4.6
 Now      ██████████ 96% · last 10 requests
 Session  ▓▓▓▓▓▓▓▓▓░ 91% · 42 requests · read 3.1m · write 214k · new 1.2k
 ●●●●●●●●✕●●●◐●●··●●●●●●●●○●●●●●●●●●●●●●●●◆●●
@@ -190,6 +190,16 @@ Every colour is text or a mark on the terminal's own background; nothing is draw
 - Grades differ from each other, and markers from each other, by at least ΔE 15 (OKLab ×100) under normal vision and ΔE 8 under simulated protanopia, deuteranopia and tritanopia (Machado 2009). No marker comes within ΔE 15 of a grade.
 - Blue, yellow and red stay apart for every kind of colour vision, the reason good is blue rather than green. Shading repeats each grade, the dial repeats the time left, and words name each mode and miss.
 
+### Reduced motion
+
+The time left on the bar and in the dashboard counts down every second. Turn on **Reduced motion** in `/keepalive-settings` (`reduced_motion`, `off` unless you change it) to show it in whole minutes instead, changing once a minute, on the minute:
+
+```text
+[ ● ] ⬦ off TTL 5m ██████████ 96% · ◉ ETA ~4m · read 148.1k · write 5.7k · new 2
+```
+
+The last minute reads `ETA soon`, and a gateway's lifetime reads the same way (`✦ 7m`, then `✦ soon`). A minute ends on its boundary, so a cache just written with a 5m TTL already shows `~4m`. The dial, the countdown's colour and the dashboard's lifetime bars change with the text and never between: the colour is good from `~2m` up, fair at `~1m`, and poor at `soon`. The setting applies as soon as you save it. Upkeep keeps its own timing; only what is drawn changes.
+
 ## Cache upkeep
 
 The mode button next to the dial shows the current upkeep mode for the main conversation; click it, or focus it and press Enter, to switch to the next mode: `off` → `warm` → `compact` → `warmcomp` → `off`. A marker before the mode shows its colour: teal `⬥` for `warm`, violet `⬥` for `compact`, both for `warmcomp`, and a dim `⬦` for `off`, which sends nothing. The choice lasts for the session, including after a reload or `/clear`; a new session starts in the **Main conversation upkeep** chosen with `/keepalive-settings` (`cache_upkeep`, `off` unless you change it). Changing the setting leaves sessions already running in their current mode.
@@ -285,7 +295,7 @@ The [prompt-cache-control reference mod](https://github.com/davila7/claude-code-
 
 Once a day Keepalive checks whether the marketplace it was installed from offers a newer version. It reads Claude Code's own copy of that marketplace, and, unless `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is set, the marketplace's `marketplace.json` and Keepalive's `plugin.json` from its GitHub source, at the branch or tag the marketplace names. Nothing is sent but those two requests. A failed check is tried again an hour later, and a plugin loaded with `--plugin-dir` is never checked.
 
-A newer version shows as `⬆` on the cache bar, and as `⬆ 0.4.6 available` in the top right of the dashboard and of `/keepalive-settings`, beside the version you run. Press it for the commands that update Keepalive: `/plugin marketplace update agent-router-tools`, then `/plugin install keepalive@agent-router-tools` and `/reload-plugins`.
+A newer version shows as `⬆` on the cache bar, and as `⬆ 0.4.7 available` in the top right of the dashboard and of `/keepalive-settings`, beside the version you run. Press it for the commands that update Keepalive: `/plugin marketplace update agent-router-tools`, then `/plugin install keepalive@agent-router-tools` and `/reload-plugins`.
 
 ## Storage
 

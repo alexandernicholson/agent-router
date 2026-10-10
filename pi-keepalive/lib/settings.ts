@@ -1,5 +1,5 @@
 // Settings: defaults < settings.json in the data directory < PI_KEEPALIVE_* environment.
-import { fallbackTtl, parseTtlOverrides } from "./core/cache.js";
+import { fallbackTtl, parseTtlOverrides, type FallbackTtl } from "./core/cache.js";
 // The same knobs as the Claude plugin's userConfig (cache_ttl, cache_upkeep, keepalive_limit, compact_threshold).
 
 export const UPKEEP = ["off", "warm", "compact", "warmcomp"] as const;
@@ -34,14 +34,15 @@ export interface Settings {
   unreported_ttl: string;
   unreported_ttl_models: string;
   keepalive_price_url: string;
+  reduced_motion: string;
 }
 
-export const DEFAULT_SETTINGS: Settings = { ttl: "default", upkeep: "off", keepalive_limit: "default", compact_threshold: "100k", unreported_ttl: "off", unreported_ttl_models: "", keepalive_price_url: "" };
+export const DEFAULT_SETTINGS: Settings = { ttl: "default", upkeep: "off", keepalive_limit: "default", compact_threshold: "100k", unreported_ttl: "off", unreported_ttl_models: "", keepalive_price_url: "", reduced_motion: "off" };
 
 const ENV: Record<keyof Settings, string> = {
   ttl: "PI_KEEPALIVE_TTL", upkeep: "PI_KEEPALIVE_UPKEEP", keepalive_limit: "PI_KEEPALIVE_LIMIT",
   compact_threshold: "PI_KEEPALIVE_COMPACT_THRESHOLD", unreported_ttl: "PI_KEEPALIVE_UNREPORTED_TTL",
-  unreported_ttl_models: "PI_KEEPALIVE_UNREPORTED_TTL_MODELS", keepalive_price_url: "PI_KEEPALIVE_PRICE_URL",
+  unreported_ttl_models: "PI_KEEPALIVE_UNREPORTED_TTL_MODELS", keepalive_price_url: "PI_KEEPALIVE_PRICE_URL", reduced_motion: "PI_KEEPALIVE_REDUCED_MOTION",
 };
 
 export function mergeSettings(stored: unknown, env: Record<string, string | undefined>): Settings {
@@ -62,7 +63,9 @@ export interface Resolved {
   limit: number | undefined;
   compactAt: number;
   /** The client-side lifetime for models that report none and that no gateway serves one for. */
-  fallback: { ttl: ReturnType<typeof fallbackTtl>; models: string[][]; priceUrl: string };
+  fallback: { ttl: FallbackTtl | undefined; models: string[][]; priceUrl: string };
+  /** Reduced motion: countdowns change once a minute and read soon in the last one. */
+  reducedMotion: boolean;
 }
 
 export function resolveSettings(s: Settings): Resolved {
@@ -72,6 +75,7 @@ export function resolveSettings(s: Settings): Resolved {
     limit: keepaliveLimit(s.keepalive_limit),
     compactAt: compactThreshold(s.compact_threshold) ?? COMPACT_MIN_TOKENS,
     fallback: { ttl: fallbackTtl(s.unreported_ttl.trim().toLowerCase()), models: parseTtlOverrides(s.unreported_ttl_models), priceUrl: s.keepalive_price_url.trim() },
+    reducedMotion: s.reduced_motion.trim().toLowerCase() === "on",
   };
 }
 
@@ -84,4 +88,5 @@ export const SETTING_ROWS: [keyof Settings, string, string[]][] = [
   ["unreported_ttl", "Client TTL for models that report none", ["off", "5m", "15m", "30m", "45m", "1h"]],
   ["unreported_ttl_models", "Client TTL per model (e.g. kimi*=15m, glm-5.3=off; use /keepalive set)", []],
   ["keepalive_price_url", "Custom price URL (use /keepalive set)", []],
+  ["reduced_motion", "Reduced motion (countdowns change once a minute)", ["off", "on"]],
 ];

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.5
+
+- **Reduced motion.** `/keepalive set reduced_motion on`, or `PI_KEEPALIVE_REDUCED_MOTION=on`, shows the footer and dashboard countdowns in whole minutes, changing once a minute, with `soon` in the last one. Off by default.
+
 ## 0.3.4
 
 - **No upstream names shown.** The dashboard no longer says which provider or model a gateway routes to (`via …`); a served lifetime reads `✦ 8m · learned by the gateway · server controlled`.

@@ -55,6 +55,7 @@ stand. Elsewhere it returns nothing and the built-in behaviour is unchanged.
 | `PI_KEEPALIVE_UNREPORTED_TTL_MODELS` | | per-model client TTL, e.g. `kimi*=15m, glm-5.3=off` |
 | `PI_KEEPALIVE_PRICE_URL` | | custom price feed URL (`default` = gateway feed, `off` = none) |
 | `PI_KEEPALIVE_COMPACT_THRESHOLD` | 100k | tokens |
+| `PI_KEEPALIVE_REDUCED_MOTION` | off | `on`: countdowns in whole minutes, changing once a minute, `soon` in the last |
 | `PI_KEEPALIVE_TRANSPORT` | auto | `fetch` forces the HTTP replay path |
 
 ## How the hidden request is made

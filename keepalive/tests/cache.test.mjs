@@ -4,7 +4,8 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { cachePolicy, validSample, validPrices, cacheRows, cacheStatus, cacheBar, cacheClock, loopKey, applyCacheCreation, cacheGrade, cachePercent, lifeGrade, isKeepalive, keepaliveWorthwhile, keepalivesLeft, cacheDial, cacheBarParts, isCompaction,
-  recentUsage, recentMisses, sampleTtl, unreportedModels, sessionMatrix, sessionUsage, cacheGap, lifetimeOf, lifetimeLabel, lifetimeStatus, clientTtl, parseTtlOverrides, fallbackTtl, savingsWorthwhile, KEEPALIVE_PROMPT, SOURCE_ICONS, policyAction, policyRow, POLICY_TICK_MS, MISS_WINDOW_MS, TTL_REPORT_MS } from '../lib/cache.js';
+  recentUsage, recentMisses, sampleTtl, unreportedModels, sessionMatrix, sessionUsage, cacheGap, lifetimeOf, lifetimeLabel, lifetimeStatus, clientTtl, parseTtlOverrides, fallbackTtl, savingsWorthwhile, KEEPALIVE_PROMPT, SOURCE_ICONS, policyAction, policyRow, POLICY_TICK_MS, MISS_WINDOW_MS, TTL_REPORT_MS,
+  steadyStatus, timeLeft } from '../lib/cache.js';
 import { recordCacheSample, resetCache, cacheSnapshot, linkSession } from '../lib/cache-state.mjs';
 import { recordPath, writeRecord, routerData } from '../lib/state.mjs';
 import { handleRequest } from '../lib/bridge.mjs';
@@ -45,6 +46,30 @@ test('read ratio excludes output and countdown starts at dispatch, not response 
   assert.equal(cacheStatus(undefined, 1000).state, 'no observation');
   assert.equal(cacheClock(1), '0:01');
   assert.equal(cacheBar(0.8).length, 10);
+});
+
+test('reduced motion draws a countdown the same way for a whole minute, ending each minute on its boundary, and says soon in the last one', () => {
+  const reported = applyCacheCreation(sample(), { fiveMinute: 100, oneHour: 0 });
+  const plain = now => cacheStatus(cacheRows([reported])[0], now);
+  const drawn = now => {
+    const status = steadyStatus(plain(now), true);
+    return [timeLeft(status.leftMs, true), lifeGrade(status.leftMs), cacheDial(status), cacheBar(status.lifetimes[0].leftMs / 300000)].join(' ');
+  };
+  assert.equal(drawn(1000), '~4m good ● █████████░');
+  assert.equal(drawn(60999), drawn(1000));
+  assert.equal(drawn(61000), '~3m good ◕ ███████░░░');
+  assert.equal(drawn(180999), '~2m good ◑ █████░░░░░');
+  assert.equal(drawn(181000), '~1m fair ◑ ███░░░░░░░');
+  assert.equal(drawn(241000), 'soon poor ◔ █░░░░░░░░░');
+  assert.equal(drawn(300999), drawn(241000));
+  assert.equal(steadyStatus(plain(301000), true).leftMs, 0);
+  assert.equal(steadyStatus(cacheStatus(undefined, 1000), true).leftMs, null);
+  assert.equal(timeLeft(0, true), '~0:00');
+  assert.equal(timeLeft(291000), '~4:51');
+  assert.equal(timeLeft(3600000, true), '~59m');
+  assert.equal(lifetimeLabel({ source: 'default', left: 129, once: true, steady: true }), '◇ 2m · once');
+  assert.equal(lifetimeLabel({ source: 'default', left: 60, steady: true }), '◇ soon');
+  assert.equal(lifetimeLabel({ source: 'default', left: 0, steady: true }), '◇ expired');
 });
 
 test('nested and parallel loops sharing turn ids stay separate, duplicates count once', () => {
