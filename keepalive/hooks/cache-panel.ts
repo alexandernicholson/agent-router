@@ -87,6 +87,7 @@ type Context = {
   bridge: Bridge;
   sessionId: string;
   endpoint?: string;
+  asksPolicy: boolean;
   selfLabel?: string;
   env: Record<string, string | undefined>;
   upkeep: Upkeep;
@@ -120,7 +121,21 @@ type Context = {
   kinds: Map<string, 'subagent' | 'teammate'>;
   gate: ReturnType<typeof createTtlGate>;
   mainApplied: string | undefined;
+  revision: number;
+  shape: number;
+  rosterShape: string;
+  loops: Map<string, { samples: Map<string, CacheSample>; version: number; built?: { version: number; shape: number; row?: CacheRow } }>;
+  built?: { revision: number; rows: CacheRow[] };
+  unreported?: { rows: CacheRow[]; now: number; value: Set<string> };
 };
+
+const same = (a: unknown, b: unknown): boolean => {
+  if (a === b) return true;
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false;
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every(key => same((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key]));
+};
+const shapeOf = (roster: AgentInfo[]) => JSON.stringify(roster.map(agent => [agent.id, agent.name, agent.type, agent.teammateId]));
 
 export function createCachePanel() {
   let context: Context | undefined;
@@ -156,12 +171,37 @@ export function createCachePanel() {
     try {
       const result = await send(current, { action: 'cache-enrich', agent_id: agentId, transcript_path: source });
       if (context !== current || !Array.isArray(result.samples)) return;
-      for (const sample of result.samples) if (validSample(sample)) current.samples.set(sampleKey(sample), sample);
+      for (const sample of result.samples) if (validSample(sample)) remember(current, sample);
       if (result.samples.length) redraw(current);
     } catch {}
   }
 
   const send = (current: Context, request: Record<string, unknown>) => current.bridge({ ...request, session_id: current.sessionId });
+
+  function remember(current: Context, sample: CacheSample) {
+    const key = sampleKey(sample);
+    if (same(current.samples.get(key), sample)) return;
+    current.samples.set(key, sample);
+    const loop = loopKey(sample.sessionId, sample.agentId);
+    const samples = current.loops.get(loop) ?? { samples: new Map(), version: 0 };
+    samples.samples.set(key, sample);
+    samples.version++;
+    current.loops.set(loop, samples);
+    current.revision++;
+  }
+
+  function reshape(current: Context) {
+    current.shape++;
+    current.revision++;
+  }
+
+  function setRoster(current: Context, roster: AgentInfo[]) {
+    current.roster = roster;
+    const shape = shapeOf(roster);
+    if (shape === current.rosterShape) return;
+    current.rosterShape = shape;
+    reshape(current);
+  }
 
   function redraw(current: Context) {
     if (context !== current) return;
@@ -169,12 +209,19 @@ export function createCachePanel() {
   }
 
   function rows(current: Context): CacheRow[] {
+    if (current.built?.revision === current.revision) return current.built.rows;
     const labels = new Map(current.labels);
     if (current.selfLabel) labels.set(loopKey(current.sessionId, null), current.selfLabel);
     for (const agent of current.roster) {
       labels.set(loopKey(current.sessionId, agent.id), `${agent.name || agent.type} (${agent.id})`);
     }
-    const result = cacheRows([...current.samples.values()], current.resets, labels);
+    const result: CacheRow[] = [];
+    for (const loop of current.loops.values()) {
+      if (loop.built?.version !== loop.version || loop.built.shape !== current.shape) {
+        loop.built = { version: loop.version, shape: current.shape, row: cacheRows([...loop.samples.values()], current.resets, labels)[0] };
+      }
+      if (loop.built.row) result.push(loop.built.row);
+    }
     const linked = new Set(result.filter(row => row.sessionId !== current.sessionId && row.agentId === null).map(row => row.label));
     const placed = current.roster.filter(agent => !(isPaneTeammate(agent) && linked.has(labels.get(loopKey(current.sessionId, agent.id))!)));
     for (const agentId of [null, ...placed.map(agent => agent.id)]) {
@@ -183,11 +230,19 @@ export function createCachePanel() {
           samples: [], keepalives: [], totals: { requests: 0, read: 0, write: 0, fresh: 0, output: 0 } });
       }
     }
-    return result.sort((a, b) => {
+    result.sort((a, b) => {
       const mainA = a.sessionId === current.sessionId && a.agentId === null;
       const mainB = b.sessionId === current.sessionId && b.agentId === null;
       return Number(mainB) - Number(mainA) || a.label.localeCompare(b.label) || loopKey(a.sessionId, a.agentId).localeCompare(loopKey(b.sessionId, b.agentId));
     });
+    current.built = { revision: current.revision, rows: result };
+    return result;
+  }
+
+  function unreported(current: Context) {
+    const all = rows(current);
+    if (current.unreported?.rows !== all || current.unreported.now !== current.now) current.unreported = { rows: all, now: current.now, value: unreportedModels(all, current.now) };
+    return current.unreported.value;
   }
 
   const mainRow = (current: Context) => rows(current).find(row => row.sessionId === current.sessionId && row.agentId === null);
@@ -240,7 +295,7 @@ export function createCachePanel() {
 
   function state(current: Context, row: CacheRow): CacheStatus & { phase?: string } {
     const pending = current.pending.get(loopKey(row.sessionId, row.agentId));
-    const value = cacheStatus(row, current.now, pending?.startedAt, unreportedModels(rows(current), current.now));
+    const value = cacheStatus(row, current.now, pending?.startedAt, unreported(current));
     if (pending?.changed && row.last) {
       return { ...value, state: 'model changed · awaiting usage', leftMs: null, lifetimes: [], ttl: undefined };
     }
@@ -288,7 +343,7 @@ export function createCachePanel() {
   function lifetime(current: Context, row: CacheRow | undefined) {
     const governed = policyRow(row);
     // A base URL no policy can be asked of (none, Anthropic's own, unsafe) has no server opinion at all.
-    const rows = governed && policyUrl(current.endpoint, 'x') ? current.policy.peek(row!.last!.model, current.now) : [];
+    const rows = governed && current.asksPolicy ? current.policy.peek(row!.last!.model, current.now) : [];
     const served = rows ? pickRow(rows, governed ? row!.last!.read + row!.last!.write : 0) : undefined;
     // Without a base URL, or after a real 404 or empty answer, nobody has an opinion; while the gateway's answer is unknown or too old, nobody may substitute one.
     const client = governed && rows ? clientTtl(row!.last!.model, current.fallback.ttl, current.fallback.models) : null;
@@ -326,11 +381,12 @@ export function createCachePanel() {
         if (theme !== undefined) current.family = themeFamily(theme, current.env.COLORFGBG);
         await readPaneModes(current);
         if (!Array.isArray(snapshot.samples) || !Array.isArray(snapshot.resets) || !Array.isArray(snapshot.labels)) throw new Error('Invalid cache snapshot');
-        for (const sample of snapshot.samples) if (validSample(sample)) current.samples.set(sampleKey(sample), sample);
-        current.resets = snapshot.resets;
-        current.labels = new Map(snapshot.labels);
+        for (const sample of snapshot.samples) if (validSample(sample)) remember(current, sample);
+        if (!same(current.resets, snapshot.resets)) { current.resets = snapshot.resets; reshape(current); }
+        const labels = new Map<string, string>(snapshot.labels);
+        if (!same(Object.fromEntries(current.labels), Object.fromEntries(labels))) { current.labels = labels; reshape(current); }
         current.routes = snapshot.routes ?? null;
-        current.roster = roster;
+        setRoster(current, roster);
         current.now = now;
         current.available = true;
         await current.gate.refresh();
@@ -369,7 +425,7 @@ export function createCachePanel() {
     let agent = current.roster.find(item => item.id === agentId);
     if (!agent) {
       const roster = await current.host.agent.list().catch(() => undefined);
-      if (roster) { current.roster = roster; agent = roster.find(item => item.id === agentId); }
+      if (roster) { setRoster(current, roster); agent = roster.find(item => item.id === agentId); }
     }
     if (agent) current.kinds.set(agentId, isTeammate(agent) ? 'teammate' : 'subagent');
     await current.gate.refresh();
@@ -465,7 +521,7 @@ export function createCachePanel() {
     const [settings, auth] = await Promise.all([host.settings.read().catch(() => ({})), host.auth()]);
     const resolve = (scope: TtlScope) => resolveDefaultTtl({ scope, env: configuration.env, settings: settings as Record<string, unknown>, auth });
     const subagent = resolve('subagent');
-    const current: Context = { host, bridge, sessionId, endpoint, selfLabel, env: configuration.env, upkeep: saved ?? configuration.upkeep ?? 'off',
+    const current: Context = { host, bridge, sessionId, endpoint, asksPolicy: !!policyUrl(endpoint, 'x'), selfLabel, env: configuration.env, upkeep: saved ?? configuration.upkeep ?? 'off',
       limit: configuration.limit, compactAt: configuration.compactAt ?? COMPACT_MIN_TOKENS, reducedMotion: configuration.reducedMotion, family: themeFamily(undefined, configuration.env.COLORFGBG),
       samples: new Map(), resets: [], labels: new Map(), roster: [], routes: null, now: 0, pending: new Map(), requested: new Map(), rechecks: new Map(), fallback: configuration.fallback, policy: createPolicyClient({ fetch: (url, init) => host.http.fetch(url, init), headers: host.credentials, client: `keepalive/${VERSION}`, harness: 'claude_cli' }), reports: createReportClient({ fetch: (url, init) => host.http.fetch(url, init), headers: host.credentials, client: `keepalive/${VERSION}`, harness: 'claude_cli' }), prices: new Map(), available: true,
       defaults: { main: resolve('main'), subagent }, ttlDefaults: configuration.ttl,
@@ -474,7 +530,7 @@ export function createCachePanel() {
         { base: subagent.ttl, buildMs: TTL_BUILD_MS, sleep: ms => host.clock.sleep(ms),
           live: () => [null, ...current.roster.filter(agent => !isPaneTeammate(agent) && !['completed', 'failed', 'killed'].includes(agent.status)).map(agent => agent.id)]
             .map(agentId => ttlChoice(current, agentId).ttl) }),
-      mainApplied: configuration.env[TTL_ENV.main] };
+      mainApplied: configuration.env[TTL_ENV.main], revision: 0, shape: 0, rosterShape: shapeOf([]), loops: new Map() };
     context = current;
     selected = undefined;
     open = false;
@@ -525,10 +581,10 @@ export function createCachePanel() {
 
   async function observe(current: Context, sample: CacheSample, transcriptPath?: string) {
     if (!validSample(sample)) return;
-    if (!current.samples.has(sampleKey(sample))) current.samples.set(sampleKey(sample), sample);
+    if (!current.samples.has(sampleKey(sample))) remember(current, sample);
     try {
       const result = await send(current, { action: 'cache-sample', sample, transcript_path: transcriptPath });
-      if (context === current && validSample(result.sample)) current.samples.set(sampleKey(result.sample), result.sample);
+      if (context === current && validSample(result.sample)) remember(current, result.sample);
     }
     catch { current.available = false; current.host.ui.log('Keepalive: cache observation could not be saved.', { to: 'debug' }); }
   }
@@ -556,6 +612,7 @@ export function createCachePanel() {
   async function reset(current: Context, agentId: string | null, resetAt: number) {
     current.resets = current.resets.filter(r => r.sessionId !== current.sessionId || r.agentId !== agentId);
     current.resets.push({ sessionId: current.sessionId, agentId, resetAt });
+    reshape(current);
     try { await send(current, { action: 'cache-reset', agent_id: agentId, reset_at: resetAt }); }
     catch { current.available = false; }
     redraw(current);
@@ -677,7 +734,7 @@ export function createCachePanel() {
     if (!row || !sample || row.touchedAt === undefined || current.actedAt === row.touchedAt) return;
     const warms = current.upkeep === 'warm' || current.upkeep === 'warmcomp';
     if (warms && current.limit === undefined) await lookUpPrices(current, sample.model);
-    const status = cacheStatus(row, current.now, undefined, unreportedModels(rows(current), current.now));
+    const status = cacheStatus(row, current.now, undefined, unreported(current));
     if (!status.leftMs || status.leftMs > UPKEEP_MS) return;
     current.actedAt = row.touchedAt;
     if (warms && keepaliveWorthwhile(row, current.prices.get(sample.model)?.value, current.limit)) return warm(current, sample.model, 'native');
@@ -980,13 +1037,16 @@ export function createCachePanel() {
     const { Box, Button, Text } = elements;
     const nodes = tree(current);
     const chosen = nodes.find(node => loopKey(node.row.sessionId, node.row.agentId) === (selected ?? loopKey(current.sessionId, agentId)))?.row;
+    const visible = nodes.filter(shown);
+    const missed = missLine(current);
+    const icons = legend(current, visible);
     const notes: RenderElement[] = [
-      ...(missLine(current) ? [Text({ color: palette(current).fair, children: [missLine(current)!] })] : []),
+      ...(missed ? [Text({ color: palette(current).fair, children: [missed] })] : []),
       ...(current.available ? [] : [Text({ color: palette(current).fair, children: ['Storage unavailable · showing last known observations'] })]),
       labelled(elements, 'Upkeep', [Text({ dimColor: true, children: [upkeepText(current)] })]),
-      ...(legend(current, nodes.filter(shown)) ? [labelled(elements, 'Icons', [Text({ dimColor: true, children: [legend(current, nodes.filter(shown))] })])] : []),
+      ...(icons ? [labelled(elements, 'Icons', [Text({ dimColor: true, children: [icons] })])] : []),
     ];
-    const agents = nodes.filter(shown).map(node => {
+    const agents = visible.map(node => {
       const { row } = node;
       const key = loopKey(row.sessionId, row.agentId);
       const counts = row.totals;
@@ -1004,8 +1064,9 @@ export function createCachePanel() {
       const kind = node.kind === 'main' || node.kind === 'subagent' ? '' : ` · ${node.kind}`;
       const reason = row.sessionId === current.sessionId && !ownLifetime(current, row) ? ttlChoice(current, row.agentId).reason : '';
       const about = [row.last ? `${displayText(row.last.model, 160)}${node.kind === 'main' ? priceNote(current, row) : ''}` : 'No requests yet', reason].filter(Boolean).join(' · ');
+      const governed = lifetimeLine(current, row);
       const detail = [about, ...(counts.requests ? [`${plural(counts.requests, 'request')} · read ${cacheTokens(counts.read)} · write ${cacheTokens(counts.write)} · new ${cacheTokens(counts.fresh)} · out ${cacheTokens(counts.output)}`] : []),
-        ...(lifetimeLine(current, row) ? [lifetimeLine(current, row)!] : []), ...(upkeepLine ? [upkeepLine] : [])];
+        ...(governed ? [governed] : []), ...(upkeepLine ? [upkeepLine] : [])];
       return Box({ flexDirection: 'column', children: [
         Box({ flexDirection: 'row', children: [Text({ dimColor: true, children: [node.prefix] }),
           Button({ key: `cache-agent:${key}`, label: `${displayText(row.label, 120)}${kind}`, plain: true, onPress: () => { selected = key; historyScope = 'agent'; redraw(current); } })] }),
@@ -1015,7 +1076,7 @@ export function createCachePanel() {
         ...detail.map(text => Text({ dimColor: true, children: [`${indent}${text}`] })),
       ] });
     });
-    const scope = historyScope === 'all' ? nodes.filter(shown).map(node => node.row) : chosen ? [chosen] : [];
+    const scope = historyScope === 'all' ? visible.map(node => node.row) : chosen ? [chosen] : [];
     return Box({ flexDirection: 'column', gap: 1, children: [
       overview(elements, current, nodes.map(node => node.row), columns),
       Box({ flexDirection: 'column', children: notes }),

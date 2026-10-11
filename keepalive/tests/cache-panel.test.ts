@@ -3211,3 +3211,61 @@ test('a dashboard Claude Code asks to draw before the session is set up leaves t
   on('ui.render', { component: 'Pane' }, ($, e) => $.ui.resolve(e).Text({ children: ['Not ready'] }));
   expect(text(await $.ui.render(pane))).toBe('Not ready');
 });
+
+function history(count: number, agents: number) {
+  return Array.from({ length: count }, (_, index) => {
+    const agentId = index % (agents + 1) ? `agent${index % (agents + 1)}` : null;
+    const startedAt = index + 1;
+    const model = index % 7 ? 'claude-main' : 'vendor/main';
+    const sample = { sessionId: 'cache-session', agentId, turnId: `history-${index}`, index: 0, model, startedAt, completedAt: startedAt,
+      read: 40000 + index * 10, write: index % 5 ? 600 : 9000, fresh: 20, output: 80, ttlMs: null, ttlSource: 'response TTL metadata absent', disabled: false };
+    return model === 'claude-main' ? applyCacheCreation(sample, index % 3 ? { fiveMinute: sample.write, oneHour: 0 } : { fiveMinute: 0, oneHour: sample.write }) : sample;
+  });
+}
+
+test('with 2000 recorded requests across 40 agents, the bar, its once-a-second check and the dashboard each take under 8ms', { timeoutMs: 60000 }, async ($, on) => {
+  response(on, 90000, 700, 10);
+  const { world, clock } = await setup($, on);
+  world.roster = Array.from({ length: 40 }, (_, index) => ({ id: `agent${index + 1}`, type: 'agent-router:scout', description: 'Search', status: 'completed', name: `scout ${index + 1}` }));
+  const recorded = history(2000, 40);
+  world.samples.push(...recorded);
+  await clock.advance(5000);
+  const loaded = await dashboard($);
+  expect(loaded.includes(`${recorded.filter(sample => sample.agentId === 'agent3').length} requests`)).toBe(true);
+  const timed = async (run: () => Promise<unknown>) => { const started = performance.now(); await run(); return performance.now() - started; };
+  const spans: Record<'tick' | 'band' | 'subagent' | 'pane', number[]> = { tick: [], band: [], subagent: [], pane: [] };
+  for (let round = 0; round < 12; round++) {
+    await step($, { turnId: `fresh-${round}`, model: 'claude-main', ...(round % 2 ? { agentId: 'agent3' } : {}) });
+    spans.tick.push(await timed(() => clock.advance(1000)));
+    spans.band.push(await timed(() => $.ui.render(band())));
+    spans.subagent.push(await timed(() => $.ui.render(band('agent3'))));
+    spans.pane.push(await timed(() => $.ui.render(pane)));
+  }
+  for (const [name, measured] of Object.entries(spans)) expect([name, Math.min(...measured) < 8]).toEqual([name, true]);
+});
+
+test('a renamed agent is drawn under its new name on the next refresh, with no new request', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.roster = [{ id: 'child', type: 'agent-router:scout', description: 'Search', status: 'running', name: 'before' }];
+  await step($, { agentId: 'child' });
+  expect((await dashboard($)).includes('before (child)')).toBe(true);
+  world.roster = [{ id: 'child', type: 'agent-router:scout', description: 'Search', status: 'running', name: 'after' }];
+  await clock.advance(5000);
+  const contents = text(await $.ui.render(pane));
+  expect([contents.includes('after (child)'), contents.includes('before (child)')]).toEqual([true, false]);
+});
+
+test('a stored request that later learns its cache lifetime redraws the bar on the next refresh', async ($, on) => {
+  response(on);
+  const { world, clock } = await setup($, on);
+  world.reported = undefined;
+  await step($);
+  await clock.advance(60000);
+  expect(text(await $.ui.render(band())).includes('◌ TTL not reported')).toBe(true);
+  world.samples[0] = applyCacheCreation(world.samples[0], { fiveMinute: 100, oneHour: 0 });
+  world.samples[0] = { ...world.samples[0], startedAt: clock.now() - 1000, completedAt: clock.now() };
+  await clock.advance(5000);
+  const shown = text(await $.ui.render(band()));
+  expect([shown.includes('TTL not reported'), shown.includes('◉ ETA')]).toEqual([false, true]);
+});

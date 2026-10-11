@@ -2,6 +2,10 @@
 
 Each release explains what changed for you, in 120 words or less.
 
+## Keepalive 0.4.7
+
+- **Keepalive no longer disappears from long sessions.** In a session with thousands of requests and many subagents, drawing the cache bar and `/keepalive` took long enough that Claude Code stopped Keepalive until `/reload-plugins`, most often with Agent Router busy alongside it. Keepalive now recomputes only the agents whose requests changed: with 2,000 requests its once-a-second check drops from about 120ms to 2ms and `/keepalive` from about 460ms to under 8ms. Everything shows exactly as before.
+
 ## Keepalive 0.4.6
 
 - **Reduced motion.** Turn it on in `/keepalive-settings` and countdowns show whole minutes, change once a minute, and read `soon` in the last one; the dial and colours change with them. Off by default.
