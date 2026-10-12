@@ -308,6 +308,25 @@ local function requests(state: Dash, list: { common.Request }): Node
 	return with(ui.section(`Recent requests ({#rows})`, { with(ui.row(filters), { key = "filters" }), body }), { key = "requests" })
 end
 
+-- The bar as the status line draws it: one span per styled piece of pi-keepalive's `barSpans`, classed `ka-t ka-<tone>`
+-- (status.css colours them), `ka-join` for a piece that touches the previous one; then the last request's token counts,
+-- faint. A snapshot without spans (an older pi-keepalive) shows its plain text.
+local function styled_bar(bar: common.Bar, counts: string?): Node
+	local spans = bar.spans
+	if not spans or #spans == 0 then
+		return ui.text(ui.span(bar.text, "mono"))
+	end
+	local pieces: { Node } = {}
+	for _, span in spans do
+		table.insert(pieces, ui.el("span", { class = `ka-t ka-{span.tone}{if span.join then " ka-join" else ""}`, text = span.text }))
+	end
+	if counts then
+		table.insert(pieces, ui.el("span", { class = "ka-t ka-sep", text = "·" }))
+		table.insert(pieces, ui.el("span", { class = "ka-t ka-counts", text = counts }))
+	end
+	return ui.el("div", { class = "ka-bar" }, pieces)
+end
+
 local function dashboard_main(state: Dash): Node
 	local snap = state.snap
 	if not snap or not snap.bar or not snap.dashboard then
@@ -318,9 +337,11 @@ local function dashboard_main(state: Dash): Node
 	end
 	local bar = snap.bar :: common.Bar
 	local d = snap.dashboard :: common.Dashboard
+	local counts = string.match(bar.text, " · (read .*)$")
 	local controls: { Node } = { ui.text(ui.span("Upkeep", "muted")) }
 	for _, mode in common.UPKEEP do
-		table.insert(controls, chip(mode, `upkeep={mode}`, bar.upkeep == mode))
+		-- The current mode's chip takes that mode's colour (status.css), as its diamonds do.
+		table.insert(controls, with(chip(mode, `upkeep={mode}`, bar.upkeep == mode), { role = `keepalive.mode.{mode}` }))
 	end
 	if bar.ttl then
 		table.insert(controls, ui.text(ui.span("TTL", "muted")))
@@ -329,7 +350,7 @@ local function dashboard_main(state: Dash): Node
 	end
 	table.insert(controls, chip("Settings", "settings", false))
 	local main: { Node } = {
-		with(ui.text(ui.span(bar.text, "mono")), { key = "bar", tone = common.tone(bar.life) }),
+		with(styled_bar(bar, counts), { key = "bar" }),
 		with(ui.row(controls), { key = "controls" }),
 		rate("Now", d.recent),
 		rate("Session", d.session),
@@ -344,7 +365,8 @@ local function dashboard_main(state: Dash): Node
 	table.insert(main, ui.text(ui.span(`Upkeep: {d.upkeep}`, "muted")))
 	local lines: { Node } = {}
 	for i, line in d.main do
-		table.insert(lines, ui.text(ui.span(line, if i == 1 then "mono" else "muted")))
+		-- The card's first line is the bar again, without counts: drawn the same way as the bar above.
+		table.insert(lines, if i == 1 then styled_bar(bar, nil) else ui.text(ui.span(line, "muted")))
 	end
 	table.insert(main, with(ui.card("Main", lines), { key = "main" }))
 	table.insert(main, requests(state, d.requests))

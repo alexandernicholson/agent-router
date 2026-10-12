@@ -1,21 +1,25 @@
 /*
- * The prompt-cache bar in Tern's status line. The window half sends one segment per styled piece of the bar with a tone of
- * `ka <tone>` (pi-keepalive's barSpans), so these rules match `[data-tone~='<tone>']`. The palette is pi-keepalive's own
- * (lib/core/cache-colors.js: light, then dark), the one omp's footer bar uses, so a mode, grade or countdown reads the same
- * colour in both places.
+ * The prompt-cache bar, in Tern's status line and at the top of the Keepalive dashboard. Both draw the same pieces
+ * (pi-keepalive's barSpans): the status line as one segment per piece with a tone of `ka <tone>`, matched by
+ * `[data-tone~='<tone>']`; the dashboard as `span.ka-t.ka-<tone>` inside `div.ka-bar`. The palette is pi-keepalive's own
+ * (lib/core/cache-colors.js: light, then dark), the one omp's footer bar uses, so a mode, grade or countdown reads the
+ * same colour everywhere.
  */
 
-/*
- * Tern spaces status segments 0.87em apart. Pieces of the bar sit a mono space (0.6em) apart instead, pieces that touch in
- * the footer bar touch here (the two mode diamonds, the halves of the hit-rate bar), and the dial keeps Tern's own gap
- * from what precedes the bar, plus a little.
- */
-#statusline .sl-plugin[data-plugin='keepalive'] {
+:root {
 	--ka-warm: light-dark(#0b8a6c, #12efc6);
 	--ka-compact: light-dark(#5d05a4, #8a74ff);
 	--ka-good: light-dark(#0268d0, #19affe);
 	--ka-fair: light-dark(#9d580c, #fadf27);
 	--ka-poor: light-dark(#7a0d3f, #fe626c);
+}
+
+/*
+ * Status line spacing. Tern spaces status segments 0.87em apart. Pieces of the bar sit a mono space (0.6em) apart instead,
+ * pieces that touch in the footer bar touch here (the two mode diamonds, the halves of the hit-rate bar), and the dial
+ * keeps Tern's own gap from what precedes the bar, plus a little.
+ */
+#statusline .sl-plugin[data-plugin='keepalive'] {
 	margin-left: -0.27em;
 	padding: 0;
 	border-radius: 0;
@@ -38,33 +42,59 @@
 	background: none;
 }
 
+/* Dashboard spacing and weight: the status line's, a mono space between pieces, none where they touch. */
+.ka-bar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	font-family: var(--mono, ui-monospace, monospace);
+	font-variant-numeric: tabular-nums;
+	font-weight: 400;
+	color: var(--t3);
+	white-space: pre;
+}
+
+.ka-bar .ka-t + .ka-t {
+	margin-left: 0.6em;
+}
+
+.ka-bar .ka-t.ka-join {
+	margin-left: 0;
+}
+
 /* The dial leads, toned by how much of the cache lifetime is left. */
-#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='life-good'] { color: var(--ka-good); }
-#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='life-fair'] { color: var(--ka-fair); }
-#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='life-poor'] { color: var(--ka-poor); }
-#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='life-none'] { color: var(--t4); }
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='life-good'], .ka-bar .ka-life-good { color: var(--ka-good); }
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='life-fair'], .ka-bar .ka-life-fair { color: var(--ka-fair); }
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='life-poor'], .ka-bar .ka-life-poor { color: var(--ka-poor); }
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='life-none'], .ka-bar .ka-life-none { color: var(--t4); }
 
 /* Mode diamonds: teal for warming, violet for compacting, a hollow faint one when upkeep is off. */
-#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='warm'] { color: var(--ka-warm); }
-#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='compact'] { color: var(--ka-compact); }
-#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='dim'] { color: var(--t4); }
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='warm'], .ka-bar .ka-warm { color: var(--ka-warm); }
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='compact'], .ka-bar .ka-compact { color: var(--ka-compact); }
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='dim'], .ka-bar .ka-dim { color: var(--t4); }
 
 /* The mode name follows its diamond. warmcomp already shows both diamonds, and a mix of the two would read as the blue of a
    good grade, so its name is plain strong text. */
-#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='mode-off'] { color: var(--t4); }
-#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='mode-warm'] { color: var(--ka-warm); font-weight: 600; }
-#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='mode-compact'] { color: var(--ka-compact); font-weight: 600; }
-#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='mode-warmcomp'] { color: var(--t1); font-weight: 600; }
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='mode-off'], .ka-bar .ka-mode-off { color: var(--t4); }
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='mode-warm'], .ka-bar .ka-mode-warm { color: var(--ka-warm); font-weight: 600; }
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='mode-compact'], .ka-bar .ka-mode-compact { color: var(--ka-compact); font-weight: 600; }
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='mode-warmcomp'], .ka-bar .ka-mode-warmcomp { color: var(--t1); font-weight: 600; }
 
 /* TTL: a faint label, a stronger value. */
-#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='label'] { color: var(--t4); }
-#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='value'] { color: var(--t2); font-weight: 600; }
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='label'], .ka-bar .ka-label { color: var(--t4); }
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='value'], .ka-bar .ka-value { color: var(--t2); font-weight: 600; }
 
 /* Hit-rate bar and percentage, misses, countdowns: by grade. */
-#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='good'] { color: var(--ka-good); }
-#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='fair'] { color: var(--ka-fair); }
-#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='poor'] { color: var(--ka-poor); }
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='good'], .ka-bar .ka-good { color: var(--ka-good); }
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='fair'], .ka-bar .ka-fair { color: var(--ka-fair); }
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='poor'], .ka-bar .ka-poor { color: var(--ka-poor); }
 
-/* Keepalives left, and separators that recede. */
-#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='note'] { color: var(--t2); }
-#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='sep'] { color: var(--t4); }
+/* Keepalives left, token counts (dashboard only) and separators that recede. */
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='note'], .ka-bar .ka-note { color: var(--t2); }
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='sep'], .ka-bar .ka-sep { color: var(--t4); }
+.ka-bar .ka-counts { color: var(--t3); }
+
+/* The dashboard's mode chips: the current mode's chip in that mode's colour, as its diamonds. */
+.sf-main[data-surface='plugin.keepalive.dashboard'] [data-role='keepalive.mode.warm'][data-tone='accent'] { --tc: var(--ka-warm); }
+.sf-main[data-surface='plugin.keepalive.dashboard'] [data-role='keepalive.mode.compact'][data-tone='accent'] { --tc: var(--ka-compact); }
+.sf-main[data-surface='plugin.keepalive.dashboard'] [data-role='keepalive.mode.warmcomp'][data-tone='accent'] { --tc: var(--ka-compact); }
