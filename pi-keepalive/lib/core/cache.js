@@ -170,6 +170,8 @@ export function cacheRows(samples, resets = [], labels = new Map()) {
     if (!isKeepalive(s)) s.miss = missOf(s, row.last, row.touchedAt, row.creation);
     if (s.read + s.write > 0) row.touchedAt = s.startedAt;
     if (isKeepalive(s)) { row.keepalives.push(s); continue; }
+    // Another model's cache writes say nothing about this model's prefix, whose lifetime starts unknown.
+    if (row.last && !sameModel(row.last.model, s.model)) row.creation = undefined;
     row.last = s;
     row.recent = [...row.recent, s].slice(-RATE_REQUESTS);
     row.keepalives = [];

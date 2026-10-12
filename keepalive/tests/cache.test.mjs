@@ -48,6 +48,17 @@ test('read ratio excludes output and countdown starts at dispatch, not response 
   assert.equal(cacheBar(0.8).length, 10);
 });
 
+test('a reported lifetime belongs to its model: after a switch to a model that reports none, the row has no lifetime until it writes', () => {
+  const claude = applyCacheCreation(sample({ model: 'claude-opus-5' }), { fiveMinute: 100, oneHour: 0 });
+  const other = sample({ turnId: 'next', startedAt: 2000, model: 'gpt-6-luna', read: 6000, write: 0, fresh: 500 });
+  const row = cacheRows([claude, other])[0];
+  assert.equal(row.creation, undefined);
+  assert.equal(policyRow(row), true, 'the new model is governed by a served or client lifetime, not the old write');
+  assert.equal(cacheStatus(row, 3000).state, 'TTL not reported');
+  const same = cacheRows([claude, sample({ turnId: 'next', startedAt: 2000, model: 'claude-opus-5', write: 0 })])[0];
+  assert.deepEqual(same.creation, { fiveMinute: 100, oneHour: 0 }, 'the same model keeps its reported lifetime');
+});
+
 test('reduced motion draws a countdown the same way for a whole minute, ending each minute on its boundary, and says soon in the last one', () => {
   const reported = applyCacheCreation(sample(), { fiveMinute: 100, oneHour: 0 });
   const plain = now => cacheStatus(cacheRows([reported])[0], now);
