@@ -249,15 +249,42 @@ local function load(state: Dash): boolean
 	return true
 end
 
-local function rate(label: string, r: common.Rate?): Node
-	if not r or r.percent == nil then
-		return ui.meter(0, { ui.span(label, "strong"), ui.span(" n/a", "muted") })
+-- Spacing scale for the dashboard: sections LG apart, lines within a section SM apart, items within a line MD apart, a
+-- label and its own chips XS apart. Every section starts at the same left edge; nothing is indented.
+local LG, MD, SM, XS = "lg", "md", "sm", "xs"
+local LABEL_W = "9ch" -- the width of a row label (Upkeep, Session), so the controls and bars after it line up
+
+local function label(text: string): Node
+	return ui.node("text", { spans = { ui.span(text, "muted") }, min = { w = LABEL_W } })
+end
+
+-- A section: a heading over a hairline (status.css `.ka-head`), then its lines.
+local function section(key: string, title: string, lines: { Node }): Node
+	local body: { Node } = { ui.el("div", { class = "ka-head", text = title }) }
+	for _, line in lines do
+		table.insert(body, line)
 	end
-	local detail = `{r.percent}% over {r.requests} request{if r.requests == 1 then "" else "s"}`
-	if r.read then
-		detail ..= ` · read {common.tokens(r.read)} · write {common.tokens(r.write or 0)} · new {common.tokens(r.fresh or 0)}`
+	return ui.node("col", { key = key, gap = SM }, body)
+end
+
+-- One hit-rate line: label, rate, a fixed-width bar (status.css `.ka-meter`), then what it covers. Labels, rates and bars
+-- have fixed widths, so the Now and Session bars start and end in the same place whatever their details say.
+local function rate(name: string, r: common.Rate?): Node
+	local known = r ~= nil and r.percent ~= nil
+	local percent = if r and r.percent then r.percent else 0
+	local detail = "no requests yet"
+	if r and known then
+		detail = `over {r.requests} request{if r.requests == 1 then "" else "s"}`
+		if r.read then
+			detail ..= ` · read {common.tokens(r.read)} · write {common.tokens(r.write or 0)} · new {common.tokens(r.fresh or 0)}`
+		end
 	end
-	return with(ui.meter(r.percent / 100, { ui.span(label .. " ", "strong"), ui.span(detail, "muted") }), { key = label, tone = common.tone(r.grade) })
+	return ui.node("row", { key = name, gap = MD }, {
+		label(name),
+		ui.node("text", { spans = { ui.span(if known then `{percent}%` else "n/a", if known then "strong" else "muted") }, min = { w = "5ch" } }),
+		ui.el("div", { class = "ka-meter" }, { ui.node("meter", { value = percent / 100, tone = if r and known then common.tone(r.grade) else "muted" }) }),
+		ui.node("text", { spans = { ui.span(detail, "muted") } }),
+	})
 end
 
 local function matrix(cells: { { glyph: string, tone: string } }): Node
@@ -305,7 +332,10 @@ local function requests(state: Dash, list: { common.Request }): Node
 		end
 	end
 	local body = if #rows > 0 then ui.table(REQUEST_COLS, rows) else ui.text(ui.span("No requests match this filter.", "muted"))
-	return with(ui.section(`Recent requests ({#rows})`, { with(ui.row(filters), { key = "filters" }), body }), { key = "requests" })
+	return section("requests", `Recent requests · {#rows}`, {
+		ui.node("row", { key = "filters", gap = MD }, { label("Show"), ui.node("row", { gap = XS }, filters) }),
+		body,
+	})
 end
 
 -- The bar as the status line draws it: one span per styled piece of pi-keepalive's `barSpans`, classed `ka-t ka-<tone>`
@@ -333,45 +363,57 @@ local function dashboard_main(state: Dash): Node
 		local why = if snap and not snap.enabled then "Keepalive is off in this session (/keepalive on)."
 			elseif state.pane then `No omp session with pi-keepalive is publishing for pane {state.pane}.`
 			else "No omp session with pi-keepalive is publishing in Tern."
-		return ui.col({ ui.text(ui.span(why, "muted")), chip("Settings", "settings", false) })
+		return ui.node("col", { gap = MD }, { ui.text(ui.span(why, "muted")), ui.node("row", {}, { chip("Settings", "settings", false) }) })
 	end
 	local bar = snap.bar :: common.Bar
 	local d = snap.dashboard :: common.Dashboard
 	local counts = string.match(bar.text, " · (read .*)$")
-	local controls: { Node } = { ui.text(ui.span("Upkeep", "muted")) }
+
+	-- Controls: the mode chips, then the TTL chips, then Settings pushed to the far right.
+	local modes: { Node } = {}
 	for _, mode in common.UPKEEP do
 		-- The current mode's chip takes that mode's colour (status.css), as its diamonds do.
-		table.insert(controls, with(chip(mode, `upkeep={mode}`, bar.upkeep == mode), { role = `keepalive.mode.{mode}` }))
+		table.insert(modes, with(chip(mode, `upkeep={mode}`, bar.upkeep == mode), { role = `keepalive.mode.{mode}` }))
 	end
+	local controls: { Node } = { label("Upkeep"), ui.node("row", { gap = XS }, modes) }
 	if bar.ttl then
-		table.insert(controls, ui.text(ui.span("TTL", "muted")))
-		table.insert(controls, chip("5m", "ttl=5m", bar.ttl == "5m"))
-		table.insert(controls, chip("1h", "ttl=1h", bar.ttl == "1h"))
+		table.insert(controls, ui.node("text", { spans = { ui.span("TTL", "muted") } }))
+		table.insert(controls, ui.node("row", { gap = XS }, { chip("5m", "ttl=5m", bar.ttl == "5m"), chip("1h", "ttl=1h", bar.ttl == "1h") }))
 	end
+	table.insert(controls, ui.node("row", { grow = 1 }))
 	table.insert(controls, chip("Settings", "settings", false))
-	local main: { Node } = {
+
+	-- Overview: the bar as in the status line, then its controls.
+	local overview = ui.node("col", { key = "overview", gap = MD }, {
 		with(styled_bar(bar, counts), { key = "bar" }),
-		with(ui.row(controls), { key = "controls" }),
-		rate("Now", d.recent),
-		rate("Session", d.session),
-		with(matrix(d.cells), { key = "matrix" }),
-	}
+		ui.node("row", { key = "controls", gap = MD }, controls),
+	})
+
+	-- Hit rate: now and over the session, one dot per request, recent misses.
+	local hits: { Node } = { rate("Now", d.recent), rate("Session", d.session), with(matrix(d.cells), { key = "matrix" }) }
 	if d.misses then
-		table.insert(main, ui.text(ui.span(d.misses, "warning")))
+		table.insert(hits, ui.text(ui.span(d.misses, "warning")))
 	end
+
+	-- Cache: the conversation's lifetime, upkeep and totals. Its first line repeats the bar above and is left out.
+	local cache: { Node } = {}
 	if not bar.available then
-		table.insert(main, ui.text(ui.span("Storage unavailable · showing last known observations", "warning")))
+		table.insert(cache, ui.text(ui.span("Storage unavailable · showing last known observations", "warning")))
 	end
-	table.insert(main, ui.text(ui.span(`Upkeep: {d.upkeep}`, "muted")))
-	local lines: { Node } = {}
 	for i, line in d.main do
-		-- The card's first line is the bar again, without counts: drawn the same way as the bar above.
-		table.insert(lines, if i == 1 then styled_bar(bar, nil) else ui.text(ui.span(line, "muted")))
+		if i > 1 then
+			table.insert(cache, ui.text(ui.span(line, "muted")))
+		end
 	end
-	table.insert(main, with(ui.card("Main", lines), { key = "main" }))
-	table.insert(main, requests(state, d.requests))
-	table.insert(main, ui.text(ui.span(d.legend, "dim")))
-	return ui.col(main)
+	table.insert(cache, ui.text(ui.span(`Upkeep: {d.upkeep}`, "muted")))
+
+	return ui.node("col", { gap = LG }, {
+		overview,
+		section("hits", "Hit rate", hits),
+		section("cache", "Cache", cache),
+		requests(state, d.requests),
+		with(ui.text(ui.span(d.legend, "dim")), { key = "legend" }),
+	})
 end
 
 tern.block.define("dashboard", {

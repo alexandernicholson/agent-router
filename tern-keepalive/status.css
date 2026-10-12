@@ -62,6 +62,24 @@
 	margin-left: 0;
 }
 
+/* Dashboard section headings: left-aligned with the content, over a hairline. */
+.ka-head {
+	padding-bottom: 4px;
+	border-bottom: 1px solid var(--l2);
+	color: var(--t2);
+	font-weight: 600;
+}
+
+/* Hit-rate bars: one fixed width, so the Now and Session bars line up. */
+.ka-meter {
+	flex: 0 0 auto;
+	width: 260px;
+}
+
+.ka-meter > .sf-meter {
+	width: 100%;
+}
+
 /* The dial leads, toned by how much of the cache lifetime is left. */
 #statusline .sl-plugin[data-plugin='keepalive'][data-tone~='life-good'], .ka-bar .ka-life-good { color: var(--ka-good); }
 #statusline .sl-plugin[data-plugin='keepalive'][data-tone~='life-fair'], .ka-bar .ka-life-fair { color: var(--ka-fair); }
