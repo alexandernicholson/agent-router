@@ -59,6 +59,20 @@ test('a reported lifetime belongs to its model: after a switch to a model that r
   assert.deepEqual(same.creation, { fiveMinute: 100, oneHour: 0 }, 'the same model keeps its reported lifetime');
 });
 
+test('a keepalive that rewrote the prefix at another TTL sets the lifetime and restarts the keepalive count; a small or early one does not', () => {
+  const real = applyCacheCreation(sample({ model: 'claude-opus-5', read: 800, write: 100 }), { fiveMinute: 100, oneHour: 0 });
+  const keepalive = (startedAt, write, creation) => applyCacheCreation(sample({ turnId: `keepalive:${startedAt}`, startedAt, model: 'claude-opus-5', read: 900 - write, write }), creation);
+  const rewrite = keepalive(5000, 900, { fiveMinute: 0, oneHour: 900 });
+  const row = cacheRows([real, rewrite])[0];
+  assert.deepEqual(row.creation, { fiveMinute: 0, oneHour: 900 });
+  assert.deepEqual([row.keepalives.length, row.touchedAt], [0, 5000]);
+  assert.equal(cacheStatus(row, 65000).leftMs, 3540000, 'an hour from the rewrite');
+  const small = cacheRows([real, keepalive(5000, 10, { fiveMinute: 10, oneHour: 0 })])[0];
+  assert.deepEqual([small.creation, small.keepalives.length], [{ fiveMinute: 100, oneHour: 0 }, 1], 'a keepalive that wrote a little renews the old lifetime');
+  const early = cacheRows([keepalive(500, 900, { fiveMinute: 0, oneHour: 900 })])[0];
+  assert.deepEqual([early.creation, early.keepalives.length], [undefined, 1], 'with no real request yet there is no prefix to rewrite');
+});
+
 test('reduced motion draws a countdown the same way for a whole minute, ending each minute on its boundary, and says soon in the last one', () => {
   const reported = applyCacheCreation(sample(), { fiveMinute: 100, oneHour: 0 });
   const plain = now => cacheStatus(cacheRows([reported])[0], now);

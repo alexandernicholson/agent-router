@@ -169,7 +169,13 @@ export function cacheRows(samples, resets = [], labels = new Map()) {
     if (isCompaction(s)) { row.compaction = s; continue; }
     if (!isKeepalive(s)) s.miss = missOf(s, row.last, row.touchedAt, row.creation);
     if (s.read + s.write > 0) row.touchedAt = s.startedAt;
-    if (isKeepalive(s)) { row.keepalives.push(s); continue; }
+    if (isKeepalive(s)) {
+      // A keepalive that rewrote the prefix (sent with another TTL than the cache was written with, after the user changed
+      // it) set a new lifetime: the cache now lives as long as that write says, and the keepalive economics start again.
+      if (s.cacheCreation && row.last && s.write * 2 >= row.last.read + row.last.write) { row.creation = s.cacheCreation; row.keepalives = []; continue; }
+      row.keepalives.push(s);
+      continue;
+    }
     // Another model's cache writes say nothing about this model's prefix, whose lifetime starts unknown.
     if (row.last && !sameModel(row.last.model, s.model)) row.creation = undefined;
     row.last = s;

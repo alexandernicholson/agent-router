@@ -656,9 +656,12 @@ export function createCachePanel() {
     if (usage.cache_read_input_tokens + usage.cache_creation_input_tokens + usage.input_tokens === 0) return;
     const completedAt = await current.host.clock.now();
     report(current, 'keepalive', model, source, startedAt, completedAt, { read: usage.cache_read_input_tokens, write: usage.cache_creation_input_tokens, fresh: usage.input_tokens, output: usage.output_tokens });
-    await observe(current, { sessionId: current.sessionId, agentId: null, turnId: `keepalive:${startedAt}`, index: 0, model, startedAt,
+    // The provider's lifetime split, so a keepalive sent at a newly chosen TTL (a rewrite) sets the countdown to it.
+    const sample = { sessionId: current.sessionId, agentId: null, turnId: `keepalive:${startedAt}`, index: 0, model, startedAt,
       completedAt, read: usage.cache_read_input_tokens, write: usage.cache_creation_input_tokens,
-      fresh: usage.input_tokens, output: usage.output_tokens, ...cachePolicy(current.env, model), requested: ttlChoice(current, null).ttl });
+      fresh: usage.input_tokens, output: usage.output_tokens, ...cachePolicy(current.env, model), requested: ttlChoice(current, null).ttl };
+    const creation = reportedCacheCreation(usage);
+    await observe(current, creation ? applyCacheCreation(sample, creation) : sample);
     current.now = await current.host.clock.now();
     redraw(current);
   }

@@ -2,6 +2,10 @@
 
 Each release explains what changed for you, in 120 words or less.
 
+## Keepalive 0.4.9
+
+- **A TTL switched between messages now takes hold at the next keepalive.** Changing 5m to 1h without sending a message sent the keepalive at 1h, which rewrote the cache for an hour, but the bar kept counting down the old 5 minutes and the keepalive economics counted the rewrite as one very expensive keepalive, so warming stopped and the bar showed the cache expiring. A keepalive that rewrites the cache now sets its lifetime: the bar counts down the hour, and warming starts afresh.
+
 ## Keepalive 0.4.8
 
 - **A model switch no longer borrows the old model's TTL.** When a conversation moved to a model that reports no cache lifetime, the cache bar kept counting down the previous model's 5m or 1h. It now shows that the new model's lifetime is unknown until it reports one.

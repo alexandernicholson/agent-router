@@ -1044,6 +1044,24 @@ test('an infinite keepalive limit warms until the next request, and warmcomp nev
   expect(contents.includes('never compacts')).toBe(true);
 });
 
+test('a keepalive that rewrote the cache at 1h (the TTL was switched) counts down an hour, not the old 5 minutes', { options: { keepalive_limit: 'infinite' } }, async ($, on) => {
+  response(on, 120000, 1000, 100);
+  const { world, clock } = await setup($, on);
+  world.reported = { fiveMinute: 1000, oneHour: 0 };
+  world.forkUsage = { input_tokens: 10, output_tokens: 2, cache_read_input_tokens: 0, cache_creation_input_tokens: 121000,
+    cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 121000 } };
+  await cycleTo($, 'warm');
+  await step($);
+  await clock.advance(272000);
+  expect(world.forks.length).toBe(1);
+  world.forkUsage = { input_tokens: 10, output_tokens: 2, cache_read_input_tokens: 121000, cache_creation_input_tokens: 0 };
+  await clock.advance(272000);
+  expect(world.forks.length).toBe(1);
+  expect(text(await $.ui.render(band()))).toMatch(/ETA ~5\d:\d\d/);
+  await clock.advance(3600000 - 272000 - 31000);
+  expect(world.forks.length).toBe(2);
+});
+
 const worker = { agentId: 'worker@team', agentName: 'worker', parentSessionId: 'lead-session' };
 
 test('split-pane teammates warm up to their own keepalive limit, and the main conversation up to its own', { options: { keepalive_limit: '1', teammate_keepalive_limit: '2' } }, async ($, on) => {
