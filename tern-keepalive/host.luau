@@ -305,15 +305,46 @@ end
 
 local REQUEST_COLS: { Col } = {
 	{ id = "request", head = "Request", priority = 3 },
-	{ id = "hit", head = "Hit", priority = 4, grow = 1 },
+	{ id = "time", head = "Time", priority = 2 },
+	{ id = "hit", head = "Hit", priority = 4 },
 	{ id = "ttl", head = "TTL", priority = 2 },
 	{ id = "miss", head = "Miss", priority = 2 },
 	{ id = "read", head = "Read", align = "end", priority = 3 },
 	{ id = "write", head = "Write", align = "end", priority = 3 },
 	{ id = "new", head = "New", align = "end", priority = 1 },
 	{ id = "out", head = "Out", align = "end", priority = 0 },
-	{ id = "model", head = "Model", priority = 0, truncate = "middle" },
+	{ id = "model", head = "Model", priority = 0, grow = 1, truncate = "middle" },
 }
+
+local HIT_WIDTH = 6 -- cells of a request's hit-rate bar, as in pi-keepalive's request list
+local FILLS = { good = "█", fair = "▓", poor = "▒" }
+
+-- The span style for a grade, in the mono face. Span tokens are Tern's own, so a grade takes the nearest one (good info,
+-- fair warning, poor error) and status.css recolours mono spans of those tokens in this table to pi-keepalive's palette.
+local GRADE_TOKENS = { good = "info", fair = "warning", poor = "error" }
+local function graded(grade: string?): string
+	return `mono {GRADE_TOKENS[grade or ""] or "muted"}`
+end
+
+-- When the request started, to the hundredth of a second in local time: 2026-10-13 09:41:07.25.
+local function stamp(ms: number): string
+	local seconds = ms // 1000
+	return `{os.date("%Y-%m-%d %H:%M:%S", seconds)}.{string.format("%02d", (ms % 1000) // 10)}`
+end
+
+-- The hit rate as the footer bar draws it: a short bar filled by grade, then the percentage, in one cell.
+local function hit_cell(r: common.Request): Cell
+	if r.percent == nil then
+		return ui.span("–", "muted")
+	end
+	local fill = math.floor(r.percent / 100 * HIT_WIDTH + 0.5)
+	local style = graded(r.grade)
+	return {
+		ui.span(string.rep(FILLS[r.grade or ""] or "█", fill), style),
+		ui.span(string.rep("░", HIT_WIDTH - fill), "mono dim"),
+		ui.span(string.format(" %3d%%", r.percent), style),
+	}
+end
 
 local function requests(state: Dash, list: { common.Request }): Node
 	local filters: { Node } = {}
@@ -328,14 +359,13 @@ local function requests(state: Dash, list: { common.Request }): Node
 			-- As in the Claude Code dashboard: a faint `↕` row between two requests with the time from the older one's start
 			-- to the newer one's, counted between the requests this filter shows.
 			if previous then
-				local gap: { Cell } = { ui.span(`↕ {common.gap(previous.startedAt - r.startedAt)}`, "dim"), "", "", "", "", "", "", "", "" }
+				local gap: { Cell } = { ui.span(`↕ {common.gap(previous.startedAt - r.startedAt)}`, "dim"), "", "", "", "", "", "", "", "", "" }
 				table.insert(rows, gap)
 			end
 			previous = r
 			shown += 1
-			local hit: Cell = if r.percent then { meter = { value = r.percent / 100, tone = common.tone(r.grade) } } else ui.span("–", "muted")
 			local row: { Cell } = {
-				ui.span(r.name, if r.kind == "real" then "mono" else "muted"), hit, r.ttl or "–", ui.span(r.miss or "", "warning"),
+				ui.span(r.name, if r.kind == "real" then "mono" else "muted"), ui.span(stamp(r.startedAt), graded(r.grade)), hit_cell(r), r.ttl or "–", ui.span(r.miss or "", "warning"),
 				common.tokens(r.read), common.tokens(r.write), common.tokens(r.fresh), common.tokens(r.output), ui.span(r.model, "muted"),
 			}
 			table.insert(rows, row)

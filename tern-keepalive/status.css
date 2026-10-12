@@ -116,3 +116,9 @@
 .sf-main[data-surface='plugin.keepalive.dashboard'] [data-role='keepalive.mode.warm'][data-tone='accent'] { --tc: var(--ka-warm); }
 .sf-main[data-surface='plugin.keepalive.dashboard'] [data-role='keepalive.mode.compact'][data-tone='accent'] { --tc: var(--ka-compact); }
 .sf-main[data-surface='plugin.keepalive.dashboard'] [data-role='keepalive.mode.warmcomp'][data-tone='accent'] { --tc: var(--ka-compact); }
+
+/* The request list's time and hit-rate cells, coloured by grade like the bar. They are mono spans with the grade's
+   nearest Tern token (host.luau `graded`); the miss column's plain warning text is left alone. */
+.sf-main[data-surface='plugin.keepalive.dashboard'] .sf-tbl-c .sf-t-mono.sf-t-info { color: var(--ka-good); }
+.sf-main[data-surface='plugin.keepalive.dashboard'] .sf-tbl-c .sf-t-mono.sf-t-warning { color: var(--ka-fair); }
+.sf-main[data-surface='plugin.keepalive.dashboard'] .sf-tbl-c .sf-t-mono.sf-t-error { color: var(--ka-poor); }
