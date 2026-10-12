@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { COMPACT_MIN_TOKENS, DEFAULT_SETTINGS, SETTING_ROWS, compactThreshold, keepaliveLimit, mergeSettings, resolveSettings, ttlOption, upkeepMode } from "../lib/settings.ts";
-import { applyTtl, buildKeepalivePayload, endpointFor, replayApi, requestedTtl, usageFromBody, usageFromSse } from "../lib/replay.ts";
+import { anthropicBetas, applyTtl, buildKeepalivePayload, endpointFor, replayApi, requestedTtl, usageFromBody, usageFromSse } from "../lib/replay.ts";
 import { KEEPALIVE_PROMPT, VERSION, keepalivePrompt } from "../lib/version.ts";
 import { createStore, dataRoot, readJson, writeJson, trace } from "../lib/storage.ts";
 import { tempRoot } from "./helpers.mjs";
@@ -75,6 +75,16 @@ test("Codex replays drop the WebSocket envelope and stream; other Codex-wrapping
   assert.equal(replayApi("openai-codex-custom-responses", "https://proxy.example.com/backend-api"), null);
   assert.equal(endpointFor("openai-codex-responses", "https://chatgpt.com/backend-api/"), "https://chatgpt.com/backend-api/codex/responses");
   assert.equal(replayApi("openai-codex-custom-responses"), null);
+});
+
+test("an Anthropic replay names the betas its fields need, and nothing for a plain body", () => {
+  assert.deepEqual(anthropicBetas({ messages: [] }), { body: { messages: [] } });
+  const all = anthropicBetas({ anthropic_beta: ["a-1", 2], context_management: { edits: [] }, thinking: { type: "adaptive" }, output_config: { effort: "high", task_budget: { total: 9 } },
+    fallbacks: [{ model: "m" }], system: [{ cache_control: { type: "ephemeral", ttl: "1h" } }] });
+  assert.equal(all.beta, "a-1,context-management-2025-06-27,interleaved-thinking-2025-05-14,effort-2025-11-24,task-budgets-2026-03-13,fallback-credit-2026-06-01,extended-cache-ttl-2025-04-11");
+  assert.equal(all.body.anthropic_beta, undefined);
+  assert.equal(anthropicBetas({ output_config: { format: {} }, fallbacks: [] }).beta, undefined);
+  assert.deepEqual(usageFromBody("anthropic-messages", { usage: { cache_creation_input_tokens: 9, cache_creation: { ephemeral_1h_input_tokens: 9 } } }), { read: 0, write: 9, fresh: 0, output: 0, write1h: 9 });
 });
 
 test("TTL requested and rewritten through cache_control", () => {

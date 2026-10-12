@@ -204,6 +204,38 @@ test("transport: streamSimple path (Pi) swaps the body and reports usage; errors
   assert.equal(noUsage.usage.read, 0);
 });
 
+test("a TTL switched without a new message: the keepalive goes out at the new TTL with the betas its body needs, and a 1h rewrite counts down an hour", async (t) => {
+  const calls = [];
+  let rewrite = true;
+  t.mock.method(globalThis, "fetch", async (_url, init) => {
+    calls.push({ headers: init.headers, body: JSON.parse(init.body) });
+    const usage = rewrite ? { cache_read_input_tokens: 0, cache_creation_input_tokens: 735000, cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 735000 }, input_tokens: 9, output_tokens: 1 }
+      : { cache_read_input_tokens: 735000, cache_creation_input_tokens: 0, input_tokens: 9, output_tokens: 1 };
+    rewrite = false;
+    return { ok: true, status: 200, json: async () => ({ usage }) };
+  });
+  t.mock.timers.enable({ apis: ["setInterval", "Date"], now: 5_000_000 });
+  const x = await load(t, { PI_KEEPALIVE_LIMIT: "infinite" });
+  x.ctx.model = { id: "claude-opus-5-5", api: "anthropic-messages", provider: "anthropic", baseUrl: "https://api.anthropic.com", headers: { "Anthropic-Beta": "oauth-2025-04-20" } };
+  await x.emit("session_start");
+  await x.emit("agent_start");
+  await x.emit("before_provider_request", { payload: anthropicPayload({ model: "claude-opus-5-5", context_management: { edits: [] }, anthropic_beta: ["mid-conversation-system-2026-04-07"] }) });
+  await x.emit("message_end", { message: { role: "assistant", stopReason: "stop", usage: { cacheRead: 733000, cacheWrite: 2000, input: 2, output: 5, cttl: { ephemeral5m: 2000 } }, model: "claude-opus-5-5" } });
+  await x.emit("agent_end");
+  await x.commands.keepalive.handler("ttl 1h", x.ctx);
+  await run(t, 271);
+  await new Promise((r) => setTimeout(r, 30));
+  await run(t, 1);
+  assert.equal(calls.length, 1, "renewed before the 5m cache ends");
+  assert.equal(calls[0].body.system[0].cache_control.ttl, "1h", "at the new TTL");
+  assert.equal(calls[0].headers["anthropic-beta"], "oauth-2025-04-20,mid-conversation-system-2026-04-07,context-management-2025-06-27,extended-cache-ttl-2025-04-11", "the model's own betas first, one header");
+  assert.equal(calls[0].headers["Anthropic-Beta"], undefined);
+  assert.equal(calls[0].body.anthropic_beta, undefined, "betas travel in the header, not the body");
+  assert.match(strip(x.ui.status.at(-1)), /TTL 1h .* ETA ~59:/, "the rewrite lives an hour");
+  await run(t, 300);
+  assert.equal(calls.length, 1, "nothing more until the hour is nearly up");
+});
+
 test("transport: fetch fallback covers openai styles, bad responses and registries without auth", async (t) => {
   const seen = [];
   let reply = { ok: true, status: 200, json: async () => ({ usage: { prompt_tokens: 10, prompt_tokens_details: { cached_tokens: 8 }, completion_tokens: 1 } }) };

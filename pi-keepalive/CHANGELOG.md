@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.2
+
+- **Keepalives through a gateway no longer fail.** OMP sends Anthropic betas as a header extensions cannot see, so a replayed body that used a beta field (`context_management`, which OMP adds) was refused with HTTP 400 (`Extra inputs are not permitted`) and the cache expired. The keepalive now sends the betas its body's fields need, and moves betas OMP puts in the body into the header.
+- **A TTL switched between messages takes hold at the next keepalive.** After `/keepalive ttl 1h` (or Tern's TTL button) with no new message, the keepalive goes out at 1h instead of the old 5m. Where the provider rewrites the cache at 1h, the bar counts down the hour and warming starts afresh; where it reads the old entry, the bar keeps renewing the 5 minutes until the next message writes at 1h.
+
 ## 0.4.1
 
 - **Install from the OMP marketplace.** `omp plugin marketplace add alexandernicholson/agent-router`, then `omp plugin install keepalive@agent-router-tools`. The repository now carries an OMP catalog (`.omp-plugin/marketplace.json`) beside Claude Code's, and the package declares its extension under `omp.extensions` as well as `pi.extensions`.

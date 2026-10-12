@@ -1,5 +1,5 @@
 // Sends the keepalive request through the same provider the session used.
-import { endpointFor, usageFromBody, usageFromSse, type ReplayApi, type Tokens } from "./replay.ts";
+import { anthropicBetas, endpointFor, usageFromBody, usageFromSse, type ReplayApi, type Tokens } from "./replay.ts";
 import { keepalivePrompt } from "./version.ts";
 import type { ForkResult, Source } from "./panel.ts";
 
@@ -39,10 +39,18 @@ export async function sendKeepalive(ctx: any, source: Source, payload: Record<st
   }
   const api = source.api as ReplayApi;
   const codex = api === "openai-codex-responses";
-  const body = codex ? { ...payload } : ({ ...payload, stream: false } as Record<string, unknown>);
+  let body = codex ? { ...payload } : ({ ...payload, stream: false } as Record<string, unknown>);
   if (!codex) delete body.stream_options;
   const out: Record<string, string> = { "content-type": "application/json", ...(model?.headers ?? {}), ...(a.headers ?? {}) };
   for (const [k, v] of Object.entries(headers ?? {})) if (!SKIP_HEADERS.has(k.toLowerCase())) out[k] = v;
+  if (api === "anthropic-messages") {
+    const betas = anthropicBetas(body);
+    body = betas.body;
+    const given = Object.keys(out).find((k) => k.toLowerCase() === "anthropic-beta");
+    const merged = [...new Set([...(given ? out[given].split(",") : []), ...(betas.beta ? betas.beta.split(",") : [])].map((b) => b.trim()).filter(Boolean))];
+    if (given) delete out[given];
+    if (merged.length) out["anthropic-beta"] = merged.join(",");
+  }
   if (a.apiKey) {
     if (api === "anthropic-messages") { out["x-api-key"] = a.apiKey; out["anthropic-version"] = "2023-06-01"; } else out.authorization = `Bearer ${a.apiKey}`;
   }

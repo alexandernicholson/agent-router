@@ -312,7 +312,11 @@ function sampleOf(c: Ctx, fields: object) {
   async function warm(c: Ctx, model: string, lifetimeSource: string) {
     const startedAt = c.host.now();
     const source = c.last!;
-    const built = buildKeepalivePayload(source.api, source.payload);
+    // At the TTL the user chose since the last request, so a switch (5m to 1h) takes effect at the next keepalive instead of
+    // the next message: that keepalive rewrites the prefix at the new TTL, and later ones replay it at that TTL and read it.
+    const wanted = source.api === "anthropic-messages" ? wantedTtl(c) : undefined;
+    const replayed = wanted ? applyTtl(source.payload, wanted) : source.payload;
+    const built = buildKeepalivePayload(source.api, replayed);
     if (!built.ok) { c.host.log(`Keepalive: cache keepalive skipped (${built.reason}).`); return; }
     c.warming = true;
     let result: ForkResult;
@@ -321,8 +325,12 @@ function sampleOf(c: Ctx, fields: object) {
     if (!result.answered) c.host.log(`Keepalive: cache keepalive did not answer (${result.reason}).`);
     const usage = result.usage;
     if (!usage || usage.read + usage.write + usage.fresh === 0) return;
-    await observe(c, sampleOf(c, { turnId: `keepalive:${startedAt}`, model, startedAt, completedAt: c.host.now(), read: usage.read, write: usage.write, fresh: usage.fresh, output: usage.output,
-      ...requestedOf(source, model, requestedTtl(source.payload)) }));
+    if (replayed !== source.payload && c.last === source) c.last = { ...source, payload: replayed };
+    const requested = requestedTtl(replayed);
+    const sample = sampleOf(c, { turnId: `keepalive:${startedAt}`, model, startedAt, completedAt: c.host.now(), read: usage.read, write: usage.write, fresh: usage.fresh, output: usage.output,
+      ...requestedOf(source, model, requested) });
+    const creation = creationOf(usage, source, model, requested);
+    await observe(c, creation ? applyCacheCreation(sample, creation) : sample);
     c.now = c.host.now();
     report(c, "keepalive", model, lifetimeSource, startedAt, c.now, usage);
     c.host.redraw();

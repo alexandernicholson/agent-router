@@ -93,7 +93,10 @@ export function usageFromBody(api: ReplayApi, body: unknown): Tokens | null {
   const u = (body as Obj | null)?.usage;
   if (!u) return null;
   if (api === "anthropic-messages") {
-    return { read: n(u.cache_read_input_tokens), write: n(u.cache_creation_input_tokens), fresh: n(u.input_tokens), output: n(u.output_tokens) };
+    const usage: Tokens & { write1h?: number } = { read: n(u.cache_read_input_tokens), write: n(u.cache_creation_input_tokens), fresh: n(u.input_tokens), output: n(u.output_tokens) };
+    // The 1h share of the write, so a keepalive that rewrote the prefix at a new TTL sets the countdown to it.
+    if (u.cache_creation && typeof u.cache_creation === "object") usage.write1h = n(u.cache_creation.ephemeral_1h_input_tokens);
+    return usage;
   }
   if (api === "openai-completions") {
     const read = n(u.prompt_tokens_details?.cached_tokens ?? u.cache_read_input_tokens);
@@ -127,4 +130,25 @@ export function usageFromSse(text: string): Tokens | null {
     } catch { return null; }
   }
   return null;
+}
+
+/**
+ * The `anthropic-beta` header a replayed Anthropic body needs. OMP sends its betas as a header extensions cannot see, and
+ * the API refuses a beta field without its beta (`context_management: Extra inputs are not permitted`), so they are read
+ * back from the fields the body uses; betas OMP puts in the body itself (`anthropic_beta`) are moved to the header.
+ * Returns the body to send and the header value (undefined when none is needed).
+ */
+export function anthropicBetas(body: Obj): { body: Obj; beta?: string } {
+  const betas = new Set<string>();
+  const out = { ...body };
+  if (Array.isArray(out.anthropic_beta)) for (const b of out.anthropic_beta) if (typeof b === "string") betas.add(b);
+  delete out.anthropic_beta;
+  if (out.context_management) betas.add("context-management-2025-06-27");
+  if (out.thinking) betas.add("interleaved-thinking-2025-05-14");
+  const config: unknown = out.output_config;
+  if (config && typeof config === "object" && "effort" in config) betas.add("effort-2025-11-24");
+  if (config && typeof config === "object" && "task_budget" in config) betas.add("task-budgets-2026-03-13");
+  if (Array.isArray(out.fallbacks) && out.fallbacks.length) betas.add("fallback-credit-2026-06-01");
+  if (cacheControls(out).some((c) => c.ttl === "1h")) betas.add("extended-cache-ttl-2025-04-11");
+  return betas.size ? { body: out, beta: [...betas].join(",") } : { body: out };
 }
