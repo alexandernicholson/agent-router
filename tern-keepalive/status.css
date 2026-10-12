@@ -122,3 +122,10 @@
 .sf-main[data-surface='plugin.keepalive.dashboard'] .sf-tbl-c .sf-t-mono.sf-t-info { color: var(--ka-good); }
 .sf-main[data-surface='plugin.keepalive.dashboard'] .sf-tbl-c .sf-t-mono.sf-t-warning { color: var(--ka-fair); }
 .sf-main[data-surface='plugin.keepalive.dashboard'] .sf-tbl-c .sf-t-mono.sf-t-error { color: var(--ka-poor); }
+
+/* The request ID is two columns, its start and its last characters, drawn as one: no padding between them while both
+   show, and the second takes the heading when the first is hidden for room. */
+.sf-main[data-surface='plugin.keepalive.dashboard'] .sf-tbl-row > .sf-tbl-c:first-child:not(.off) { padding-right: 0; }
+.sf-main[data-surface='plugin.keepalive.dashboard'] .sf-tbl-row > .sf-tbl-c:first-child:not(.off) + .sf-tbl-c { padding-left: 0; }
+.sf-main[data-surface='plugin.keepalive.dashboard'] .sf-tbl-row > .sf-tbl-h:first-child:not(.off) + .sf-tbl-h { padding-left: 0; }
+.sf-main[data-surface='plugin.keepalive.dashboard'] .sf-tbl-row > .sf-tbl-h.off:first-child + .sf-tbl-h::before { content: 'Request'; }

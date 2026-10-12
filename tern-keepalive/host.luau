@@ -303,18 +303,40 @@ local function wanted(filter: string, r: common.Request): boolean
 		or (filter == "compactions" and r.kind == "compaction") or (filter == "misses" and r.miss ~= nil)
 end
 
+-- The request list fills the pane. As it narrows, less important fields give way, in this order: the date (the start
+-- time keeps the time of day, `09:41:07.25`), the model, the start of the request ID (it keeps its last characters,
+-- `ku60:0`, where requests differ), out and new, TTL and miss, the token counts; the ID's end, the time and the hit rate
+-- stay longest. Tern hides the lowest priority first, the rightmost of equals first. The ID is two columns drawn as one
+-- (status.css joins them and names the second when the first is hidden); spare width goes mostly to the model, the rest
+-- to the hit rate, which is always shown, so the table always spans the pane.
 local REQUEST_COLS: { Col } = {
-	{ id = "request", head = "Request", priority = 3 },
-	{ id = "time", head = "Time", priority = 2 },
-	{ id = "hit", head = "Hit", priority = 4 },
-	{ id = "ttl", head = "TTL", priority = 2 },
-	{ id = "miss", head = "Miss", priority = 2 },
-	{ id = "read", head = "Read", align = "end", priority = 3 },
-	{ id = "write", head = "Write", align = "end", priority = 3 },
-	{ id = "new", head = "New", align = "end", priority = 1 },
-	{ id = "out", head = "Out", align = "end", priority = 0 },
-	{ id = "model", head = "Model", priority = 0, grow = 1, truncate = "middle" },
+	{ id = "request", head = "Request", priority = 1, truncate = "start" },
+	{ id = "id", head = "", priority = 5 },
+	{ id = "date", head = "Date", priority = 0 },
+	{ id = "time", head = "Time", priority = 6 },
+	{ id = "hit", head = "Hit", priority = 7, grow = 1 },
+	{ id = "ttl", head = "TTL", priority = 3 },
+	{ id = "miss", head = "Miss", priority = 3 },
+	{ id = "read", head = "Read", align = "end", priority = 4 },
+	{ id = "write", head = "Write", align = "end", priority = 4 },
+	{ id = "new", head = "New", align = "end", priority = 2 },
+	{ id = "out", head = "Out", align = "end", priority = 2 },
+	{ id = "model", head = "Model", priority = 1, grow = 8, truncate = "middle" },
 }
+
+-- Characters of a request ID kept when its start gives way (`r…ku60:0` → `ku60:0`).
+local ID_TAIL = 6
+
+-- A request ID as the two halves the table draws: all but its last ID_TAIL characters, and those. Short names
+-- (`keepalive`, `compaction`) stay whole in the second half.
+local function id_parts(name: string): (string, string)
+	local length = utf8.len(name) or #name
+	if length <= ID_TAIL + 4 then
+		return "", name
+	end
+	local cut = utf8.offset(name, length - ID_TAIL + 1) or (#name - ID_TAIL + 1)
+	return string.sub(name, 1, cut - 1), string.sub(name, cut)
+end
 
 local HIT_WIDTH = 6 -- cells of a request's hit-rate bar, as in pi-keepalive's request list
 local FILLS = { good = "█", fair = "▓", poor = "▒" }
@@ -326,10 +348,11 @@ local function graded(grade: string?): string
 	return `mono {GRADE_TOKENS[grade or ""] or "muted"}`
 end
 
--- When the request started, to the hundredth of a second in local time: 2026-10-13 09:41:07.25.
-local function stamp(ms: number): string
+-- When the request started, in local time: its date (`2026-10-13`) and its time of day to the hundredth of a second
+-- (`09:41:07.25`), drawn as two columns so a narrow table can drop the date and keep the time.
+local function stamp(ms: number): (string, string)
 	local seconds = ms // 1000
-	return `{os.date("%Y-%m-%d %H:%M:%S", seconds)}.{string.format("%02d", (ms % 1000) // 10)}`
+	return os.date("%Y-%m-%d", seconds), `{os.date("%H:%M:%S", seconds)}.{string.format("%02d", (ms % 1000) // 10)}`
 end
 
 -- The hit rate as the footer bar draws it: a short bar filled by grade, then the percentage, in one cell.
@@ -359,13 +382,17 @@ local function requests(state: Dash, list: { common.Request }): Node
 			-- As in the Claude Code dashboard: a faint `↕` row between two requests with the time from the older one's start
 			-- to the newer one's, counted between the requests this filter shows.
 			if previous then
-				local gap: { Cell } = { ui.span(`↕ {common.gap(previous.startedAt - r.startedAt)}`, "dim"), "", "", "", "", "", "", "", "", "" }
+				-- In the time column, which outlasts the ID's start: the time between the two rows' start times.
+				local gap: { Cell } = { "", "", "", ui.span(`↕ {common.gap(previous.startedAt - r.startedAt)}`, "dim"), "", "", "", "", "", "", "", "" }
 				table.insert(rows, gap)
 			end
 			previous = r
 			shown += 1
+			local date, time = stamp(r.startedAt)
+			local head, tail = id_parts(r.name)
+			local style = if r.kind == "real" then "mono" else "muted"
 			local row: { Cell } = {
-				ui.span(r.name, if r.kind == "real" then "mono" else "muted"), ui.span(stamp(r.startedAt), graded(r.grade)), hit_cell(r), r.ttl or "–", ui.span(r.miss or "", "warning"),
+				ui.span(head, style), ui.span(tail, style), ui.span(date, graded(r.grade)), ui.span(time, graded(r.grade)), hit_cell(r), r.ttl or "–", ui.span(r.miss or "", "warning"),
 				common.tokens(r.read), common.tokens(r.write), common.tokens(r.fresh), common.tokens(r.output), ui.span(r.model, "muted"),
 			}
 			table.insert(rows, row)
