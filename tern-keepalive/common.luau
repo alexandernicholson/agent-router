@@ -187,4 +187,20 @@ function M.tokens(value: number): string
 	return text .. (if value >= 1e6 then "m" else "k")
 end
 
+-- The time between two requests, as pi-keepalive's `cacheGap` writes it (the Claude Code dashboard's `↕` lines):
+-- 0.4s, 12s, 3m 05s, 1h 02m.
+function M.gap(ms: number): string
+	local value = math.max(0, ms)
+	if value < 1000 then
+		return string.format("%.1fs", value / 1000)
+	end
+	local seconds = math.floor(value / 1000 + 0.5)
+	if seconds < 60 then
+		return `{seconds}s`
+	elseif seconds < 3600 then
+		return string.format("%dm %02ds", seconds // 60, seconds % 60)
+	end
+	return string.format("%dh %02dm", seconds // 3600, (seconds % 3600) // 60)
+end
+
 return M

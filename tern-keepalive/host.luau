@@ -321,8 +321,18 @@ local function requests(state: Dash, list: { common.Request }): Node
 		table.insert(filters, chip(f, `filter={f}`, state.filter == f))
 	end
 	local rows: { { Cell } } = {}
+	local shown = 0
+	local previous: common.Request? = nil
 	for _, r in list do
 		if wanted(state.filter, r) then
+			-- As in the Claude Code dashboard: a faint `↕` row between two requests with the time from the older one's start
+			-- to the newer one's, counted between the requests this filter shows.
+			if previous then
+				local gap: { Cell } = { ui.span(`↕ {common.gap(previous.startedAt - r.startedAt)}`, "dim"), "", "", "", "", "", "", "", "" }
+				table.insert(rows, gap)
+			end
+			previous = r
+			shown += 1
 			local hit: Cell = if r.percent then { meter = { value = r.percent / 100, tone = common.tone(r.grade) } } else ui.span("–", "muted")
 			local row: { Cell } = {
 				ui.span(r.name, if r.kind == "real" then "mono" else "muted"), hit, r.ttl or "–", ui.span(r.miss or "", "warning"),
@@ -331,8 +341,8 @@ local function requests(state: Dash, list: { common.Request }): Node
 			table.insert(rows, row)
 		end
 	end
-	local body = if #rows > 0 then ui.table(REQUEST_COLS, rows) else ui.text(ui.span("No requests match this filter.", "muted"))
-	return section("requests", `Recent requests · {#rows}`, {
+	local body = if shown > 0 then ui.table(REQUEST_COLS, rows) else ui.text(ui.span("No requests match this filter.", "muted"))
+	return section("requests", `Recent requests · {shown}`, {
 		ui.node("row", { key = "filters", gap = MD }, { label("Show"), ui.node("row", { gap = XS }, filters) }),
 		body,
 	})
