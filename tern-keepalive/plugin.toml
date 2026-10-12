@@ -1,0 +1,21 @@
+schema = 1
+id = "keepalive"
+name = "Keepalive"
+version = "0.2.0"
+description = "Prompt-cache bar, dashboard and settings for omp sessions running pi-keepalive."
+icon = "database"
+host = "host.luau"
+window = "window.luau"
+styles = ["status.css"]
+
+[[blocks]]
+id = "dashboard"
+title = "Keepalive"
+icon = "database"
+# Opened for the focused pane by the "Keepalive: dashboard" command.
+palette = false
+
+[[blocks]]
+id = "settings"
+title = "Keepalive settings"
+icon = "sliders"

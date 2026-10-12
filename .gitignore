@@ -6,3 +6,4 @@ coverage/
 .envrc
 !.env.example
 .claude/
+tern-keepalive/tern.d.luau

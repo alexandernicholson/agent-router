@@ -1,0 +1,70 @@
+/*
+ * The prompt-cache bar in Tern's status line. The window half sends one segment per styled piece of the bar with a tone of
+ * `ka <tone>` (pi-keepalive's barSpans), so these rules match `[data-tone~='<tone>']`. The palette is pi-keepalive's own
+ * (lib/core/cache-colors.js: light, then dark), the one omp's footer bar uses, so a mode, grade or countdown reads the same
+ * colour in both places.
+ */
+
+/*
+ * Tern spaces status segments 0.87em apart. Pieces of the bar sit a mono space (0.6em) apart instead, pieces that touch in
+ * the footer bar touch here (the two mode diamonds, the halves of the hit-rate bar), and the dial keeps Tern's own gap
+ * from what precedes the bar, plus a little.
+ */
+#statusline .sl-plugin[data-plugin='keepalive'] {
+	--ka-warm: light-dark(#0b8a6c, #12efc6);
+	--ka-compact: light-dark(#5d05a4, #8a74ff);
+	--ka-good: light-dark(#0268d0, #19affe);
+	--ka-fair: light-dark(#9d580c, #fadf27);
+	--ka-poor: light-dark(#7a0d3f, #fe626c);
+	margin-left: -0.27em;
+	padding: 0;
+	border-radius: 0;
+	background: none;
+	color: var(--t3);
+	font-variant-numeric: tabular-nums;
+	white-space: pre;
+}
+
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='join'] {
+	margin-left: -0.87em;
+}
+
+#statusline .sl-plugin[data-plugin='keepalive']:is([data-tone~='life-good'], [data-tone~='life-fair'], [data-tone~='life-poor'], [data-tone~='life-none']) {
+	margin-left: 0.3em;
+}
+
+/* One clickable bar, not a row of buttons: no per-piece hover fill. */
+#statusline .sl-plugin.on[data-plugin='keepalive']:hover {
+	background: none;
+}
+
+/* The dial leads, toned by how much of the cache lifetime is left. */
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='life-good'] { color: var(--ka-good); }
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='life-fair'] { color: var(--ka-fair); }
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='life-poor'] { color: var(--ka-poor); }
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='life-none'] { color: var(--t4); }
+
+/* Mode diamonds: teal for warming, violet for compacting, a hollow faint one when upkeep is off. */
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='warm'] { color: var(--ka-warm); }
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='compact'] { color: var(--ka-compact); }
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='dim'] { color: var(--t4); }
+
+/* The mode name follows its diamond. warmcomp already shows both diamonds, and a mix of the two would read as the blue of a
+   good grade, so its name is plain strong text. */
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='mode-off'] { color: var(--t4); }
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='mode-warm'] { color: var(--ka-warm); font-weight: 600; }
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='mode-compact'] { color: var(--ka-compact); font-weight: 600; }
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='mode-warmcomp'] { color: var(--t1); font-weight: 600; }
+
+/* TTL: a faint label, a stronger value. */
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='label'] { color: var(--t4); }
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='value'] { color: var(--t2); font-weight: 600; }
+
+/* Hit-rate bar and percentage, misses, countdowns: by grade. */
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='good'] { color: var(--ka-good); }
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='fair'] { color: var(--ka-fair); }
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='poor'] { color: var(--ka-poor); }
+
+/* Keepalives left, and separators that recede. */
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='note'] { color: var(--t2); }
+#statusline .sl-plugin[data-plugin='keepalive'][data-tone~='sep'] { color: var(--t4); }

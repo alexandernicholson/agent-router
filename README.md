@@ -1,18 +1,19 @@
 # Agent Router tools
 
-Two Claude Code Mods, installed from one marketplace. Each works on its own; together they share what each knows.
+Prompt-cache and model-routing tools for Claude Code, OMP and Tern, installed from one marketplace. Each works on its own; together they share what each knows.
 
 | Plugin | What it does | Commands |
 | --- | --- | --- |
 | [**agent-router**](agent-router/README.md) | Assigns an exact model and effort to each subagent role and to agent team teammates, from your Anthropic-compatible endpoint, and records routing and usage | `/agent-models`, `/agent-models-apply`, `/agent-router:routes` |
 | [**keepalive**](keepalive/README.md) | Shows how well every conversation, subagent and teammate reuses its prompt cache, sets each one's cache TTL, and keeps an idle cache warm or compacts it before it expires | `/keepalive`, `/keepalive-settings` |
-| [**pi-keepalive**](pi-keepalive/README.md) | Keepalive for Pi and OMP: the same cache bar, dashboard, upkeep and gateway cache policy, as a Pi/OMP extension | `/keepalive` |
+| [**pi-keepalive**](pi-keepalive/README.md) | Keepalive for OMP and Pi: the same cache bar, dashboard, upkeep and gateway cache policy, as an extension. In OMP it installs from the marketplace as `keepalive` | `/keepalive` |
+| [**tern-keepalive**](tern-keepalive/README.md) | A Tern plugin for Keepalive in OMP panes: the cache bar in Tern's status line, a native dashboard and settings page, and palette commands | Tern palette: Keepalive |
 
 ## Install
 
 For step-by-step setup, settings and troubleshooting, see [keepalive/INSTALL.md](keepalive/INSTALL.md).
 
-Inside Claude Code:
+### Claude Code
 
 ```text
 /plugin marketplace add alexandernicholson/agent-router
@@ -21,6 +22,25 @@ Inside Claude Code:
 ```
 
 Both need Claude Code 2.1.289 or newer with function hooks enabled (`CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`) and Node.js 22 or newer. Agent Router also needs an Anthropic-compatible endpoint; Keepalive works with any.
+
+### OMP
+
+OMP reads the same marketplace (its catalog is `.omp-plugin/marketplace.json`, which offers Keepalive):
+
+```text
+/marketplace add alexandernicholson/agent-router
+/marketplace install keepalive@agent-router-tools
+```
+
+or from a shell, `omp plugin marketplace add alexandernicholson/agent-router` and `omp plugin install keepalive@agent-router-tools`. Restart the session (or `/reload`) to load it, and update with `omp plugin upgrade keepalive@agent-router-tools`. Agent Router isn't offered for OMP: OMP assigns models to agents itself (`modelRoles`, `task.agentModelOverrides`). Pi loads [pi-keepalive](pi-keepalive/README.md#install) as an extension directory.
+
+### Tern
+
+In Tern, add the [Tern plugin](tern-keepalive/README.md#install) beside Keepalive in OMP:
+
+```sh
+tern plugin install github.com/alexandernicholson/agent-router/tern-keepalive
+```
 
 ## Together
 
@@ -31,15 +51,17 @@ Claude Code runs each plugin's hooks in the order the plugins are listed in your
 ## Development
 
 ```text
-.claude-plugin/marketplace.json   Marketplace catalog
+.claude-plugin/marketplace.json   Claude Code marketplace catalog (Agent Router, Keepalive)
+.omp-plugin/marketplace.json      OMP marketplace catalog (Keepalive, from pi-keepalive/)
 shared/                           Code both plugins use, and its tests
   lib/                            Records, bridge runner, routes contract, text and model helpers
   hooks/                          Bridge call used by both hooks modules
   types/claude-code.d.ts          Claude Code 2.1.289 function hook declarations
 agent-router/                     The Agent Router plugin
 keepalive/                        The Keepalive plugin
+pi-keepalive/                     Keepalive as a Pi/OMP extension
+tern-keepalive/                   Tern plugin (Luau) for pi-keepalive in OMP panes
 scripts/sync-shared.mjs           Copies shared/ into each plugin
-scripts/coverage.mjs              Coverage of the Node code and of both hooks modules
 ```
 
 Claude Code only loads a plugin's own files, so each plugin carries a copy of `shared/` in `lib/shared/` and `hooks/shared/`. Edit `shared/`, then run `npm run sync`. `npm test` fails if a copy differs.
