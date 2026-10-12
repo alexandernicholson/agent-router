@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.1
+
+- **Install from the OMP marketplace.** `omp plugin marketplace add alexandernicholson/agent-router`, then `omp plugin install keepalive@agent-router-tools`. The repository now carries an OMP catalog (`.omp-plugin/marketplace.json`) beside Claude Code's, and the package declares its extension under `omp.extensions` as well as `pi.extensions`.
+- **ChatGPT Codex.** Sessions on OMP's `openai-codex` provider (or one wrapping `chatgpt.com/backend-api`) now have a lifetime and can be kept warm: OpenAI documents 30 minutes after the latest write or read, so the bar counts `▣ 30m` down from each request, a keepalive goes out at 27 minutes and a keepalive that read the cache starts it again. OMP sends Codex turns over a WebSocket as deltas; the keepalive rebuilds the whole conversation and replays it over HTTP SSE to `/codex/responses`, routed to the session's cache by `session_id`. There is no 5m/1h choice (the backend sets retention itself), and no cache-policy request is sent to chatgpt.com. Before, a Codex session showed `TTL 5m` and could not be warmed.
+- **Side requests no longer stop upkeep.** OMP asks the model for a session title after a turn; that request never produces a message, so it held upkeep off for the rest of the session and could be replayed as the keepalive. A request now becomes the replay source only once it is answered, and an unanswered one is dropped when the agent ends.
+- **A switch of model drops the old model's lifetime.** After a Claude turn, a Codex (or any other) turn no longer shows the Claude write's `5m reported` countdown.
+- **A styled bar for Tern.** The pane snapshot carries the bar as styled pieces (`bar.spans`: dial by remaining lifetime, a diamond per upkeep mode, mode, TTL label and value, grades, separators), so the Tern plugin draws it in the footer bar's colours.
+- **The countdown keeps its colour after a miss.** In the footer bar, the `✕` miss chip was placed inside the countdown's coloured run, so after a miss the countdown (`◉ ETA …`, `expired`) lost its colour.
+- **OpenAI cache writes.** `cache_write_tokens` in Responses usage counts as written, not new.
+
+## 0.4.0
+
+- **Tern.** In a Tern pane (`TERN_PANE` set), the extension publishes the pane's cache bar, dashboard and settings to the [Tern Keepalive plugin](../tern-keepalive/README.md) and takes upkeep and TTL commands back from it. While that plugin runs, the bar sits in Tern's status line and the footer bar is left out; without it the footer bar stays. `PI_KEEPALIVE_TERN=0` turns the bridge off.
+- **Settings apply live.** A change to `settings.json`, from `/keepalive set` in another session or Tern's settings page, reaches every running session within a second.
+- **OMP 18.10 usage.** The 1h share of a cache write is read from `usage.cttl.ephemeral1h` (OMP) as well as `cacheWrite1h` (Pi), and the response model from `upstreamModel`; before, OMP's 1h writes were booked as 5m.
+- **OMP subagents are left alone.** OMP runs task subagents in-process with extensions rebound to them; their requests, compactions and shutdowns no longer touch the main conversation's ledger, replay source or timer.
+- **OMP data directory.** Settings and ledger live in `<OMP agent dir>/keepalive` (`pi.getAgentDir()`), so a symlinked install no longer falls back to `~/.pi/agent/keepalive`.
+
 ## 0.3.5
 
 - **Reduced motion.** `/keepalive set reduced_motion on`, or `PI_KEEPALIVE_REDUCED_MOTION=on`, shows the footer and dashboard countdowns in whole minutes, changing once a minute, with `soon` in the last one. Off by default.

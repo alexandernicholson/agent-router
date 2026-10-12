@@ -1,0 +1,14 @@
+{
+  "name": "agent-router-tools",
+  "description": "Keepalive for OMP: the prompt-cache bar, dashboard, upkeep and gateway cache policy.",
+  "owner": {
+    "name": "Alexander Nicholson"
+  },
+  "plugins": [
+    {
+      "name": "keepalive",
+      "source": "./pi-keepalive",
+      "description": "A prompt cache bar and dashboard for OMP sessions, a per-session TTL, and upkeep that keeps an idle cache warm or compacts it before it expires. With Tern, the bar moves into Tern's status line."
+    }
+  ]
+}

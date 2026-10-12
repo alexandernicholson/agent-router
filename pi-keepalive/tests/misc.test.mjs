@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { COMPACT_MIN_TOKENS, DEFAULT_SETTINGS, SETTING_ROWS, compactThreshold, keepaliveLimit, mergeSettings, resolveSettings, ttlOption, upkeepMode } from "../lib/settings.ts";
-import { applyTtl, buildKeepalivePayload, endpointFor, replayApi, requestedTtl, usageFromBody } from "../lib/replay.ts";
+import { applyTtl, buildKeepalivePayload, endpointFor, replayApi, requestedTtl, usageFromBody, usageFromSse } from "../lib/replay.ts";
 import { KEEPALIVE_PROMPT, VERSION, keepalivePrompt } from "../lib/version.ts";
 import { createStore, dataRoot, readJson, writeJson, trace } from "../lib/storage.ts";
 import { tempRoot } from "./helpers.mjs";
@@ -65,6 +65,18 @@ test("replay payloads keep the cached prefix and cap output", () => {
   assert.equal(buildKeepalivePayload("openai-responses", null, "1").ok, false);
 });
 
+test("Codex replays drop the WebSocket envelope and stream; other Codex-wrapping providers are recognised by base URL", () => {
+  const frame = { type: "response.create", model: "gpt-6-luna", input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }], stream: true, prompt_cache_key: "k", store: false };
+  const r = buildKeepalivePayload("openai-codex-responses", frame);
+  assert.deepEqual([r.payload.type, r.payload.stream, r.payload.prompt_cache_key, r.payload.max_output_tokens], [undefined, true, "k", 16]);
+  assert.equal(frame.type, "response.create", "input untouched");
+  assert.equal(replayApi("openai-codex-responses"), "openai-codex-responses");
+  assert.equal(replayApi("openai-codex-custom-responses", "https://chatgpt.com/backend-api"), "openai-codex-responses");
+  assert.equal(replayApi("openai-codex-custom-responses", "https://proxy.example.com/backend-api"), null);
+  assert.equal(endpointFor("openai-codex-responses", "https://chatgpt.com/backend-api/"), "https://chatgpt.com/backend-api/codex/responses");
+  assert.equal(replayApi("openai-codex-custom-responses"), null);
+});
+
 test("TTL requested and rewritten through cache_control", () => {
   const five = { system: [{ cache_control: { type: "ephemeral" } }], messages: [{ content: [{ cache_control: { type: "ephemeral" } }, { text: "x" }] }] };
   assert.equal(requestedTtl(five), "5m");
@@ -85,6 +97,14 @@ test("usage normalisation to disjoint tokens and endpoints", () => {
   assert.deepEqual(usageFromBody("openai-completions", { usage: { prompt_tokens: 100, prompt_tokens_details: { cached_tokens: 60, cache_write_tokens: 10 }, completion_tokens: 1 } }), { read: 60, write: 10, fresh: 30, output: 1 });
   assert.deepEqual(usageFromBody("openai-completions", { usage: { prompt_tokens: 5, cache_read_input_tokens: 2, cache_creation_input_tokens: 1 } }), { read: 2, write: 1, fresh: 2, output: 0 });
   assert.deepEqual(usageFromBody("openai-responses", { usage: { input_tokens: 50, input_tokens_details: { cached_tokens: 40 }, output_tokens: 1 } }), { read: 40, write: 0, fresh: 10, output: 1 });
+  assert.deepEqual(usageFromBody("openai-responses", { usage: { input_tokens: 50, input_tokens_details: { cached_tokens: 30, cache_write_tokens: 15 }, output_tokens: 1 } }), { read: 30, write: 15, fresh: 5, output: 1 });
+  const sse = (event) => `event: response.created\ndata: {"type":"response.created"}\n\nevent: response.completed\ndata: ${JSON.stringify(event)}\n\n`;
+  assert.deepEqual(usageFromSse(sse({ type: "response.completed", response: { usage: { input_tokens: 7201, input_tokens_details: { cached_tokens: 6656 }, output_tokens: 5 } } })), { read: 6656, write: 0, fresh: 545, output: 5 });
+  assert.deepEqual(usageFromSse(sse({ type: "response.incomplete", response: { incomplete_details: { reason: "max_output_tokens" }, usage: { input_tokens: 7836, input_tokens_details: { cached_tokens: 7680 }, output_tokens: 16 } } })),
+    { read: 7680, write: 0, fresh: 156, output: 16 }, "a reasoning model that spent the output cap still read the cache");
+  assert.equal(usageFromSse("data: {\"type\":\"response.completed\",\n"), null);
+  assert.equal(usageFromSse(sse({ type: "response.completed" })), null);
+  assert.equal(usageFromSse("event: error\ndata: {}\n"), null);
   assert.equal(usageFromBody("anthropic-messages", {}), null);
   assert.equal(usageFromBody("anthropic-messages", null), null);
   assert.equal(endpointFor("anthropic-messages", "https://p/ai/claude"), "https://p/ai/claude/v1/messages");
@@ -99,6 +119,7 @@ test("storage: data directory, JSON files and the key/value store", async (t) =>
   assert.equal(dataRoot({ PI_KEEPALIVE_DIR: "/x" }, "file:///a"), "/x");
   assert.match(dataRoot({}, "file:///home/u/.omp/agent/extensions/k/index.ts"), /\.omp\/agent\/keepalive$/);
   assert.match(dataRoot({}, "file:///home/u/.pi/agent/extensions/k/index.ts"), /\.pi\/agent\/keepalive$/);
+  assert.equal(dataRoot({}, "file:///Users/u/src/pi-keepalive/index.ts", "/Users/u/.omp/agent"), "/Users/u/.omp/agent/keepalive", "a symlinked OMP install still finds OMP's directory");
   const root = await tempRoot(t);
   assert.equal(readJson(`${root}/none.json`), undefined);
   writeJson(root, "a.json", { a: 1 });

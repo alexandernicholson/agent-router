@@ -1,5 +1,5 @@
 // Sends the keepalive request through the same provider the session used.
-import { endpointFor, usageFromBody, type ReplayApi, type Tokens } from "./replay.ts";
+import { endpointFor, usageFromBody, usageFromSse, type ReplayApi, type Tokens } from "./replay.ts";
 import { keepalivePrompt } from "./version.ts";
 import type { ForkResult, Source } from "./panel.ts";
 
@@ -22,7 +22,9 @@ const tokens = (u: any): Tokens & { write1h?: number } => ({ read: u.cacheRead, 
 
 /**
  * Preferred (Pi): the runtime builds auth, URL and session-affinity headers itself; only the body is swapped via onPayload.
- * Fallback (OMP exposes no streaming API to extensions): POST the replayed body non-streaming to the model's base URL.
+ * Fallback (OMP exposes no streaming API to extensions): POST the replayed body to the model's base URL, non-streaming, or for
+ * the Codex backend, which only streams, as SSE. Codex routes a request to its cached prefix by the `session_id` header, which
+ * OMP sets to the body's `prompt_cache_key`; without it the replay reads nothing.
  */
 export async function sendKeepalive(ctx: any, source: Source, payload: Record<string, unknown>, outer: AbortSignal, sessionId: string, forceFetch: boolean, headers?: Record<string, string>): Promise<ForkResult> {
   const model = source.modelRef ?? ctx?.model;
@@ -35,17 +37,26 @@ export async function sendKeepalive(ctx: any, source: Source, payload: Record<st
     if (msg.stopReason === "error" || msg.stopReason === "aborted") return { answered: false, reason: String(msg.errorMessage ?? msg.stopReason) };
     return { answered: true, usage: tokens(msg.usage) };
   }
-  const body = { ...payload, stream: false } as Record<string, unknown>;
-  delete body.stream_options;
+  const api = source.api as ReplayApi;
+  const codex = api === "openai-codex-responses";
+  const body = codex ? { ...payload } : ({ ...payload, stream: false } as Record<string, unknown>);
+  if (!codex) delete body.stream_options;
   const out: Record<string, string> = { "content-type": "application/json", ...(model?.headers ?? {}), ...(a.headers ?? {}) };
   for (const [k, v] of Object.entries(headers ?? {})) if (!SKIP_HEADERS.has(k.toLowerCase())) out[k] = v;
-  const api = source.api as ReplayApi;
   if (a.apiKey) {
     if (api === "anthropic-messages") { out["x-api-key"] = a.apiKey; out["anthropic-version"] = "2023-06-01"; } else out.authorization = `Bearer ${a.apiKey}`;
   }
-  if (sessionId) { out["x-session-affinity"] = sessionId; out["x-session-id"] = sessionId; }
+  if (codex) {
+    out.accept = "text/event-stream";
+    const key = typeof payload.prompt_cache_key === "string" ? payload.prompt_cache_key : sessionId;
+    if (key) { out.session_id = key; out.conversation_id = key; }
+  } else if (sessionId) { out["x-session-affinity"] = sessionId; out["x-session-id"] = sessionId; }
   const res = await fetch(endpointFor(api, a.baseUrl ?? source.baseUrl), { method: "POST", headers: out, body: JSON.stringify(body), signal, redirect: "error" });
-  if (!res.ok) return { answered: false, reason: `HTTP ${res.status}` };
-  const usage = usageFromBody(api, await res.json());
+  if (!res.ok) {
+    // The status alone says too little to fix a refused replay; the start of the body names the field or limit.
+    const detail = await res.text().then((t) => t.replace(/\s+/g, " ").trim().slice(0, 200), () => "");
+    return { answered: false, reason: `HTTP ${res.status}${detail ? `: ${detail}` : ""}` };
+  }
+  const usage = codex ? usageFromSse(await res.text()) : usageFromBody(api, await res.json());
   return usage ? { answered: true, usage } : { answered: false, reason: "no usage" };
 }

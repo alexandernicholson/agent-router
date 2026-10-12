@@ -118,8 +118,18 @@ export function createPanel() {
     return served ? pickRow(served, row.last.read + row.last.write) : undefined;
   }
 
-  /** The lifetime governing a row: native, the gateway's row by source, the client TTL setting, or unknown. */
+  /**
+   * The Codex backend reports no lifetime and answers no cache policy, but OpenAI documents one: a prefix stays reusable for
+   * 30 minutes after its latest write or reuse (GPT-5.6 and later; the backend's `24h` retention keeps earlier models about as
+   * long). A read renews it, so keepalives chain. The request cannot change it: the backend refuses `prompt_cache_retention`.
+   */
+  const CODEX_LIFETIME_S = 1800;
+  const CODEX_ROW = { status: "enabled", source: "documented", safe: CODEX_LIFETIME_S - Math.max(10, CODEX_LIFETIME_S / 10), maxIdle: null, refreshOnRead: true, pResume: null, anchorOnStart: true };
+  const codexRow = (c: Ctx) => c.last?.api === "openai-codex-responses";
+
+  /** The lifetime governing a row: native, Codex's documented one, the gateway's row by source, the client TTL setting, or unknown. */
   function lifetime(c: Ctx, row: any) {
+    if (codexRow(c) && policyRow(row)) return { ...lifetimeOf(row, CODEX_ROW, null), shownS: CODEX_LIFETIME_S, controlled: false };
     // After a real 404 or empty answer nobody has an opinion, so the client TTL may apply; while the answer is unknown or too old, nobody may substitute one.
     const rows = servedRows(c, row);
     const client = rows && policyRow(row) ? clientTtl(row.last.model, c.settings.fallback.ttl, c.settings.fallback.models) : null;
@@ -127,12 +137,12 @@ export function createPanel() {
   }
 
   /** A lifetime from the gateway or the user's setting rules this row, so the 5m/1h request toggle does nothing for it. */
-  const ownLifetime = (c: Ctx, row: any) => !["native", "unknown"].includes(lifetime(c, row).source);
+  const ownLifetime = (c: Ctx, row: any) => codexRow(c) || !["native", "unknown"].includes(lifetime(c, row).source);
 
-  /** Any non-Anthropic base URL may publish a cache policy; policyUrl refuses api.anthropic.com and unsafe URLs. */
+  /** Any non-Anthropic base URL may publish a cache policy; policyUrl refuses api.anthropic.com and unsafe URLs. Codex never does. */
   function gatewayBase(c: Ctx): string | undefined {
     const base = c.last?.baseUrl;
-    return base && policyUrl(base, "x", "") ? base : undefined;
+    return base && !codexRow(c) && policyUrl(base, "x", "") ? base : undefined;
   }
 
   async function savedEntries(host: PanelHost, key: string, valid: (e: unknown[]) => boolean): Promise<any[]> {
@@ -194,7 +204,11 @@ export function createPanel() {
     return c.ttl ?? c.settings.ttl;
   }
 
-  /** Called with the payload about to be sent; returns the payload to send (TTL applied when one is chosen). */
+  /**
+   * Called with the payload about to be sent; returns the payload to send (TTL applied when one is chosen). The request becomes
+   * the replay source only once its answer arrives (`finish` with usage): OMP also sends side requests, such as a session
+   * title, that never produce a message, and those must neither be replayed nor hold upkeep off.
+   */
   function begin(source: Source): unknown {
     const c = ctx;
     if (!c || c.warming) return source.payload;
@@ -202,11 +216,17 @@ export function createPanel() {
     const payload = wanted ? applyTtl(source.payload, wanted) : source.payload;
     const sent: Source = { ...source, payload: structuredClone(payload) };
     const changed = c.lastModel !== undefined && !sameModel(c.lastModel, source.model);
-    c.lastModel = source.model;
     c.pending = { startedAt: c.host.now(), changed, requested: requestedTtl(payload), source: sent };
-    c.last = sent;
     if (changed) c.host.redraw();
     return payload;
+  }
+
+  /** The agent loop ended: a request still pending got no answer (a side request), so upkeep may act again. */
+  function settle() {
+    const c = ctx;
+    if (!c?.pending) return;
+    c.pending = undefined;
+    c.host.redraw();
   }
 
   function creationOf(usage: Tokens & { write1h?: number }, source: Source, model: string, requested: Ttl) {
@@ -244,6 +264,8 @@ function sampleOf(c: Ctx, fields: object) {
     if (!c || !pending) return;
     c.pending = undefined;
     if (usage) {
+      c.last = pending.source;
+      c.lastModel = pending.source.model;
       const model = usage.model || pending.source.model;
       let sample: any = sampleOf(c, { turnId: `r${pending.startedAt.toString(36)}${c.seq++}`, model, startedAt: pending.startedAt, completedAt: Math.max(pending.startedAt, c.host.now()),
         read: usage.read, write: usage.write, fresh: usage.fresh, output: usage.output, ...requestedOf(pending.source, model, pending.requested) });
@@ -408,6 +430,8 @@ function sampleOf(c: Ctx, fields: object) {
     c.host.redraw();
     if (ttl) await persist(c, TTL_KEY, ttl, savedTtl, "TTL");
   }
+  /** Switches the conversation between 5m and 1h. */
+  const toggleTtl = () => (ctx ? setTtl(wantedTtl(ctx) === "1h" ? "5m" : "1h") : Promise.resolve());
 
   async function introduce(text: string[]) {
     const c = ctx;
@@ -431,6 +455,6 @@ function sampleOf(c: Ctx, fields: object) {
   /** The model changed: nothing may be replayed until the next real request. */
   const forget = () => { if (ctx) ctx.last = undefined; };
 
-  return { get, forget, initialize, refresh, begin, finish, compacted, tick, setUpkeep, cycle, setTtl, introduce, managed, rows, mainRow, state, policyOf, lifetime, ownLifetime, recentUsage, isKeepalive, isCompaction, keepalivesLeft, keepalivePrompt, eff, lookUpPrices, wantedTtl, gatewayBase, setSettings: (s: Resolved) => { if (ctx) ctx.settings = s; } };
+  return { get, forget, initialize, refresh, begin, settle, finish, compacted, tick, setUpkeep, cycle, setTtl, toggleTtl, introduce, managed, rows, mainRow, state, policyOf, lifetime, ownLifetime, recentUsage, isKeepalive, isCompaction, keepalivesLeft, keepalivePrompt, eff, lookUpPrices, wantedTtl, gatewayBase, setSettings: (s: Resolved) => { if (ctx) ctx.settings = s; } };
 }
 export type Panel = ReturnType<typeof createPanel>;

@@ -94,6 +94,7 @@ test("begin and finish do nothing without a session or while warming", async (t)
   assert.equal(await idle.tick(), false);
   await idle.setUpkeep("warm");
   await idle.cycle();
+  await idle.toggleTtl();
   await idle.setTtl("1h");
   await idle.introduce(["x"]);
   await idle.refresh();

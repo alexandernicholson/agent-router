@@ -66,7 +66,8 @@ export function segments(panel: Panel, c: Ctx, p: Paint, row: any): string {
   const wanted = panel.wantedTtl(c);
   const reported = wanted && status.ttl !== wanted ? ` · ${status.ttl} reported` : "";
   const life = lifeGrade(status.leftMs);
-  return `${result}${reported}${status.leftMs && life ? p.color(life, ` · ${SOURCE_ICONS.native} ETA ${timeLeft(status.leftMs, c.settings.reducedMotion)}`) : p.color("poor", " · expired")}`;
+  // The separator stays outside the colour, so the miss chip that statusLine puts after the first part never splits a coloured run.
+  return `${result}${reported} · ${status.leftMs && life ? p.color(life, `${SOURCE_ICONS.native} ETA ${timeLeft(status.leftMs, c.settings.reducedMotion)}`) : p.color("poor", "expired")}`;
 }
 
 export function misses(c: Ctx, rows: any[]) {
@@ -108,18 +109,57 @@ function marker(p: Paint, upkeep: string): string {
   return marks.length ? marks.map((name) => p.color(name as "warm" | "compact", "⬥")).join("") : p.dim("⬦");
 }
 
-/** The footer line: dial, upkeep mode, TTL, hit-rate bar, ETA or policy text, miss chip, counts. */
-export function statusLine(panel: Panel, c: Ctx, p: Paint): string {
+/** The footer bar's pieces, each painted with `p`, for a renderer that lays them out itself (Tern's status line). */
+export function statusParts(panel: Panel, c: Ctx, p: Paint) {
   const row = panel.mainRow(c);
   const status = drawnState(panel, c, row);
   const latest = status.sample;
-  const note = keepaliveNote(panel, c, row, true);
-  const counts = `${note ? ` · ${note}` : ""}${latest ? ` · read ${cacheTokens(latest.read)} · write ${cacheTokens(latest.write)} · new ${cacheTokens(latest.fresh)}` : ""}`;
-  const ttl = panel.wantedTtl(c) ?? latest?.requested ?? "5m";
   const parts = row.last || row.compaction ? segments(panel, c, p, row) : "no observation";
   const [head, ...rest] = parts.split(" · ");
-  const body = [head + missChip(c, p, [row]), ...rest].join(" · ");
-  return `[ ${cacheDial(status)} ] ${marker(p, c.upkeep)} ${c.upkeep} ${panel.ownLifetime(c, row) ? "" : `TTL ${ttl} `}${body}${counts}${c.available ? "" : " · storage unavailable"}`;
+  return {
+    dial: cacheDial(status),
+    marks: marker(p, c.upkeep),
+    upkeep: c.upkeep,
+    ttl: panel.ownLifetime(c, row) ? undefined : (panel.wantedTtl(c) ?? latest?.requested ?? "5m"),
+    body: [head + missChip(c, p, [row]), ...rest].join(" · "),
+    note: keepaliveNote(panel, c, row, true),
+    counts: latest ? `read ${cacheTokens(latest.read)} · write ${cacheTokens(latest.write)} · new ${cacheTokens(latest.fresh)}` : undefined,
+    available: c.available,
+  };
+}
+
+/** The footer line: dial, upkeep mode, TTL, hit-rate bar, ETA or policy text, miss chip, counts. */
+export function statusLine(panel: Panel, c: Ctx, p: Paint): string {
+  const s = statusParts(panel, c, p);
+  return `[ ${s.dial} ] ${s.marks} ${s.upkeep} ${s.ttl ? `TTL ${s.ttl} ` : ""}${s.body}${s.note ? ` · ${s.note}` : ""}${s.counts ? ` · ${s.counts}` : ""}${s.available ? "" : " · storage unavailable"}`;
+}
+
+export interface Span {
+  text: string;
+  tone?: string;
+}
+
+// Painted runs as the span painter marks them: SOH tone STX text ETX. Control characters never occur in the bar's own text.
+const RUN = /\u0001(\w+)\u0002([^\u0003]*)\u0003/g;
+
+/** A painter that records each colour as a named tone instead of an ANSI escape; `spans` reads its output back. */
+export const spanPainter: Paint = {
+  color: (name, text) => (text ? `\u0001${name}\u0002${text}\u0003` : text),
+  dim: (text) => (text ? `\u0001dim\u0002${text}\u0003` : text),
+  palette: CACHE_COLORS.dark,
+};
+
+/** Text painted by `spanPainter` as spans: painted runs keep their tone, plain text has none. */
+export function spans(text: string): Span[] {
+  const out: Span[] = [];
+  let at = 0;
+  for (const run of text.matchAll(RUN)) {
+    if (run.index > at) out.push({ text: text.slice(at, run.index) });
+    out.push({ text: run[2], tone: run[1] });
+    at = run.index + run[0].length;
+  }
+  if (at < text.length) out.push({ text: text.slice(at) });
+  return out;
 }
 
 export function matrixLines(p: Paint, rows: any[], columns: number): string[] {
@@ -146,7 +186,7 @@ function overview(p: Paint, rows: any[], columns: number): string[] {
   ];
 }
 
-const requestName = (s: any) => (isKeepalive(s) ? "keepalive" : isCompaction(s) ? "compaction" : `${displayText(s.turnId, 12)}:${s.index}`);
+export const requestName = (s: any) => (isKeepalive(s) ? "keepalive" : isCompaction(s) ? "compaction" : `${displayText(s.turnId, 12)}:${s.index}`);
 const wanted = (filter: RequestFilter, s: any) =>
   filter === "all" || (filter === "keepalives" && isKeepalive(s)) || (filter === "compactions" && isCompaction(s)) ||
   (filter === "real" && !isKeepalive(s) && !isCompaction(s)) || (filter === "misses" && !!s.miss);
@@ -189,18 +229,11 @@ function priceNote(c: Ctx, row: any): string {
   return ` · priced by ${displayText(v.source ?? "models.dev", 40)}${listing}`;
 }
 
-export function dashboard(panel: Panel, c: Ctx, p: Paint, filter: RequestFilter, columns = 100): string[] {
+/** The dashboard's conversation section: its title, the bar line, then TTL, lifetime, upkeep, totals and model lines. */
+export function mainSection(panel: Panel, c: Ctx, p: Paint): string[] {
   const row = panel.mainRow(c);
   const status = drawnState(panel, c, row);
-  const out = overview(p, [row], columns);
-  const line = missLine(c, [row]);
-  if (line) out.push(p.color("fair", line));
-  if (!c.available) out.push(p.color("fair", "Storage unavailable · showing last known observations"));
-  out.push(p.dim(`Upkeep: ${upkeepText(c)}`));
-  out.push(p.dim("Lifetime icons: ◉ provider-reported · ✦ gateway-learned · ▣ documented · ◇ gateway default · ⟳ gateway probe · ✎ your TTL setting · ⊘ no cache · ◌ unknown"));
-  out.push(p.dim(`Bars show the hit rate over the last ${RATE_REQUESTS} requests, coloured for the context size. Time left counts from the last request that read or wrote the cache.`));
-  out.push("", `Main`);
-  out.push(`${cacheDial(status)} ${marker(p, c.upkeep)} ${c.upkeep} ${panel.ownLifetime(c, row) ? "" : `TTL ${panel.wantedTtl(c) ?? row.last?.requested ?? "5m"} `}${segments(panel, c, p, row)}`);
+  const out = ["Main", `${cacheDial(status)} ${marker(p, c.upkeep)} ${c.upkeep} ${panel.ownLifetime(c, row) ? "" : `TTL ${panel.wantedTtl(c) ?? row.last?.requested ?? "5m"} `}${segments(panel, c, p, row)}`];
   if (!panel.ownLifetime(c, row)) out.push(p.dim(`TTL ${panel.wantedTtl(c) ?? "5m"} · ${c.ttl ? "chosen with /keepalive ttl" : c.settings.ttl ? "ttl in /keepalive settings" : "the request's own cache_control"}`));
   const lifetime = lifetimeLine(panel, c, row);
   if (lifetime) out.push(p.dim(lifetime));
@@ -214,6 +247,21 @@ export function dashboard(panel: Panel, c: Ctx, p: Paint, filter: RequestFilter,
   const t = row.totals;
   out.push(p.dim(`${window ? `hit rate over the last ${plural(window, "request")} · ` : ""}${plural(t.requests, "request")} · read ${cacheTokens(t.read)} · write ${cacheTokens(t.write)} · new ${cacheTokens(t.fresh)} · out ${cacheTokens(t.output)}`));
   out.push(p.dim(row.last ? `${displayText(row.last.model, 160)} · ${displayText(row.last.ttlSource, 120)}${priceNote(c, row)}` : "No usage observed in this context"));
+  return out;
+}
+
+export function dashboard(panel: Panel, c: Ctx, p: Paint, filter: RequestFilter, columns = 100): string[] {
+  const row = panel.mainRow(c);
+  const out = overview(p, [row], columns);
+  const line = missLine(c, [row]);
+  if (line) out.push(p.color("fair", line));
+  if (!c.available) out.push(p.color("fair", "Storage unavailable · showing last known observations"));
+  out.push(p.dim(`Upkeep: ${upkeepText(c)}`));
+  out.push(p.dim(LIFETIME_LEGEND));
+  out.push(p.dim(`Bars show the hit rate over the last ${RATE_REQUESTS} requests, coloured for the context size. Time left counts from the last request that read or wrote the cache.`));
+  out.push("", ...mainSection(panel, c, p));
   out.push("", ...requestLines(p, row, filter));
   return out;
 }
+
+export const LIFETIME_LEGEND = "Lifetime icons: ◉ provider-reported · ✦ gateway-learned · ▣ documented · ◇ gateway default · ⟳ gateway probe · ✎ your TTL setting · ⊘ no cache · ◌ unknown";

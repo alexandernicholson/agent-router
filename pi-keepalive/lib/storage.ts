@@ -3,9 +3,14 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-/** ~/.omp/agent/keepalive when loaded from an OMP directory, else ~/.pi/agent/keepalive; PI_KEEPALIVE_DIR overrides. */
-export function dataRoot(env: Record<string, string | undefined>, moduleUrl: string): string {
+/**
+ * `<agent dir>/keepalive`: PI_KEEPALIVE_DIR, else the host's agent directory when it names one (OMP: `pi.pi.getAgentDir()`),
+ * else ~/.omp/agent/keepalive when loaded from an OMP directory and ~/.pi/agent/keepalive otherwise.
+ * The module path alone is unreliable: OMP imports a symlinked extension by its real path.
+ */
+export function dataRoot(env: Record<string, string | undefined>, moduleUrl: string, agentDir?: unknown): string {
   if (env.PI_KEEPALIVE_DIR) return env.PI_KEEPALIVE_DIR;
+  if (typeof agentDir === "string" && agentDir) return join(agentDir, "keepalive");
   return join(homedir(), moduleUrl.includes("/.omp/") ? ".omp" : ".pi", "agent", "keepalive");
 }
 

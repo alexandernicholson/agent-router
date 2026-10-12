@@ -7,8 +7,16 @@ follows the gateway cache-policy protocol (the keepalive prompt is exactly `Repl
 
 ## Install
 
-Pi and OMP load extensions from a directory with an `index.ts`. Copy or symlink this
-directory (no build step, no dependencies):
+**OMP**, from this repository's marketplace (its `.omp-plugin/marketplace.json` lists this directory as `keepalive`):
+
+```sh
+omp plugin marketplace add alexandernicholson/agent-router
+omp plugin install keepalive@agent-router-tools
+```
+
+(or `/marketplace add …` and `/marketplace install keepalive@agent-router-tools` inside OMP). Restart the session to load it; `omp plugin upgrade keepalive@agent-router-tools` updates it.
+
+**Pi**, or OMP from a checkout: both load an extension from a directory with an `index.ts`. Copy or symlink this directory (no build step, no dependencies):
 
 ```sh
 # Pi
@@ -20,12 +28,29 @@ mkdir -p ~/.omp/agent/extensions && ln -s "$PWD/pi-keepalive" ~/.omp/agent/exten
 Restart the agent (or `/reload`). Try one-off: `pi -e ./pi-keepalive/index.ts`.
 Slash command: `/keepalive [status|on|off]`.
 
+Use one install per agent: with both the marketplace plugin and the symlink, OMP loads Keepalive twice, and both copies warm the cache.
+
+## Tern
+
+Run OMP in a [Tern](https://docs.stencil.so/tern/) pane with the [Keepalive Tern plugin](../tern-keepalive/README.md) installed, and the cache bar moves into Tern's status line, the dashboard and settings become native Tern panes, and the palette changes the focused pane's upkeep and TTL. Without the plugin the footer bar stays as it is.
+
+The extension finds Tern by `TERN_PANE` and writes to the plugin's data directory (`PI_KEEPALIVE_TERN_DIR`, which the plugin sets in every new pane, else Tern's state directory):
+
+| File | Written by | Holds |
+|---|---|---|
+| `panes/<pane>.json` | extension, on change and at least every 5 s | bar, dashboard, settings, defaults and the settings rows |
+| `control/<pane>.json` | plugin | `{seq, queue: [{seq, upkeep?, ttl?}]}`; each newer `seq` is applied once, in order |
+| `active.json` | plugin, every 5 s | `{at}` (unix seconds); while it is under 20 s old the footer bar is hidden |
+
+`PI_KEEPALIVE_TERN=0` turns the bridge off.
+
 ## What it does
 
 | Provider | Policy |
 |---|---|
 | Any non-Anthropic base URL | `GET {base}/v1/cache/policy?alias=<model>&session=<session id>`; warms only rows with `status: "enabled"`, using `safe_refresh_s`, `max_idle_s`, `refresh_on_read`. Cached 10 min, 5 s timeout, no redirects, exponential backoff on failure. |
 | `api.anthropic.com` | Documented TTL: 5 min (or 1 h if the request uses `ttl: "1h"`), refresh at TTL − 30 s (5 m) / TTL − 120 s (1 h); max idle 30 min. |
+| ChatGPT Codex (`chatgpt.com/backend-api`: OMP's `openai-codex`, or a provider wrapping it) | Documented lifetime: 30 min after the latest write or read, so a keepalive that reads renews it; refresh at 27 min. No policy request. The backend picks the retention itself (it refuses `prompt_cache_retention`), so there is no TTL choice; upkeep, limit and compaction apply. |
 | Anything else | Not warmed unless you set a client TTL (`unreported_ttl`, `off` by default; `5m` to `1h`; `unreported_ttl_models` overrides per model, first match wins, never Claude). |
 
 Gateways are not detected by name: the policy is asked of any base URL other than `api.anthropic.com` (https, or http on loopback); no answer (404, error, redirect) means no policy and Claude models use the native 5m/1h logic. The protocol is described in [`../keepalive/docs/cache-policy-protocol.md`](../keepalive/docs/cache-policy-protocol.md).
@@ -57,6 +82,8 @@ stand. Elsewhere it returns nothing and the built-in behaviour is unchanged.
 | `PI_KEEPALIVE_COMPACT_THRESHOLD` | 100k | tokens |
 | `PI_KEEPALIVE_REDUCED_MOTION` | off | `on`: countdowns in whole minutes, changing once a minute, `soon` in the last |
 | `PI_KEEPALIVE_TRANSPORT` | auto | `fetch` forces the HTTP replay path |
+| `PI_KEEPALIVE_TERN` | on | `0` stops publishing to the Tern plugin (see [Tern](#tern)) |
+| `PI_KEEPALIVE_TERN_DIR` | Tern's `plugin-data/keepalive` | where the Tern plugin's files are; set by the plugin in new panes |
 
 ## How the hidden request is made
 
@@ -69,7 +96,9 @@ keepalive user message, caps output, and leaves everything before it byte-identi
 - **Pi**: sent through `ctx.modelRegistry.streamSimple(model, ctx, { onPayload, sessionId })`, so Pi builds auth, URL and session-affinity headers exactly as for a real request and only the body is swapped.
 - **OMP 18.6.1**: `ModelRegistry` exposes `getApiKeyAndHeaders` / `getApiKeyForProvider` but no streaming call, so the body is POSTed non-streaming with `fetch` to the model's base URL (`/v1/messages`, `/chat/completions`, `/responses`), with registry auth and, where Pi provides them (`before_provider_headers`), the real request's headers.
 
-Supported APIs: `anthropic-messages`, `openai-completions`, `openai-responses`. Anthropic budget thinking (`thinking.type: "enabled"`) is not replayable (its budget derives from `max_tokens` and is part of the cache key) and is skipped with status `cache: off (...)`.
+Supported APIs: `anthropic-messages`, `openai-completions`, `openai-responses`, `openai-codex-responses`. Anthropic budget thinking (`thinking.type: "enabled"`) is not replayable (its budget derives from `max_tokens` and is part of the cache key) and is skipped with status `cache: off (...)`.
+
+Codex: OMP talks to Codex over a WebSocket and, after the first request, sends only the new items with `previous_response_id`, which the HTTP endpoint refuses. The extension rebuilds the full body (the previous full input, that response's output items from `message_end`, then the new items), drops the `response.create` envelope and replays it as an HTTP SSE request to `{base}/codex/responses`, with the session's OAuth token and `session_id`/`conversation_id` set to the body's `prompt_cache_key`; without those headers the backend serves it from another cache and it reads nothing. A conversation that began before the extension loaded cannot be rebuilt and is not warmed until its next full request. OMP's own side requests (session titles, `:side:` in `client_metadata.session_id`) are ignored.
 
 ## Limitations
 
@@ -77,6 +106,7 @@ Supported APIs: `anthropic-messages`, `openai-completions`, `openai-responses`. 
 - The keepalive appends a user message after the last request's final message, so it reads the prefix that request wrote; it does not include the assistant reply that followed.
 - Each keepalive is billed like a cache read of the prefix plus ~1 output token.
 - Only `message_end` assistant usage with `cacheRead`/`cacheWrite` > 0 anchors the cache; providers that do not report cache usage are never warmed.
+- OMP task subagents are not tracked or warmed; only the main conversation is.
 
 ## Develop
 

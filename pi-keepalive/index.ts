@@ -1,11 +1,13 @@
 // Prompt-cache keepalive for Pi and OMP (oh-my-pi): feature parity with the Claude Code `keepalive` plugin.
 // No package-specific type import: Pi and OMP expose the same extension API under different package names.
+import { createCodexHistory, sideRequest } from "./lib/codex.ts";
 import { createPanel, type CompactResult, type ForkResult, type PanelHost, type Source } from "./lib/panel.ts";
 import { REQUEST_FILTERS, dashboard, painter, statusLine, type RequestFilter } from "./lib/render.ts";
 import { replayApi, type Tokens } from "./lib/replay.ts";
 import { fallbackTtl } from "./lib/core/cache.js";
 import { SETTING_ROWS, keepaliveLimit, mergeSettings, resolveSettings, type Settings, UPKEEP, type Upkeep } from "./lib/settings.ts";
 import { createStore, dataRoot, readJson, writeJson, trace } from "./lib/storage.ts";
+import { lastControl, readControl, snapshot, ternActive, ternBridge, writePane } from "./lib/tern.ts";
 import { VERSION } from "./lib/version.ts";
 import { sendKeepalive } from "./lib/transport.ts";
 
@@ -19,7 +21,9 @@ const INTRO = [
 export default function keepaliveExtension(pi: any): void {
   if (process.env.PI_KEEPALIVE === "0") return;
   const panel = createPanel();
-  const root = dataRoot(process.env, import.meta.url);
+  let agentDir: unknown;
+  try { agentDir = pi?.pi?.getAgentDir?.(); } catch { agentDir = undefined; }
+  const root = dataRoot(process.env, import.meta.url, agentDir);
   const store = createStore(root);
   const env = process.env;
   let ctxRef: any;
@@ -30,8 +34,15 @@ export default function keepaliveExtension(pi: any): void {
   let ourCompaction = false;
   let enabled = true;
   let realHeaders: Record<string, string> | undefined;
+  let codex = createCodexHistory();
   const settingsNow = (): Settings => mergeSettings(readJson(`${root}/settings.json`), env);
+  let settingsText = "";
   const p = painter(env, !!env.NO_COLOR);
+  // In a Tern pane: publish the pane's cache state for the Tern plugin, take its commands, and leave the footer bar to it while it runs.
+  const bridge = ternBridge(env);
+  let ternShown = false;
+  let controlSeq = bridge ? lastControl(bridge) : 0;
+  let published: { key: string; at: number } | undefined;
 
   const sessionId = (): string => String(ctxRef.sessionManager.getSessionId());
   const ui = (): any => ctxRef?.ui;
@@ -84,21 +95,69 @@ export default function keepaliveExtension(pi: any): void {
     const c = panel.get();
     if (!c || !enabled) return;
     const text = statusLine(panel, c, p);
-    if (text !== lastText) { lastText = text; trace(env, "status", { text: statusLine(panel, c, painter({}, true)) }); safe(() => ui()?.setStatus?.("keepalive", text)); }
+    const shown = ternShown ? "" : text;
+    if (shown !== lastText) {
+      lastText = shown;
+      trace(env, "status", { text: statusLine(panel, c, painter({}, true)), tern: ternShown });
+      safe(() => ui()?.setStatus?.("keepalive", ternShown ? undefined : text));
+    }
     if (widget) safe(() => ui()?.setWidget?.("keepalive", dashboard(panel, c, p, widget!)));
   }
 
+  /** Writes the pane's snapshot when it changed, and at least every 5 s so the plugin can tell a live pane from a dead one. */
+  function publish(open = true): void {
+    if (!bridge) return;
+    const now = Date.now();
+    const c = panel.get();
+    const snap = snapshot(panel, open ? c : undefined, { pane: bridge.pane, sessionId: c?.sessionId ?? "", root, cwd: ctxRef?.cwd ?? process.cwd(), settings: settingsNow(), enabled: enabled && open, now });
+    const key = JSON.stringify({ ...snap, at: 0 });
+    if (open && published?.key === key && now - published.at < 5000) return;
+    published = { key, at: now };
+    try { writePane(bridge, JSON.stringify(snap)); } catch (e) { trace(env, "tern", { error: String(e) }); }
+  }
+
+  /** Applies, in order, the upkeep/TTL commands the Tern plugin left for this pane since the last poll. */
+  async function control(): Promise<void> {
+    if (!bridge) return;
+    for (const command of readControl(bridge, controlSeq)) {
+      controlSeq = command.seq;
+      if (command.upkeep === "cycle") await panel.cycle();
+      else if (command.upkeep) await panel.setUpkeep(command.upkeep);
+      if (command.ttl === "toggle") await panel.toggleTtl();
+      else if (command.ttl) await panel.setTtl(command.ttl);
+    }
+  }
+
+  /** One second: settings changed on disk (by /keepalive set in another session or Tern's settings page), Tern's commands, upkeep, redraw. */
+  async function second(): Promise<void> {
+    const settings = settingsNow();
+    const text = JSON.stringify(settings);
+    if (text !== settingsText) { settingsText = text; panel.setSettings(resolveSettings(settings)); }
+    ternShown = ternActive(bridge, Date.now());
+    await control();
+    await panel.tick();
+    render();
+    publish();
+  }
+
+  // OMP runs task subagents in-process and may deliver their session events to this extension too; only the main conversation is
+  // tracked and kept warm, so every handler ignores a subagent's context.
+  const subagent = (ctx: { agent?: { kind?: unknown } } | undefined): boolean => ctx?.agent?.kind === "sub";
+
   async function start(ctx: any): Promise<void> {
+    if (subagent(ctx)) return;
     ctxRef = ctx;
     stop();
-    const settings = resolveSettings(settingsNow());
-    await panel.initialize(host, sessionId(), settings, panel.get());
+    codex = createCodexHistory();
+    const settings = settingsNow();
+    settingsText = JSON.stringify(settings);
+    ternShown = ternActive(bridge, Date.now());
+    await panel.initialize(host, sessionId(), resolveSettings(settings), panel.get());
     await panel.introduce(INTRO);
-    timer = setInterval(() => {
-      void panel.tick().then(render).catch(() => undefined);
-    }, 1000);
+    timer = setInterval(() => { void second().catch(() => undefined); }, 1000);
     timer.unref?.();
     render();
+    publish();
   }
 
   function stop(): void {
@@ -109,36 +168,57 @@ export default function keepaliveExtension(pi: any): void {
   }
 
   for (const ev of ["session_start", "session_switch", "session_branch", "session_tree"]) pi.on(ev, (_e: any, ctx: any) => start(ctx));
-  pi.on("session_shutdown", () => { stop(); safe(() => { ui()?.setStatus?.("keepalive", undefined); ui()?.setWidget?.("keepalive", undefined); }); });
-  pi.on("model_select", (_e: any, ctx: any) => { ctxRef = ctx; panel.forget(); });
-  pi.on("agent_start", () => abort.abort());
+  pi.on("session_shutdown", (_e: any, ctx: any) => {
+    if (subagent(ctx)) return;
+    stop();
+    publish(false);
+    safe(() => { ui()?.setStatus?.("keepalive", undefined); ui()?.setWidget?.("keepalive", undefined); });
+  });
+  pi.on("model_select", (_e: any, ctx: any) => { if (subagent(ctx)) return; ctxRef = ctx; panel.forget(); });
+  pi.on("agent_start", (_e: any, ctx: any) => { if (!subagent(ctx)) abort.abort(); });
+  pi.on("agent_end", (_e: any, ctx: any) => { if (!subagent(ctx)) panel.settle(); });
 
-  pi.on("before_provider_headers", (e: any) => {
+  pi.on("before_provider_headers", (e: any, ctx: any) => {
+    if (subagent(ctx)) return;
     realHeaders = Object.fromEntries(Object.entries(e.headers).filter(([, v]) => typeof v === "string")) as Record<string, string>;
   });
 
   pi.on("before_provider_request", (e: any, ctx: any) => {
+    if (subagent(ctx)) return undefined;
     ctxRef = ctx;
     const c = panel.get();
     const model = ctx?.model;
     if (!c || !model || c.warming) return undefined;
-    const source: Source = { model: String(model.id), api: replayApi(model.api), baseUrl: String(model.baseUrl), modelRef: model, payload: e.payload };
+    const api = replayApi(model.api, model.baseUrl);
+    if (api === "openai-codex-responses" && sideRequest(e.payload)) return undefined;
+    // The ledger and the keepalive see Codex's full body; what is sent is never changed.
+    const payload = api === "openai-codex-responses" ? codex.request(e.payload) : e.payload;
+    const source: Source = { model: String(model.id), api, baseUrl: String(model.baseUrl), modelRef: model, payload };
     const next = panel.begin(source);
-    return next === e.payload ? undefined : next;
+    return next === payload ? undefined : next;
   });
 
   const usageOf = (u: any): Tokens | undefined => (u ? { read: u.cacheRead, write: u.cacheWrite, fresh: u.input, output: u.output } : undefined);
+  // Pi reports the 1h share of a cache write as `cacheWrite1h`; OMP as `cttl.ephemeral1h`, present only when non-zero, with `cttl` absent when unknown.
+  const write1hOf = (u: { cacheWrite1h?: unknown; cttl?: unknown }): number | undefined => {
+    if (typeof u.cacheWrite1h === "number") return u.cacheWrite1h;
+    if (!u.cttl || typeof u.cttl !== "object") return undefined;
+    const oneHour = "ephemeral1h" in u.cttl ? u.cttl.ephemeral1h : undefined;
+    return typeof oneHour === "number" ? oneHour : 0;
+  };
 
   pi.on("message_end", async (e: any, ctx: any) => {
     const m = e.message;
-    if (m?.role !== "assistant") return;
+    if (m?.role !== "assistant" || subagent(ctx)) return;
     ctxRef = ctx;
+    codex.response(m);
     const ok = m.stopReason !== "error" && m.stopReason !== "aborted" && m.usage;
-    await panel.finish(ok ? { ...usageOf(m.usage)!, write1h: m.usage.cacheWrite1h, model: String(m.responseModel ?? m.model) } : undefined);
+    await panel.finish(ok ? { ...usageOf(m.usage)!, write1h: write1hOf(m.usage), model: String(m.upstreamModel ?? m.responseModel ?? m.model) } : undefined);
     render();
   });
 
   pi.on("session_compact", async (e: any, ctx: any) => {
+    if (subagent(ctx)) return;
     ctxRef = ctx;
     if (ourCompaction) return;
     const entry = e.compactionEntry;
@@ -171,7 +251,7 @@ export default function keepaliveExtension(pi: any): void {
       const say = (text: string) => safe(() => ui()?.notify?.(text, "info"));
       if (cmd === "off" || cmd === "on") {
         enabled = cmd === "on";
-        if (!enabled) { stop(); safe(() => ui()?.setStatus?.("keepalive", undefined)); } else await start(ctx);
+        if (!enabled) { stop(); publish(); safe(() => ui()?.setStatus?.("keepalive", undefined)); } else await start(ctx);
       } else if (!c) say("Keepalive is not active in this session.");
       else if (cmd === "dashboard" || cmd === "requests") {
         widget = REQUEST_FILTERS.find((f) => f === a) ?? "all";
@@ -183,7 +263,7 @@ export default function keepaliveExtension(pi: any): void {
         if (UPKEEP.includes(a as Upkeep)) await panel.setUpkeep(a as Upkeep); else await panel.cycle();
         say(`Keepalive upkeep: ${panel.get()!.upkeep}`);
       } else if (cmd === "ttl") {
-        if (a === "5m" || a === "1h") await panel.setTtl(a); else await panel.setTtl(panel.wantedTtl(c) === "1h" ? "5m" : "1h");
+        if (a === "5m" || a === "1h") await panel.setTtl(a); else await panel.toggleTtl();
         say(`Keepalive TTL: ${panel.wantedTtl(panel.get()!)}`);
       } else if (cmd === "set") {
         const key = SETTING_ROWS.find(([k]) => k === a)?.[0];

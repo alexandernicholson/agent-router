@@ -3,40 +3,9 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import { sendKeepalive } from "../lib/transport.ts";
-import { anthropicPayload, source } from "./helpers.mjs";
-
-async function load(t, env = {}) {
-  const dir = await mkdtemp(join(tmpdir(), "pi-keepalive-ext-"));
-  t.after(() => rm(dir, { recursive: true, force: true }));
-  Object.assign(process.env, { PI_KEEPALIVE_DIR: dir, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", PI_KEEPALIVE_UPKEEP: "warm", PI_KEEPALIVE_LIMIT: "2" }, env);
-  t.after(() => { for (const k of Object.keys(env)) delete process.env[k]; for (const k of ["PI_KEEPALIVE_DIR", "PI_KEEPALIVE_UPKEEP", "PI_KEEPALIVE_LIMIT", "PI_KEEPALIVE", "PI_KEEPALIVE_TRANSPORT"]) delete process.env[k]; });
-  const mod = await import(`../index.ts?${Math.random()}`);
-  const handlers = {};
-  const commands = {};
-  const pi = { on: (e, h) => (handlers[e] ||= []).push(h), registerCommand: (n, o) => (commands[n] = o) };
-  mod.default(pi);
-  const ui = { status: [], widgets: [], notes: [], setStatus: (k, v) => ui.status.push(v), setWidget: (k, v) => ui.widgets.push(v), notify: (m) => ui.notes.push(m), select: async (_t, o) => o[0], input: async () => "9" };
-  const compactions = [];
-  const ctx = {
-    model: { id: "claude-sonnet-5-5", api: "anthropic-messages", provider: "anthropic", baseUrl: "https://api.anthropic.com" },
-    modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "sk-test" }) },
-    sessionManager: { getSessionId: () => "sess-1" }, ui, isIdle: () => true,
-    compact: (o) => { compactions.push(o); o.onComplete({ usage: { cacheWrite: 7, input: 1, output: 2 }, tokensBefore: 3000 }); },
-  };
-  const emit = async (e, ev = {}) => { let out; for (const h of handlers[e] ?? []) out = (await h(ev, ctx)) ?? out; return out; };
-  return { emit, ctx, ui, commands, handlers, compactions };
-}
-const turn = async (x, usage = { cacheRead: 0, cacheWrite: 5000, input: 10, output: 1 }) => {
-  await x.emit("agent_start");
-  const replaced = await x.emit("before_provider_request", { payload: anthropicPayload() });
-  await x.emit("message_end", { message: { role: "assistant", stopReason: "stop", usage, model: "claude-sonnet-5-5" } });
-  await x.emit("agent_end");
-  return replaced;
-};
-const strip = (s) => s.replace(/\x1b\[[0-9;]*m/g, "");
-const run = async (t, seconds) => { for (let i = 0; i < seconds; i++) { t.mock.timers.tick(1000); await settle(); await settle(); } };
-const settle = () => new Promise((r) => setImmediate(r));
+import { anthropicPayload, load, run, source, strip, turn } from "./helpers.mjs";
 
 test("loads, shows a status line and a built-in warmer override only while managing", async (t) => {
   const x = await load(t);
@@ -157,6 +126,36 @@ test("the keepalive timer sends a marked request through the fetch fallback with
   await x.emit("agent_start");
 });
 
+test("a request that never gets an answer (an OMP side request) is not replayed and stops holding upkeep off once the agent ends", async (t) => {
+  const calls = [];
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    calls.push({ body: JSON.parse(init.body) });
+    return { ok: true, status: 200, json: async () => ({ usage: { cache_read_input_tokens: 5000, input_tokens: 9, output_tokens: 1 } }) };
+  });
+  t.mock.timers.enable({ apis: ["setInterval", "Date"], now: 5_000_000 });
+  const x = await load(t, { PI_KEEPALIVE_E2E: "1", PI_KEEPALIVE_E2E_TTL_MS: "20000" });
+  await x.emit("session_start");
+  await x.emit("agent_start");
+  await x.emit("before_provider_request", { payload: anthropicPayload() });
+  await x.emit("message_end", { message: { role: "assistant", stopReason: "stop", usage: { cacheRead: 0, cacheWrite: 5000, input: 10, output: 1 }, model: "claude-sonnet-5-5" } });
+  await x.emit("before_provider_request", { payload: anthropicPayload({ messages: [{ role: "user", content: "<title-request>" }] }) });
+  await run(t, 19);
+  assert.equal(calls.length, 0, "while the agent runs, the unanswered request still counts as in flight");
+  await x.emit("agent_end");
+  await run(t, 1);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(calls.length, 0, "the countdown moved past its window while the agent ran; nothing is sent late");
+  await x.emit("agent_start");
+  await x.emit("before_provider_request", { payload: anthropicPayload() });
+  await x.emit("message_end", { message: { role: "assistant", stopReason: "stop", usage: { cacheRead: 5000, cacheWrite: 0, input: 10, output: 1 }, model: "claude-sonnet-5-5" } });
+  await x.emit("before_provider_request", { payload: anthropicPayload({ messages: [{ role: "user", content: "<title-request>" }] }) });
+  await x.emit("agent_end");
+  await run(t, 19);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].body.messages[0].content[0].text, "hi", "the replay is the answered request, not the side request");
+});
+
 test("compaction upkeep goes through the host's compact()", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "Date"], now: 5_000_000 });
   const x = await load(t, { PI_KEEPALIVE_UPKEEP: "compact", PI_KEEPALIVE_COMPACT_THRESHOLD: "1k", PI_KEEPALIVE_E2E: "1", PI_KEEPALIVE_E2E_TTL_MS: "20000" });
@@ -218,7 +217,10 @@ test("transport: fetch fallback covers openai styles, bad responses and registri
   assert.equal(seen[0].init.headers["x-session-affinity"], "s1");
   assert.equal(seen[0].init.headers["x-model"], "1");
   assert.equal(JSON.parse(seen[0].init.body).stream_options, undefined);
-  reply = { ok: false, status: 500 };
+  reply = { ok: false, status: 400, text: async () => '{"detail":\n  "Unsupported parameter: prompt_cache_retention"}' };
+  assert.deepEqual(await sendKeepalive({ modelRegistry: {} }, kimi, {}, new AbortController().signal, "", true),
+    { answered: false, reason: 'HTTP 400: {"detail": "Unsupported parameter: prompt_cache_retention"}' }, "the provider's reason, on one line");
+  reply = { ok: false, status: 500, text: async () => { throw new Error("reset"); } };
   assert.deepEqual(await sendKeepalive({ modelRegistry: {} }, kimi, {}, new AbortController().signal, "", true), { answered: false, reason: "HTTP 500" });
   reply = { ok: true, status: 200, json: async () => ({}) };
   assert.deepEqual(await sendKeepalive({ modelRegistry: { getApiKeyAndHeaders: async () => { throw new Error("x"); } } }, kimi, {}, new AbortController().signal, "", true), { answered: false, reason: "no usage" });
@@ -260,6 +262,60 @@ test("on a gateway the extension asks the policy with the session's credentials 
   x.ctx.modelRegistry.getApiKeyAndHeaders = async () => { throw new Error("no auth"); };
 });
 
+test("Codex: a documented 30m lifetime renewed by reads, side requests ignored, and keepalives replaying the rebuilt WebSocket conversation over SSE", async (t) => {
+  const calls = [];
+  const completed = { type: "response.completed", response: { prompt_cache_retention: "24h", usage: { input_tokens: 7201, input_tokens_details: { cached_tokens: 6656, cache_write_tokens: 0 }, output_tokens: 5 } } };
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    calls.push({ url: String(url), init });
+    return { ok: true, status: 200, text: async () => `event: response.completed\ndata: ${JSON.stringify(completed)}\n\n` };
+  });
+  t.mock.timers.enable({ apis: ["setInterval", "Date"], now: 9_000_000 });
+  const x = await load(t, { PI_KEEPALIVE_UPKEEP: "warm" });
+  x.ctx.model = { id: "gpt-6-luna", api: "openai-codex-responses", provider: "openai-codex", baseUrl: "https://chatgpt.com/backend-api" };
+  const user = (text) => ({ role: "user", content: [{ type: "input_text", text }] });
+  const frame = (extra) => ({ type: "response.create", model: "gpt-6-luna", stream: true, prompt_cache_key: "cache-key-1", store: false, client_metadata: { session_id: "cache-key-1" }, ...extra });
+  const answer = (id, text, usage) => x.emit("message_end", { message: { role: "assistant", stopReason: "stop", model: "gpt-6-luna", usage, responseId: id,
+    providerPayload: { type: "openaiResponsesHistory", items: [{ type: "message", role: "assistant", content: [{ type: "output_text", text }] }] } } });
+  // What OMP sends: a full first request, an answer, a title side request that never gets a message, then a WebSocket delta.
+  const side = frame({ input: [user("hi"), user("<title-request>")], client_metadata: { session_id: "cache-key-1:side:1" } });
+  await x.emit("session_start");
+  await x.emit("agent_start");
+  assert.equal(await x.emit("before_provider_request", { payload: frame({ input: [user("hi")] }) }), undefined, "the request is never rewritten");
+  await answer("resp_1", "OK", { cacheRead: 0, cacheWrite: 0, input: 7192, output: 5 });
+  await x.emit("before_provider_request", { payload: side });
+  await x.emit("agent_end");
+  await x.emit("agent_start");
+  assert.equal(await x.emit("before_provider_request", { payload: frame({ input: [user("again")], previous_response_id: "resp_1" }) }), undefined);
+  await answer("resp_2", "OK2", { cacheRead: 6656, cacheWrite: 0, input: 545, output: 5 });
+  await x.emit("before_provider_request", { payload: { ...side, client_metadata: { session_id: "cache-key-1:side:2" } } });
+  await x.emit("agent_end");
+  await run(t, 1);
+  const bar = strip(x.ui.status.at(-1));
+  assert.match(bar, /⬥ warm ▓*█*.* · ▣ 26m 59s/, "the documented lifetime counts down; no 5m/1h TTL is offered");
+  assert.doesNotMatch(bar, /TTL 5m/);
+  await x.commands.keepalive.handler("dashboard", x.ctx);
+  assert.match(strip(x.ui.widgets.at(-1).join("\n")), /▣ 30m · documented by the provider/);
+  assert.deepEqual(await x.emit("cache_warming_decision"), { action: "stop" });
+  await run(t, 1612);
+  assert.equal(calls.length, 0, "nothing before the last 5 s of the lifetime, and no policy request to chatgpt.com");
+  await run(t, 5);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(calls.length, 1);
+  const [keepalive] = calls;
+  assert.equal(keepalive.url, "https://chatgpt.com/backend-api/codex/responses");
+  assert.deepEqual([keepalive.init.headers.session_id, keepalive.init.headers.conversation_id, keepalive.init.headers.authorization, keepalive.init.headers.accept],
+    ["cache-key-1", "cache-key-1", "Bearer sk-test", "text/event-stream"]);
+  const body = JSON.parse(keepalive.init.body);
+  assert.deepEqual([body.type, body.stream, body.prompt_cache_key, body.previous_response_id], [undefined, true, "cache-key-1", undefined]);
+  assert.deepEqual(body.input.map((item) => item.content[0].text), ["hi", "OK", "again", "Reply with only: K"], "the whole conversation, not the delta or the title request");
+  await run(t, 1);
+  assert.match(strip(x.ui.status.at(-1)), /▣ 26m 5\ds · ↻1/, "the keepalive read the cache, so the lifetime starts again");
+  calls.length = 0;
+  const codex = source({ api: "openai-codex-responses", baseUrl: "https://chatgpt.com/backend-api", model: "gpt-6-luna" });
+  assert.equal((await sendKeepalive({}, codex, { input: [], stream: true }, new AbortController().signal, "sess-9", true)).usage.read, 6656);
+  assert.equal(calls[0].init.headers.session_id, "sess-9", "a body without prompt_cache_key is routed by the session id");
+});
+
 test("the harness is pi when the model registry can stream", async (t) => {
   const calls = [];
   t.mock.method(globalThis, "fetch", async (url, init) => { calls.push({ url, init }); return { status: 404, text: async () => "" }; });
@@ -299,4 +355,61 @@ test("odd hosts: failing UI, credential errors, our own compaction event, and th
   await y.commands.keepalive.handler("ttl 1h", y.ctx);
   await y.commands.keepalive.handler("ttl", y.ctx);
   assert.match(y.ui.notes.at(-1), /TTL: 5m/);
+});
+
+test("OMP usage: the 1h write share comes from cttl.ephemeral1h and the model from upstreamModel", async (t) => {
+  const x = await load(t);
+  await x.emit("session_start");
+  await x.emit("agent_start");
+  await x.emit("before_provider_request", { payload: anthropicPayload() });
+  await x.emit("message_end", { message: { role: "assistant", stopReason: "stop", model: "claude-sonnet-5-5", upstreamModel: "claude-sonnet-5-5-20261001",
+    usage: { cacheRead: 0, cacheWrite: 5000, input: 10, output: 1, cttl: { ephemeral1h: 5000 } } } });
+  await x.commands.keepalive.handler("dashboard", x.ctx);
+  const shown = strip(x.ui.widgets.at(-1).join("\n"));
+  assert.match(shown, /TTL 1h · 5k written · \S+ ~60:00 left/, "the write is booked as 1h although the request asked for the default");
+  assert.match(shown, /claude-sonnet-5-5-20261001/);
+});
+
+test("OMP usage without the 1h share in cttl books the write as 5m", async (t) => {
+  const x = await load(t);
+  await x.emit("session_start");
+  await x.commands.keepalive.handler("ttl 1h", x.ctx);
+  await x.emit("agent_start");
+  await x.emit("before_provider_request", { payload: anthropicPayload() });
+  await x.emit("message_end", { message: { role: "assistant", stopReason: "stop", model: "claude-sonnet-5-5", usage: { cacheRead: 0, cacheWrite: 800, input: 1, output: 1, cttl: { ephemeral5m: 800 } } } });
+  assert.match(strip(x.ui.status.at(-1)), /5m reported/);
+});
+
+test("Pi usage: the 1h write share comes from cacheWrite1h", async (t) => {
+  const x = await load(t);
+  await x.emit("session_start");
+  await x.emit("agent_start");
+  await x.emit("before_provider_request", { payload: anthropicPayload() });
+  await x.emit("message_end", { message: { role: "assistant", stopReason: "stop", model: "claude-sonnet-5-5", usage: { cacheRead: 0, cacheWrite: 900, cacheWrite1h: 900, input: 1, output: 1 } } });
+  await x.commands.keepalive.handler("dashboard", x.ctx);
+  assert.match(strip(x.ui.widgets.at(-1).join("\n")), /TTL 1h · 900 written/);
+});
+
+test("OMP subagent sessions get no keepalive: no status, no TTL rewrite, no warmer override", async (t) => {
+  const x = await load(t);
+  x.ctx.agent = { kind: "sub", id: "0-Explore", name: "explore", depth: 1 };
+  await x.emit("session_start");
+  assert.deepEqual(x.ui.status, []);
+  assert.equal(await turn(x), undefined);
+  assert.equal(await x.emit("cache_warming_decision"), undefined);
+});
+
+test("the data directory follows OMP's agent directory", async (t) => {
+  const agent = await mkdtemp(join(tmpdir(), "pi-keepalive-agent-"));
+  t.after(() => rm(agent, { recursive: true, force: true }));
+  const x = await load(t, { PI_KEEPALIVE_DIR: "" }, { pi: { getAgentDir: () => agent } });
+  await x.emit("session_start");
+  await x.commands.keepalive.handler("set compact_threshold 50k", x.ctx);
+  assert.equal(JSON.parse(readFileSync(join(agent, "keepalive", "settings.json"), "utf8")).compact_threshold, "50k");
+});
+
+test("an agent directory that cannot be read falls back to the module path", async (t) => {
+  const x = await load(t, {}, { pi: { getAgentDir: () => { throw new Error("no profile"); } } });
+  await x.emit("session_start");
+  assert.match(strip(x.ui.status.at(-1)), /TTL/);
 });

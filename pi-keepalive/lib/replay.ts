@@ -1,10 +1,14 @@
 // Build the keepalive request from the last real provider payload, and read its usage back.
 import { keepalivePrompt } from "./version.ts";
 
-export type ReplayApi = "anthropic-messages" | "openai-completions" | "openai-responses";
+export type ReplayApi = "anthropic-messages" | "openai-completions" | "openai-responses" | "openai-codex-responses";
 
-export function replayApi(api: string | undefined): ReplayApi | null {
-  return api === "anthropic-messages" || api === "openai-completions" || api === "openai-responses" ? api : null;
+/** ChatGPT's Codex backend (OMP's `openai-codex` provider, and providers that wrap it under another API name). */
+export const CODEX_BASE = /^https:\/\/chatgpt\.com\/backend-api\/?$/;
+
+export function replayApi(api: string | undefined, baseUrl?: string): ReplayApi | null {
+  if (api === "anthropic-messages" || api === "openai-completions" || api === "openai-responses" || api === "openai-codex-responses") return api;
+  return typeof api === "string" && /codex/.test(api) && api.endsWith("-responses") && CODEX_BASE.test(baseUrl ?? "") ? "openai-codex-responses" : null;
 }
 
 type Obj = Record<string, any>;
@@ -33,6 +37,13 @@ export function buildKeepalivePayload(api: ReplayApi | null, payload: unknown): 
     if (!Array.isArray(p.input)) return { ok: false, reason: "no input" };
     p.input.push({ role: "user", content: [{ type: "input_text", text }] });
     p.max_output_tokens = 16; // OpenAI rejects smaller values
+    if (api === "openai-codex-responses") {
+      // A WebSocket delta whose history this extension never saw: the HTTP endpoint refuses `previous_response_id`.
+      if (p.previous_response_id !== undefined) return { ok: false, reason: "conversation started before keepalive loaded" };
+      // OMP sends Codex requests as WebSocket `response.create` frames; the keepalive goes over HTTP, which takes the bare body.
+      delete p.type;
+      p.stream = true;
+    }
   }
   return { ok: true, payload: p };
 }
@@ -90,12 +101,30 @@ export function usageFromBody(api: ReplayApi, body: unknown): Tokens | null {
     return { read, write, fresh: Math.max(0, n(u.prompt_tokens) - read - write), output: n(u.completion_tokens) };
   }
   const read = n(u.input_tokens_details?.cached_tokens);
-  return { read, write: 0, fresh: Math.max(0, n(u.input_tokens) - read), output: n(u.output_tokens) };
+  const write = n(u.input_tokens_details?.cache_write_tokens);
+  return { read, write, fresh: Math.max(0, n(u.input_tokens) - read - write), output: n(u.output_tokens) };
 }
 
-/** Same URL construction the vendor SDKs use: Anthropic appends /v1/messages, OpenAI appends the route. */
+/** Same URL construction the vendor SDKs use: Anthropic appends /v1/messages, OpenAI appends the route, Codex /codex/responses. */
 export function endpointFor(api: ReplayApi, baseUrl: string): string {
   const base = baseUrl.replace(/\/+$/, "");
   if (api === "anthropic-messages") return base.endsWith("/v1") ? `${base}/messages` : `${base}/v1/messages`;
+  if (api === "openai-codex-responses") return `${base}/codex/responses`;
   return api === "openai-completions" ? `${base}/chat/completions` : `${base}/responses`;
+}
+
+/**
+ * The `usage` of the response's final event in a Responses SSE stream (the Codex backend only streams). A reasoning model can
+ * spend the keepalive's few output tokens before answering, which ends the response as `response.incomplete`; its usage
+ * still counts.
+ */
+export function usageFromSse(text: string): Tokens | null {
+  for (const line of text.split("\n")) {
+    if (!line.startsWith("data:") || !/"type":"response\.(completed|incomplete)"/.test(line)) continue;
+    try {
+      const event: unknown = JSON.parse(line.slice(5));
+      if (event && typeof event === "object" && "response" in event) return usageFromBody("openai-responses", event.response);
+    } catch { return null; }
+  }
+  return null;
 }
