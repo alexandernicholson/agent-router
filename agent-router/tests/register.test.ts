@@ -20,6 +20,10 @@ function agentInput(input: Partial<AgentSpawnInput>): AgentSpawnInput {
 
 type Log = { text: string; to: string };
 
+// What `git rev-parse` answers in the session directory: 0 inside a repository,
+// null when git is not installed.
+const git: { exitCode: number | null } = { exitCode: 0 };
+
 async function start($: Engine, on: On, failBridge = false, agents: Array<{ agentId: string; role: string; effectiveModel: string }> = [], calls: Record<string, unknown>[] = [], logs: Log[] = [], failAction = '', routing: Record<string, unknown> = policy, applied?: Record<string, unknown>) {
   mock.store(on);
   mock.env(on, {});
@@ -31,6 +35,10 @@ async function start($: Engine, on: On, failBridge = false, agents: Array<{ agen
   on('ui.log', ($, e) => { logs.push({ text: e.text, to: e.to }); return { value: undefined }; });
   on('ui.invalidate', () => ({ value: undefined }));
   on('process.run', ($, e) => {
+    if (e.argv[0] === 'git') {
+      if (git.exitCode === null) throw new Error('spawn git ENOENT');
+      return { value: { isStdoutTruncated: false, isStderrTruncated: false, exitCode: git.exitCode, stdout: '', stderr: '' } };
+    }
     const input = JSON.parse(e.init?.stdin || '{}');
     calls.push(input);
     const failed = failBridge || input.action === failAction;
@@ -136,14 +144,31 @@ test('resumed teammates retain pinned routing without changing the lead model or
   expect(leadChunks).toEqual([{ kind: 'text', index: 0, text: 'vendor/lead-v1' }]);
 });
 
-test('remote tool dispatch cannot escape the local plugin and profile', async ($, on) => {
-  let started = false;
-  on('tool.call', () => { started = true; return { deny: 'unexpected remote launch' }; });
+test('a remote agent call runs locally, in a worktree where Claude Code can make one, keeping its routing', async ($, on) => {
+  const seen: Record<string, unknown>[] = [];
+  let hooks: Record<string, unknown> | undefined;
+  on('tool.call', ($, e) => { seen.push(e as Record<string, unknown>); return { result: 'launched' }; });
+  on('session.cwd', () => ({ value: '/work' }));
+  on('settings.read', () => ({ value: hooks ? { hooks } : {} }));
   await start($, on);
-  const result = await $.tool.call({ tool: 'Agent', tool_use_id: 'remote-call', prompt: 'Work',
-    description: 'Remote probe', subagent_type: 'agent-router:scout', isolation: 'remote' });
-  expect(typeof result.deny).toBe('string');
-  expect(started).toBe(false);
+  const launch = async (subagent_type: string, extra: Record<string, unknown> = {}) => {
+    const result = await $.tool.call({ tool: 'Agent', tool_use_id: `remote-${seen.length}`, prompt: 'Work',
+      description: 'Remote probe', subagent_type, isolation: 'remote', ...extra });
+    expect('deny' in result).toBe(false);
+    const { subagent_type: type, isolation, cwd } = seen.at(-1)!;
+    return [type, isolation, cwd];
+  };
+  expect(await launch('agent-router:scout')).toEqual(['agent-router:scout', 'worktree', undefined]);
+  expect(await launch('Explore')).toEqual(['Explore', 'worktree', undefined]);
+  expect(await launch('Explore', { cwd: '/elsewhere' })).toEqual(['Explore', undefined, '/elsewhere']);
+  git.exitCode = 128;
+  try {
+    expect(await launch('agent-router:scout')).toEqual(['agent-router:scout', undefined, undefined]);
+    git.exitCode = null;
+    expect(await launch('agent-router:scout')).toEqual(['agent-router:scout', undefined, undefined]);
+    hooks = { WorktreeCreate: [] };
+    expect(await launch('agent-router:scout')).toEqual(['agent-router:scout', 'worktree', undefined]);
+  } finally { git.exitCode = 0; }
 });
 
 test('completed-turn observations never include the agent answer', async ($, on) => {

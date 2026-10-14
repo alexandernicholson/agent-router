@@ -1,4 +1,4 @@
-import type { AgentInfo, On, PluginOptions, Timer } from 'claude-code';
+import type { AgentInfo, EngineInterface, On, PluginOptions, Timer } from 'claude-code';
 import { routeAgent, routeTeammate, validatePolicy, sameModel, isTruthy, isTeammate } from '../lib/routing.js';
 import { createModelPicker, type ModelPickerHost } from './model-picker';
 import { createStatsPanel } from './stats-panel';
@@ -21,6 +21,16 @@ function pinned(e: { model: string; effort?: Effort | number }, assignment: Assi
   // An absent effort means the model takes none, so none is forced on it.
   return assignment.effort !== undefined && e.effort !== undefined
     ? { model: assignment.model, effort: assignment.effort } : { model: assignment.model };
+}
+
+// Claude Code makes an agent worktree in a git repository or through a
+// WorktreeCreate hook; worktree isolation and cwd are mutually exclusive.
+async function worktreeable($: EngineInterface, cwd: unknown) {
+  if (cwd !== undefined) return false;
+  const { hooks } = await $.settings.read();
+  if (hooks && typeof hooks === 'object' && 'WorktreeCreate' in hooks) return true;
+  const git = await $.process.run(['git', 'rev-parse', '--git-dir'], { cwd: await $.session.cwd(), timeoutMs: 5000 }).catch(() => undefined);
+  return git?.exitCode === 0;
 }
 
 export function register(on: On, options: PluginOptions) {
@@ -59,7 +69,14 @@ export function register(on: On, options: PluginOptions) {
       return input.subagent_type?.startsWith('agent-router:')
         ? { deny: 'Configure an Anthropic-compatible endpoint before using an Agent Router role.' } : next(e);
     }
-    if (input.isolation === 'remote') return { deny: 'Remote agents cannot inherit the local Agent Router Mod. Use a local role.' };
+    // A remote agent runs without this Mod, so its role's model and effort could
+    // not apply. Run it where Claude Code runs a remote call it cannot send (no
+    // claude.ai login, as with a gateway): in a worktree when one can be made,
+    // else in place.
+    if (input.isolation === 'remote') {
+      const { isolation: _remote, ...local } = e as Record<string, unknown>;
+      e = (await worktreeable($, local.cwd) ? { ...local, isolation: 'worktree' } : local) as typeof e;
+    }
     const call = e as unknown as AgentCall;
     const teamsEnabled = isTruthy(await $.env.get('CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS'));
     // Only a named, unisolated call from the lead's main loop can become a teammate.

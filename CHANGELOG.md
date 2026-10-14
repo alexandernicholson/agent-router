@@ -2,6 +2,10 @@
 
 Each release explains what changed for you, in 120 words or less.
 
+## Agent Router 0.17.1
+
+- **Agents asked to run remotely start instead of failing.** When Claude asked for an agent with `isolation: "remote"`, Agent Router refused it with "Remote agents cannot inherit the local Agent Router Mod", for every agent type, and Claude kept retrying other types until it gave up. Through a gateway such as an API key endpoint, Claude Code cannot run remote agents anyway and runs them locally. Agent Router now does the same for every remote call: the agent starts in a worktree in a git repository, or in place outside one, with its role's model and effort.
+
 ## Keepalive 0.4.9
 
 - **A TTL switched between messages now takes hold at the next keepalive.** Changing 5m to 1h without sending a message sent the keepalive at 1h, which rewrote the cache for an hour, but the bar kept counting down the old 5 minutes and the keepalive economics counted the rewrite as one very expensive keepalive, so warming stopped and the bar showed the cache expiring. A keepalive that rewrites the cache now sets its lifetime: the bar counts down the hour, and warming starts afresh.
