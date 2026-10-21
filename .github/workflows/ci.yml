@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_native:
+        description: Run native Mod, full coverage and live cache tests
+        type: boolean
+        default: false
+      claude_version:
+        description: Exact Claude Code version with function hooks and plugin test
+        type: string
+        default: '2.1.304'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deterministic:
+    name: Tests and types (${{ matrix.os }}, Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: ['22.x', '24.x']
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            agent-router/package-lock.json
+            keepalive/package-lock.json
+      - run: npm ci
+      - run: npm ci --prefix agent-router
+      - run: npm ci --prefix keepalive
+      - name: Shared-copy checks and all Node suites
+        run: npm test
+      - name: All TypeScript checks
+        run: npm run typecheck
+
+  node-coverage:
+    name: Node coverage (100%)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          # coverage.mjs uses --test-isolation, renamed in Node 23.6.
+          node-version: '24.x'
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm run coverage -- node --html
+      - name: Save Node coverage report, including on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-coverage
+          path: coverage/
+          if-no-files-found: warn
+          retention-days: 14
+
+  native:
+    name: Native Mod, full coverage (100%) and live cache
+    # Opt in after verifying that the selected release exposes plugin test.
+    # Hosted runners only: PR code never runs on a developer's machine.
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.run_native) ||
+      (github.event_name != 'workflow_dispatch' && vars.CLAUDE_CODE_VERSION != '')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CLAUDE_CODE_VERSION: ${{ inputs.claude_version || vars.CLAUDE_CODE_VERSION }}
+      CLAUDE_CODE_ENABLE_FUNCTION_HOOKS: '1'
+      DISABLE_TELEMETRY: '1'
+      CLAUDE_BINARY: claude
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.x'
+          cache: npm
+      - run: npm ci
+      - name: Install exact Claude Code release and tmux
+        shell: bash
+        run: |
+          if [[ ! "$CLAUDE_CODE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo 'CLAUDE_CODE_VERSION must be an exact x.y.z release' >&2
+            exit 1
+          fi
+          npm install --global "@anthropic-ai/claude-code@$CLAUDE_CODE_VERSION"
+          sudo apt-get update
+          sudo apt-get install --yes tmux
+      - name: Verify native execution prerequisites
+        run: |
+          claude --version
+          claude plugin test --help
+          tmux -V
+      - run: npm run check
+      - name: Native function-hook regression suites
+        timeout-minutes: 5
+        run: npm run test:mod
+      - name: Full Node and native coverage without lowering thresholds
+        timeout-minutes: 10
+        run: npm run coverage -- --html
+      - name: Real CLI against local mock API, including interactive teammates
+        timeout-minutes: 15
+        run: npm --prefix keepalive run test:cache-live
+      - name: Save full coverage report, including on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-coverage
+          path: coverage/
+          if-no-files-found: warn
+          retention-days: 14
