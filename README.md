@@ -50,6 +50,8 @@ Claude Code runs each plugin's hooks in the order the plugins are listed in your
 
 ## Development
 
+GitHub Actions checks all Node suites and TypeScript components on Ubuntu/macOS with Node 22/24, plus a 100% Node coverage gate. See [CI and native test setup](docs/ci.md) for enabling Claude Code Mod tests, the full 100% coverage gate, and validation requiring Tern or real Pi/OMP clients.
+
 ```text
 .claude-plugin/marketplace.json   Claude Code marketplace catalog (Agent Router, Keepalive)
 .omp-plugin/marketplace.json      OMP marketplace catalog (Keepalive, from pi-keepalive/)

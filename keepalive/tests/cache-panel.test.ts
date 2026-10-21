@@ -49,7 +49,10 @@ async function setup($: Engine, on: On, endpoint = 'https://gateway.example', st
     reported: undefined as { fiveMinute: number; oneHour: number } | undefined,
     flushed: undefined as { fiveMinute: number; oneHour: number } | undefined,
     forks: [] as string[], fetches: [] as { url: string; headers?: Record<string, string>; method?: string; body?: string }[], reportStatus: 200, reportFail: false, policy: null as null | Record<string, unknown>[], policyStatus: 200, compactions: [] as string[], theme: 'dark',
-    forkUsage: { input_tokens: 10, output_tokens: 2, cache_read_input_tokens: 900, cache_creation_input_tokens: 0 },
+    forkUsage: { input_tokens: 10, output_tokens: 2, cache_read_input_tokens: 900, cache_creation_input_tokens: 0 } as {
+      input_tokens: number; output_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number;
+      cache_creation?: { ephemeral_5m_input_tokens: number; ephemeral_1h_input_tokens: number };
+    },
     compaction: {} as Record<string, unknown>,
     prices: { 'vendor/main': { read: 0.1, fiveMinute: 1.25, output: 5, provider: 'example', id: 'main-1', source: 'models.dev' } } as Record<string, unknown>,
     priceLookups: [] as string[][], pricesFail: false,
